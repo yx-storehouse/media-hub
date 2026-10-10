@@ -1,0 +1,85 @@
+/* Reset + app shell + layout utilities */
+* { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+html, body { height: 100%; }
+body {
+  background: #000;
+  color: var(--t1);
+  font: 14px/1.4 var(--font);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  text-size-adjust: 100%;
+  -webkit-text-size-adjust: 100%;
+  overscroll-behavior: none;
+}
+button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+input { font: inherit; outline: 0; }
+a { color: inherit; text-decoration: none; }
+svg { display: block; flex: none; }
+img { display: block; }
+
+/* keyboard focus ring (mouse and touch never show it) */
+:where(button, a, [role="button"]):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* inside clipped horizontal scrollers the ring would be cut off, so draw it inside */
+.hs :where(button, a, [role="button"]):focus-visible { outline-offset: -2px; }
+
+/* outline icons (see src/icons) */
+.ic { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+/* App column: full screen on phones, a centred phone-width column on wider screens */
+#app {
+  position: relative;
+  width: 100%;
+  max-width: 480px;
+  height: 100vh; /* older WebViews without dvh, see @supports below */
+  margin: 0 auto;
+  overflow: hidden;
+  background: var(--bg);
+  isolation: isolate;
+}
+/* dynamic viewport height follows the mobile browser toolbars (kept in @supports so minifiers can't drop the fallback) */
+@supports (height: 100dvh) {
+  #app { height: 100dvh; }
+}
+@media (min-width: 481px) {
+  #app { box-shadow: 0 0 0 1px var(--chip); }
+}
+.shell { position: absolute; inset: 0; }
+
+/* Every route renders one .page */
+.page {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  padding-top: var(--safe-t);
+  background: var(--bg);
+}
+.has-tabbar .page { bottom: calc(var(--tabbar-h) + var(--safe-b)); }
+
+/* vertical scroller that fills the rest of the page */
+.scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+/* horizontal scroller */
+.hs {
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+.scroll::-webkit-scrollbar, .hs::-webkit-scrollbar { display: none; }
+.pad-b { height: 16px; }
+
+/* shared animations */
+.fade-in { animation: fi .28s ease; }
+@keyframes fi { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+.spin svg { animation: rot .5s linear; }
+@keyframes rot { to { transform: rotate(360deg); } }
+@keyframes pop { 40% { transform: scale(1.28); } }
+@keyframes blink { 50% { opacity: .25; } }

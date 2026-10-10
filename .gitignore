@@ -1,0 +1,20 @@
+node_modules
+dist
+*.local
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+.idea
+
+# reference material, not part of the app source
+模板/
+
+# SQLite 数据库文件（本地生成，不入库）
+server/db/*.db
+server/db/*test.db
+server/db/*.db-wal
+server/db/*.db-shm
+
+# 管理后台的素材文件夹（上传的视频 / 图片，体积大，不入库）
+media/

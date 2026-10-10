@@ -1,0 +1,192 @@
+/*
+ * 管理后台：设计变量 + 基础样式 + 共用工具类。
+ * 只在 admin.html 里加载，和移动端应用的 src/styles 互不影响。
+ * 风格与应用一致（黑白灰），但更紧凑；颜色只有 danger / warn / ok 三个点缀，用在徽标、校验和结果计数上。
+ */
+:root {
+  --bg: #0b0b0b;
+  --panel: #121212;
+  --panel-2: #181818;
+  --hover: #1f1f1f;
+  --line: #262626;
+  --line-2: #333;
+  --t1: #f2f2f2;
+  --t2: #a3a3a3;
+  --t3: #6f6f6f;
+  --accent: #ffffff;
+  --on-accent: #0b0b0b;
+  --danger: #ff6b6b;
+  --warn: #e3b341;
+  --ok: #8bd5a0;
+  --radius: 8px;
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --field: #141414;
+  --sidebar-w: 220px;
+  --shadow: 0 12px 40px rgba(0, 0, 0, .55);
+  /* 原生控件（日期选择、滚动条）也用深色 */
+  color-scheme: dark;
+}
+
+/* ---------------- reset ---------------- */
+*, *::before, *::after { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  background: var(--bg);
+  color: var(--t1);
+  font: 13px/1.5 var(--font);
+  -webkit-font-smoothing: antialiased;
+  text-size-adjust: 100%;
+}
+h1, h2, h3, h4, h5, p, ul, ol, dl, dd, figure { margin: 0; padding: 0; }
+ul, ol { list-style: none; }
+button, input, select, textarea { font: inherit; color: inherit; }
+button { padding: 0; border: 0; background: none; cursor: pointer; }
+button:disabled { cursor: not-allowed; }
+a { color: inherit; text-decoration: none; }
+img, svg, video { display: block; }
+svg { flex: none; }
+table { border-collapse: collapse; }
+::placeholder { color: var(--t3); opacity: 1; }
+::selection { background: rgba(255, 255, 255, .22); }
+
+/* 键盘焦点环（鼠标点击不出现） */
+:focus { outline: 0; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* 文字类输入框用自己的边框 + 光晕表示焦点；复选框 / 单选框没有替代样式，保留焦点环 */
+input:not([type="checkbox"]):not([type="radio"]):focus-visible, textarea:focus-visible, select:focus-visible { outline: 0; }
+
+/* 深色细滚动条 */
+* { scrollbar-width: thin; scrollbar-color: #3a3a3a transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 6px; background: #3a3a3a padding-box; }
+::-webkit-scrollbar-thumb:hover { background-color: #4a4a4a; }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+
+input[type="checkbox"], input[type="radio"] { width: 15px; height: 15px; margin: 0; accent-color: var(--accent); cursor: pointer; vertical-align: middle; }
+input[type="checkbox"]:focus-visible, input[type="radio"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ---------------- 输入框统一外观（TextInput / TextArea / NumberInput / SelectInput 等共用） ---------------- */
+.a-input {
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  background: var(--field);
+  color: var(--t1);
+  line-height: 30px;
+  transition: border-color .12s, box-shadow .12s;
+}
+.a-input:hover:not(:disabled) { border-color: #454545; }
+.a-input:focus, .a-input:focus-within, .a-input.is-focus { border-color: #8a8a8a; box-shadow: 0 0 0 3px rgba(255, 255, 255, .08); }
+.a-input:disabled, .a-input.is-disabled { opacity: .55; cursor: not-allowed; }
+.a-input[aria-invalid="true"], .a-input.is-invalid { border-color: rgba(255, 107, 107, .7); }
+.a-input.sm { height: 28px; line-height: 26px; font-size: 12.5px; }
+textarea.a-input { height: auto; padding: 7px 10px; line-height: 1.55; resize: vertical; }
+
+/* ---------------- 页面骨架 ---------------- */
+/* 列表页：页头 + 筛选栏 + 表格（占满剩余高度，表头吸顶）+ 分页 + 批量操作条 */
+.list-page { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.list-page > .table-area { display: flex; flex: 1; flex-direction: column; min-height: 220px; margin: 0 24px; }
+/* 普通页面（概览、导入等）：在内容区里自然滚动 */
+.page-body { padding: 0 24px 32px; }
+
+.filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 0 24px 12px; }
+.filters > .grow { flex: 1; }
+/* 筛选栏里的输入框 / 下拉一律和搜索框一样高（32px），页面传了 size="sm" 也一样，免得一排控件高低不齐 */
+.filters .a-input.sm { height: 32px; line-height: 30px; font-size: 13px; }
+.filters .reset { color: var(--t2); font-size: 12.5px; text-decoration: underline; text-underline-offset: 3px; }
+.filters .reset:hover { color: var(--t1); }
+
+.card { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+.card-hd { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 16px; border-bottom: 1px solid var(--line); font-weight: 600; }
+.card-bd { padding: 14px 16px; }
+
+/* 抽屉里的表单：两列网格，.full 占整行 */
+.form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 16px; }
+.form-grid > .full { grid-column: 1 / -1; }
+.form-section { margin: 22px 0 12px; padding-bottom: 6px; border-bottom: 1px solid var(--line); color: var(--t2); font-size: 12px; font-weight: 600; letter-spacing: .04em; }
+.form-section:first-child { margin-top: 0; }
+@media (max-width: 640px) {
+  .form-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* 只读信息（创建时间、播放数…） */
+.kv { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px 16px; }
+.kv dt { color: var(--t3); font-size: 12px; }
+.kv dd { margin-top: 2px; color: var(--t1); font-variant-numeric: tabular-nums; }
+
+/* ---------------- 小工具类 ---------------- */
+.muted { color: var(--t2); }
+.dim { color: var(--t3); }
+.danger-text { color: var(--danger); }
+.warn-text { color: var(--warn); }
+.ok-text { color: var(--ok); }
+.num { font-variant-numeric: tabular-nums; }
+.mono { font-family: var(--mono); font-size: 12px; }
+.small { font-size: 12px; }
+.nowrap { white-space: nowrap; }
+.ellipsis { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.clamp-2 { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.row { display: flex; align-items: center; gap: 8px; }
+.row.wrap { flex-wrap: wrap; }
+.col { display: flex; flex-direction: column; gap: 8px; }
+.grow { flex: 1; min-width: 0; }
+.sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+
+/* 文字链接按钮（表格里的「编辑」「删除」等） */
+.link { color: var(--t1); text-decoration: underline; text-decoration-color: rgba(255, 255, 255, .25); text-underline-offset: 3px; cursor: pointer; }
+.link:hover { text-decoration-color: currentColor; }
+.title-link { color: var(--t1); font-weight: 500; text-align: left; cursor: pointer; }
+.title-link:hover { text-decoration: underline; text-underline-offset: 3px; }
+
+/* 小标签 */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 10px;
+  background: #222;
+  color: var(--t2);
+  font-size: 11.5px;
+  line-height: 20px;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.chip.solid { background: var(--accent); color: var(--on-accent); font-weight: 600; }
+.chip.outline { background: transparent; box-shadow: inset 0 0 0 1px var(--line-2); }
+.chip.ok { background: rgba(139, 213, 160, .12); color: var(--ok); }
+.chip.warn { background: rgba(227, 179, 65, .12); color: var(--warn); }
+.chip.danger { background: rgba(255, 107, 107, .12); color: var(--danger); }
+
+.kbd { display: inline-block; min-width: 18px; height: 18px; padding: 0 4px; border: 1px solid var(--line-2); border-radius: 4px; color: var(--t2); font: 11px/16px var(--mono); text-align: center; }
+
+/* 加载转圈（ABtn / DataTable / 页面加载） */
+.spinner {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(255, 255, 255, .18);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: a-spin .7s linear infinite;
+  vertical-align: middle;
+}
+.spinner.lg { width: 26px; height: 26px; border-width: 2.5px; }
+@keyframes a-spin { to { transform: rotate(360deg); } }
+
+/* 进度条 */
+.progress { position: relative; height: 4px; overflow: hidden; border-radius: 2px; background: #262626; }
+.progress > i { position: absolute; inset: 0 auto 0 0; border-radius: 2px; background: var(--accent); transition: width .2s; }
+
+/* 加载失败 / 空提示的通用块 */
+.state { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 48px 16px; color: var(--t2); text-align: center; }
+
+/* 减少动态效果：去掉过渡动画（转圈保留，它表示「还在加载」） */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition-duration: .01ms !important; }
+}

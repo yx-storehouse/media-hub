@@ -1,0 +1,21 @@
+/* Design tokens — monochrome theme: black surfaces, white accent, neutral greys. */
+:root {
+  --bg: #0a0a0a;
+  --panel: #111111;
+  --chip: #161616;
+  --line: #1c1c1c;
+  --field: #1a1a1a;
+  --accent: #ffffff;
+  --on-accent: #0a0a0a;
+  --t1: #ffffff;
+  --t2: #8c8c8c;
+  --t3: #e6e6e6;
+  --t-card: #9a9a9a;
+  --tag: #a6a6a6;
+  /* filter applied to photos: `none` keeps their colours, `grayscale(1)` makes them black-and-white too */
+  --media: none;
+  --tabbar-h: 61px;
+  --safe-t: env(safe-area-inset-top, 0px);
+  --safe-b: env(safe-area-inset-bottom, 0px);
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+}
