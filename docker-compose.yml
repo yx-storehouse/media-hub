@@ -1,5 +1,5 @@
 # Reel 部署：docker compose up -d --build
-# 浏览器访问 http://<主机>:3000/（手机端）和 http://<主机>:3000/admin（管理后台）
+# 浏览器访问 http://<主机>:27381/（手机端）和 http://<主机>:27381/admin（管理后台）
 services:
   reel:
     build:
@@ -11,7 +11,7 @@ services:
     init: true                 # 让 docker stop 能正常结束 Node 进程
     restart: unless-stopped
     ports:
-      - "${REEL_PORT:-3000}:3000"
+      - "${REEL_PORT:-27381}:3000"   # 宿主机端口:容器内端口；用冷门端口，避免和别的服务抢 3000
     environment:
       TZ: Asia/Shanghai        # 「最新」按本地日期分天，时区要对
       # MAX_UPLOAD_MB: "8192"  # 单个上传文件的上限（MB）
