@@ -41,7 +41,14 @@ docker compose up -d --build
   ```
 
 - 容器以 uid 1000 运行，`data/`、`media/` 要让 uid 1000 可写（NAS 上一般就是第一个用户），否则用 `chown -R 1000:1000 data media`。
-- 更新代码：把新代码拷过去覆盖（不要动 `data/` 和 `media/`），再 `docker compose up -d --build`。
+- 更新代码：在本机运行部署脚本，它会上传代码、先备份数据库、再重建容器并等到健康检查通过（不会碰服务器上的 `data/` 和 `media/`）：
+
+  ```bash
+  DEPLOY_HOST=root@服务器 DEPLOY_DIR=/服务器上的/reel 目录 bash scripts/deploy.sh
+  ```
+
+  需要能用 SSH 密钥免密登录服务器。也可以手动把代码拷过去覆盖，再 `docker compose up -d --build`。
+- 数据库备份：每次用脚本部署前自动备份到 `data/backups/`（默认保留最近 10 份）；随时手动备份：`docker compose exec reel node server/backup-db.mjs /data/backups`。恢复时停掉容器，把备份文件改名覆盖 `data/reel.db` 再启动。
 - 国内拉 npm 依赖慢时：`NPM_REGISTRY=https://registry.npmmirror.com docker compose build`。
 - 没有 HTTPS，`/media/` 下的文件也不需要登录就能访问，适合内网使用；要放到公网，请在前面加一层带 HTTPS 的反向代理。
 

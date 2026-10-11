@@ -15,6 +15,7 @@ server/db/*.db
 server/db/*test.db
 server/db/*.db-wal
 server/db/*.db-shm
+server/db/backups/
 
 # 管理后台的素材文件夹（上传的视频 / 图片，体积大，不入库）
 /media/
