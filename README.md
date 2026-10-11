@@ -24,6 +24,27 @@ npm run dev                                  # 另开一个终端：前端开发
 部署时只需要一个进程：`npm run build` 打包到 `dist/`，再运行 `node server/index.mjs`，
 手机端是 `http://服务器:3000/`，管理后台是 `http://服务器:3000/admin`。
 
+## Docker 部署
+
+仓库自带 `Dockerfile` 和 `docker-compose.yml`，把整个项目目录拷到服务器（NAS）上，在目录里运行：
+
+```bash
+docker compose up -d --build
+```
+
+- 访问 `http://服务器:3000/`（手机端）和 `http://服务器:3000/admin`（管理后台）。端口可以用环境变量改：`REEL_PORT=8088 docker compose up -d`。
+- 数据都在目录里的两个文件夹：`data/`（数据库 `reel.db`）、`media/`（视频、封面）。重建镜像、升级都不会丢，备份这两个文件夹即可。
+- 第一次启动时 `data/` 里没有数据库，会自动建库并写入示例数据。建管理员：
+
+  ```bash
+  docker compose exec reel node server/create-admin.mjs 登录名 密码
+  ```
+
+- 容器以 uid 1000 运行，`data/`、`media/` 要让 uid 1000 可写（NAS 上一般就是第一个用户），否则用 `chown -R 1000:1000 data media`。
+- 更新代码：把新代码拷过去覆盖（不要动 `data/` 和 `media/`），再 `docker compose up -d --build`。
+- 国内拉 npm 依赖慢时：`NPM_REGISTRY=https://registry.npmmirror.com docker compose build`。
+- 没有 HTTPS，`/media/` 下的文件也不需要登录就能访问，适合内网使用；要放到公网，请在前面加一层带 HTTPS 的反向代理。
+
 需要 Node.js 20.19+ 或 22.12+（推荐 22 LTS，见 `.nvmrc`）。
 
 打包产物兼容 iOS 14+ 的 Safari / WKWebView、Android System WebView（Chrome）87+。

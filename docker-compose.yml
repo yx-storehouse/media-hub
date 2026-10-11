@@ -1,0 +1,20 @@
+# Reel 部署：docker compose up -d --build
+# 浏览器访问 http://<主机>:3000/（手机端）和 http://<主机>:3000/admin（管理后台）
+services:
+  reel:
+    build:
+      context: .
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org}
+    image: reel:latest
+    container_name: reel
+    init: true                 # 让 docker stop 能正常结束 Node 进程
+    restart: unless-stopped
+    ports:
+      - "${REEL_PORT:-3000}:3000"
+    environment:
+      TZ: Asia/Shanghai        # 「最新」按本地日期分天，时区要对
+      # MAX_UPLOAD_MB: "8192"  # 单个上传文件的上限（MB）
+    volumes:
+      - ./data:/data           # 数据库 reel.db
+      - ./media:/media         # 素材文件（视频、封面、图片）

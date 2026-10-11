@@ -1,0 +1,16 @@
+node_modules
+dist
+.git
+.claude
+.vscode
+.idea
+media
+data
+模板
+server/db/*.db
+server/db/*.db-wal
+server/db/*.db-shm
+server/test-*.mjs
+*.log
+.env
+.env.*

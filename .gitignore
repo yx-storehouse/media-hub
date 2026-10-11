@@ -17,4 +17,7 @@ server/db/*.db-wal
 server/db/*.db-shm
 
 # 管理后台的素材文件夹（上传的视频 / 图片，体积大，不入库）
-media/
+/media/
+
+# docker compose 的数据目录（数据库）
+/data/
