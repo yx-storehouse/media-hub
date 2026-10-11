@@ -325,6 +325,22 @@ await t('schema：字段定义完整、别名不冲突', async () => {
   return Object.values(d).map(s => `${s.label}${s.fields.length}`).join(' ')
 })
 
+await t('schema：帖子「标题」「正文」两列，常见写法各归各的', async () => {
+  must(SCHEMA, 'schema 没取到')
+  const fs = SCHEMA.posts.fields
+  const keys = fs.map(f => f.key)
+  const text = fs.find(f => f.key === 'text'), content = fs.find(f => f.key === 'content')
+  must(text?.label === '标题' && content?.label === '正文', `表头 ${text?.label} / ${content?.label}`)
+  must(keys.indexOf('content') === keys.indexOf('text') + 1, '正文应紧跟在标题后面：' + keys.join())
+  must(text.required && !content.required && content.type === 'longtext' && /20000/.test(content.help), '必填 / 类型 / 说明')
+  const owner = name => fs.find(f => [f.key, f.label, ...f.aliases].map(normHeader).includes(normHeader(name)))?.key
+  for (const n of ['标题', 'title', 'text', '帖子标题', '文案', 'Title']) must(owner(n) === 'text', `「${n}」应对应标题，实际 ${owner(n)}`)
+  for (const n of ['正文', 'content', 'body', '内容', '正文内容', '详情', '详情正文', '帖子正文', '帖子内容', '正文（选填）']) {
+    must(owner(n) === 'content', `「${n}」应对应正文，实际 ${owner(n)}`)
+  }
+  return '标题：' + text.aliases.join('/') + '；正文：' + content.aliases.join('/')
+})
+
 /* ================================================================ */
 /*  视频                                                             */
 /* ================================================================ */
@@ -574,14 +590,14 @@ await t('帖子校验：错误带 field', async () => {
   return `${cases.length} 种`
 })
 
-await t('帖子修改：正文同步全文索引（posts_fts_update）', async () => {
+await t('帖子修改：标题同步全文索引（posts_fts_update）', async () => {
   const d = await patch(`/api/admin/posts/${P1.id}`, { text: '全新的帖子正文测试', tags: ['新标签'] })
   must(d.text === '全新的帖子正文测试' && d.tags[0] === '新标签', '修改')
   must(d.mainImage === '/media/images/m.jpg' && d.images.length === 2, '没传媒体不应改')
   const hitNew = dbq('SELECT rowid FROM posts_fts WHERE posts_fts MATCH ?', '"全新的帖子正文"')
   const hitOld = dbq('SELECT rowid FROM posts_fts WHERE posts_fts MATCH ?', '"原始帖子正文"')
-  must(hitNew.some(r => r.rowid === P1.id), '新正文搜不到')
-  must(!hitOld.some(r => r.rowid === P1.id), '旧正文还能搜到')
+  must(hitNew.some(r => r.rowid === P1.id), '新标题搜不到')
+  must(!hitOld.some(r => r.rowid === P1.id), '旧标题还能搜到')
   const trig = dbq("SELECT 1 x FROM sqlite_master WHERE type = 'trigger' AND name = 'posts_fts_update'")
   must(trig.length === 1, '触发器不存在')
   return '索引已更新'
@@ -607,7 +623,7 @@ await t('帖子列表：筛选 / 排序', async () => {
   must((await get('/api/admin/posts?creatorId=1')).list.every(p => p.creatorId === 1), '发布者筛选')
   must((await get('/api/admin/posts?isHot=1')).total === 1, '热门筛选')
   must((await get('/api/admin/posts?mediaKind=2')).list.every(p => p.mediaKind === 2), '类型筛选')
-  must((await get('/api/admin/posts?q=' + encodeURIComponent('川西'))).total === 1, '正文搜索')
+  must((await get('/api/admin/posts?q=' + encodeURIComponent('川西'))).total === 1, '标题搜索')
   must((await get('/api/admin/posts?q=' + encodeURIComponent('新标签'))).total === 1, '标签搜索')
   const byRead = await get('/api/admin/posts?sort=readCount&order=desc')
   must(byRead.list.every((p, i) => i === 0 || byRead.list[i - 1].readCount >= p.readCount), '阅读数排序')
@@ -636,6 +652,43 @@ await t('帖子批量：全部动作', async () => {
   must((await del(`/api/admin/posts/${single.id}`)).ok, '单条删除')
   mustFail(await req('GET', `/api/admin/posts/${single.id}`), undefined, 400, /帖子不存在/)
   return 'ok'
+})
+
+await t('帖子详情正文：新建 / 修改 / 清空 / 列表搜索', async () => {
+  const p = await post('/api/admin/posts', { creatorId: 3, text: '正文测试帖', content: '第一段 风铃草  \r\n第二行\t\r\n\r\n\r\n　　第三段缩进保留\n\n  ' })
+  must(p.content === '第一段 风铃草\n第二行\n\n\n　　第三段缩进保留', '统一换行、去行尾空白和首尾空白：' + JSON.stringify(p.content))
+  must(dbq('SELECT content FROM posts WHERE id = ?', p.id)[0].content === p.content, '库里的值')
+  must((await get(`/api/admin/posts/${p.id}`)).content === p.content, '单条读取')
+  must((await get('/api/admin/posts?q=' + encodeURIComponent('风铃草'))).list.map(x => x.id).join() === String(p.id), '列表搜索应能搜到正文')
+  must((await get('/api/admin/posts?q=' + encodeURIComponent('正文测试帖'))).list.find(x => x.id === p.id)?.content === p.content, '列表行带 content')
+  must((await patch(`/api/admin/posts/${p.id}`, { readCount: 5 })).content === p.content, '没传 content 不应改')
+  const d = await patch(`/api/admin/posts/${p.id}`, { content: '改过的正文' })
+  must(d.content === '改过的正文' && d.text === '正文测试帖', '修改 ' + JSON.stringify([d.text, d.content]))
+  must((await patch(`/api/admin/posts/${p.id}`, { content: ' \n ' })).content === '', '只有空白 = 清空')
+  await patch(`/api/admin/posts/${p.id}`, { content: 'x' })
+  must((await patch(`/api/admin/posts/${p.id}`, { content: null })).content === '', 'null = 清空')
+  const plain = await post('/api/admin/posts', { creatorId: 3, text: '没有正文的帖子' })
+  must(plain.content === '' && dbq('SELECT content FROM posts WHERE id = ?', plain.id)[0].content === '', '不传时默认空串')
+  must((await patch(`/api/admin/posts/${p.id}`, { text: '改了标题' })).content === '', '改标题不动正文')
+  await del(`/api/admin/posts/${plain.id}`)
+  await del(`/api/admin/posts/${p.id}`)
+  return '规范化 / 留空不改 / 清空 / 搜索'
+})
+
+await t('帖子详情正文校验：最多 20000 字、只收文本', async () => {
+  const p = await post('/api/admin/posts', { creatorId: 3, text: '长正文', content: '字'.repeat(20000) })
+  must([...p.content].length === 20000, '20000 字应能保存')
+  mustFail(await req('POST', '/api/admin/posts', { body: { creatorId: 3, text: 'x', content: '字'.repeat(20001) } }), 'content', 400, /详情正文最多 20000 个字/)
+  mustFail(await req('PATCH', `/api/admin/posts/${p.id}`, { body: { content: 'a'.repeat(20001) } }), 'content', 400, /20000/)
+  must([...(await get(`/api/admin/posts/${p.id}`)).content].length === 20000, '校验失败不应改动')
+  for (const bad of [{ a: 1 }, ['a'], 'a\u0000b', 'a\u001bb']) {
+    mustFail(await req('POST', '/api/admin/posts', { body: { creatorId: 3, text: 'x', content: bad } }), 'content')
+  }
+  const emoji = await patch(`/api/admin/posts/${p.id}`, { content: '😀'.repeat(20000) })
+  must([...emoji.content].length === 20000, 'emoji 按字计数（不是 UTF-16 长度）')
+  must((await patch(`/api/admin/posts/${p.id}`, { content: 12345 })).content === '12345', '数字按文本存')
+  await del(`/api/admin/posts/${p.id}`)
+  return '20000 字可存、20001 字报错，对象 / 数组 / 控制字符报错'
 })
 
 /* ================================================================ */
@@ -1041,6 +1094,31 @@ await t('导入：帖子（账号 / 名称 / 视频编号 / 1.2w / 千分位）'
   const bad = await importRows('posts', [{ id: '99999999', text: 'x', creator: '@aijc' }, { creator: '@aijc', text: 'x', video: 'NOPE-1' }])
   must(bad.results[0].message === 'ID 不存在' && bad.results[1].field === 'video', JSON.stringify(bad.results))
   return '帖子导入正确'
+})
+
+await t('导入 / 导出：帖子正文（多行、留空不改、超长报错）', async () => {
+  const d = await importRows('posts', [{ creator: '@trip', text: '导入正文帖', content: '第一段\r\n\r\n第二段  ' }])
+  must(d.created === 1, JSON.stringify(d.results))
+  const id = d.results[0].id
+  must((await get(`/api/admin/posts/${id}`)).content === '第一段\n\n第二段', '导入时规范化')
+  const ex = await get('/api/admin/posts/export?q=' + encodeURIComponent('导入正文帖'))
+  must(ex.fields.indexOf('content') === ex.fields.indexOf('text') + 1, 'fields 顺序 ' + ex.fields.join())
+  must(ex.rows.length === 1 && ex.rows[0].text === '导入正文帖' && ex.rows[0].content === '第一段\n\n第二段', JSON.stringify(ex.rows[0]))
+  // 原样导回去：不改
+  const same = await importRows('posts', ex.rows, { onDuplicate: 'update' })
+  must(same.updated === 1 && (await get(`/api/admin/posts/${id}`)).content === '第一段\n\n第二段', '原样导回不应改')
+  // 正文列留空 = 不改（只改了标题）
+  await importRows('posts', [{ id: String(id), text: '导入正文帖（改标题）', content: '  ' }], { onDuplicate: 'update' })
+  let p = await get(`/api/admin/posts/${id}`)
+  must(p.content === '第一段\n\n第二段' && p.text === '导入正文帖（改标题）', '空单元格不应清空正文 ' + JSON.stringify([p.text, p.content]))
+  // 只给正文：只改正文
+  const u = await importRows('posts', [{ id: String(id), content: '新的正文\n第二行' }], { onDuplicate: 'update' })
+  p = await get(`/api/admin/posts/${id}`)
+  must(u.updated === 1 && p.content === '新的正文\n第二行' && p.text === '导入正文帖（改标题）', '只改正文 ' + JSON.stringify(p.content))
+  const long = await importRows('posts', [{ id: String(id), content: '长'.repeat(20001) }, { creator: '@trip', text: '超长正文', content: '长'.repeat(20001) }], { onDuplicate: 'update' })
+  must(long.failed === 2 && long.results.every(r => r.field === 'content'), JSON.stringify(long.results))
+  must((await get(`/api/admin/posts/${id}`)).content === '新的正文\n第二行', '失败行不应改动')
+  return `#${id} 导入 / 导出 / 留空不改`
 })
 
 await t('导入：专题 / 创作者 / 热词', async () => {

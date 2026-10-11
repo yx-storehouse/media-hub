@@ -8,6 +8,7 @@
 import { rng } from '@/mock/random'
 import { cover, avatar, brandAvatar, docThumb } from '@/mock/art'
 import * as D from '@/mock/data'
+import { ApiError } from './http'
 
 const ok = value => Promise.resolve(value)
 
@@ -187,13 +188,16 @@ const postAvatar = a => {
   return avatar(a[0], a[1])
 }
 
-/* 文档帖只有文档页缩略图；视频 / 图文帖是 16:9 主图 + 三张配图（演示数据没有关联视频，videoId 为 null） */
+/*
+ * 文档帖只有文档页缩略图；视频 / 图文帖是 16:9 主图 + 三张配图。
+ * 视频帖关联一条演示视频（id 是「前缀:序号」，播放页能还原出来），详情页里主图就是它的封面。
+ */
 const POSTS = D.POSTS.map((p, i) => ({
   ...p,
   id: i + 1,
   time: p.time,
   faved: false,
-  videoId: null,
+  videoId: p.kind === 'video' ? `post${i}v:0` : null,
   avatar: postAvatar(p.avatar),
   media: p.kind === 'doc'
     ? { main: null, thumbs: [0, 1, 2].map(k => docThumb('doc' + k, k === 2)) }
@@ -210,8 +214,58 @@ export const getPosts = (tab = 0) => {
   return ok(list)
 }
 
+/* 详情页：演示数据没有创作者表，作者 id 用账号；关注只记在内存里 */
+const followed = new Set()
+const postIndex = id => POSTS.findIndex(p => String(p.id) === String(id))
+const notFound = () => Promise.reject(new ApiError('帖子不存在或已下架', { status: 400, code: 1 }))
+const durSec = dur => String(dur || '').split(':').reduce((s, x) => s * 60 + (Number(x) || 0), 0)
+
+export const getPost = id => {
+  const i = postIndex(id)
+  if (i < 0) return notFound()
+  const p = POSTS[i], n = POSTS[i + 1]
+  // 详情页的图是全宽大图：同一张图取两倍尺寸（同一个种子 = 同一张照片）
+  const thumbs = p.kind === 'doc' ? p.media.thumbs : [0, 1, 2].map(k => cover(`post${i}t${k}`, { kind: (i + k + 1) % 6, w: 720, h: 640 }))
+  const video = p.videoId ? { id: p.videoId, title: p.text, cover: p.media.main, dur: p.dur, len: durSec(p.dur) } : null
+  return ok({
+    id: p.id,
+    title: p.text,
+    content: D.POST_CONTENT[i] || '',
+    kind: p.kind,
+    author: { id: p.handle, name: p.name, handle: p.handle, verified: p.verified, avatar: p.avatar },
+    following: followed.has(p.handle),
+    tags: p.tags.slice(),
+    images: video && p.media.main ? thumbs : [p.media.main, ...thumbs].filter(Boolean),
+    video,
+    read: p.read,
+    fav: p.fav,
+    faved: p.faved,
+    publishedAt: Math.floor(Date.now() / 1000) - (i + 1) * 1800,
+    time: p.time,
+    next: n ? { id: n.id, title: n.text, thumb: n.media.main || n.media.thumbs[0] || null } : null
+  })
+}
+
 /* 兜底模式下的互动只改内存，刷新即失效（真实数据在接口那边） */
-export const togglePostFav = (id, on) => ok({ active: !!on })
+export const viewPost = id => {
+  const p = POSTS[postIndex(id)]
+  if (!p) return notFound()
+  p.read++
+  return ok({ read: p.read })
+}
+export const toggleFollow = (id, on) => {
+  if (on) followed.add(String(id))
+  else followed.delete(String(id))
+  return ok({ active: !!on })
+}
+export const togglePostFav = (id, on) => {
+  const p = POSTS[postIndex(id)]
+  if (p && p.faved !== !!on) {
+    p.faved = !!on
+    p.fav = Math.max(0, p.fav + (on ? 1 : -1))
+  }
+  return ok({ active: !!on })
+}
 export const toggleVideoFav = (id, on) => ok({ active: !!on })
 export const toggleVideoLike = (id, on) => ok({ active: !!on })
 export const toggleVideoDislike = (id, on) => ok({ active: !!on })
@@ -267,6 +321,6 @@ export default {
   getHomeTabs, getMainTabs, getRecommendSections, getVideos, getLatestFilters, getLatestVideos,
   getCategoryFilters, getCategoryVideos, getHotWords, getCreators, getRecentSearches, searchVideos,
   getTopic, getTopicVideos, getLibrary, getVideo, getRelatedVideos, getShorts, getCommunityTabs, getPosts,
-  togglePostFav, toggleVideoFav, toggleVideoLike, toggleVideoDislike, toggleTopicFav,
+  getPost, viewPost, toggleFollow, togglePostFav, toggleVideoFav, toggleVideoLike, toggleVideoDislike, toggleTopicFav,
   getLiveTabs, getLives, getNearbyFilters, getNearby, getProfile, getHistory
 }

@@ -15,12 +15,12 @@ node server/index.mjs                        # 启动接口服务，默认 http:
 测试：
 
 ```bash
-node server/test-api.mjs     # 66 项接口测试
+node server/test-api.mjs     # 76 项接口测试（含帖子详情、老库补列）
 node server/test-auth.mjs    # 37 项鉴权测试
-node server/test-admin.mjs   # 91 项管理后台测试（导入 / 导出 / 素材文件 / 首页分区 / 超时…）
+node server/test-admin.mjs   # 95 项管理后台测试（导入 / 导出 / 素材文件 / 首页分区 / 超时…）
 ```
 
-三套测试各用自己的库（`server/db/*-test.db`）和端口（3178 / 3179 / 3180；管理后台测试另起一个短超时实例用 3181），不会碰 `reel.db`。
+三套测试各用自己的库（`server/db/*-test.db`）和端口（3178 / 3179 / 3180；管理后台测试另起一个短超时实例用 3181，接口测试另起一个「老库补列」实例用 3182，库建在系统临时目录），不会碰 `reel.db`。
 
 换个位置放数据库：`DB_PATH=/path/to/reel.db node server/index.mjs`
 换端口：`PORT=4000 node server/index.mjs`
@@ -117,7 +117,10 @@ server/
 | GET | `/api/videos/:id/related?batch=&limit=` | `getRelatedVideos()`：相似推荐，`batch` 递增 = 换一批 |
 | GET | `/api/shorts` | `getShorts()` |
 | GET | `/api/community/posts?tab=` | `getPosts()` |
+| GET | `/api/community/posts/:id` | `getPost()`：帖子详情（见下面「帖子详情」） |
+| POST | `/api/community/posts/:id/view` | `viewPost()`：阅读数 +1，公开、无请求体 → `{ read }` |
 | POST | `/api/community/posts/:id/fav` | `togglePostFav()` |
+| POST | `/api/creators/:id/follow` | `toggleFollow()`：`{ on: true\|false }` → `{ active }`（要登录） |
 | POST | `/api/videos/:id/fav` `/like` `/dislike` | 对应 toggle |
 | POST | `/api/topics/:id/fav` | `toggleTopicFav()` |
 | GET | `/api/live?tab=` | `getLives()` |
@@ -134,6 +137,35 @@ server/
 ```
 
 400 = 参数问题，404 = 路由不存在，405 = 方法不对，500 = 服务端异常。
+
+### 帖子详情
+
+`GET /api/community/posts/:id`：公开接口；带了登录令牌时按当前用户回填 `following` / `faved`（未登录都是 `false`）。
+
+```js
+{
+  id, title,            // title = posts.text：社区卡片和详情页顶部的那一句
+  content,              // 详情正文，纯文本，段落之间用换行（前端按 pre-line 显示）；没有时是 ''
+  kind,                 // 'image' | 'video' | 'doc'
+  author: { id, name, handle, verified, avatar: Cover },
+  following,            // 当前用户是否关注了作者
+  tags,                 // ['旅行', '川西']，不带 #
+  images,               // Cover[]，规则见下
+  video,                // { id, title, cover: Cover, dur: '07:42' | '1:02:05', len: 秒 } | null（只认已上架的关联视频）
+  read, fav, faved,
+  publishedAt, time,    // time 是「21分钟前」这类相对时间，和列表一致
+  next                  // { id, title, thumb: Cover | null } | null
+}
+```
+
+- **图片**：视频帖（`kind === 'video'`）有已上架的关联视频、并且有主图时，主图就是视频封面（`video.cover`），`images` 只放配图；
+  其余情况 `images = [主图（有的话）, ...配图]`，`video.cover` 用关联视频自己的封面。
+- **下一篇**：社区「最新」顺序（`published_at DESC, id DESC`）里比它更早的那一篇，只算已发布的；缩略图取它的主图，没有主图取第一张配图，都没有为 `null`。
+- 帖子不存在、草稿或已下架：`400 { code: 1, message: '帖子不存在或已下架' }`（不会 500）。
+
+`POST /api/community/posts/:id/view`：阅读数 +1 并返回 `{ read }`（新的阅读数）。公开、不需要请求体；App 每打开一次详情页调一次。帖子不存在 / 未发布同样回 400。
+
+关注作者用已有的 `POST /api/creators/:id/follow { on }`，收藏用 `POST /api/community/posts/:id/fav { on }`，都要登录。
 
 ## 接入前端
 
@@ -316,6 +348,13 @@ node server/create-admin.mjs admin 你的密码
 | creators | `q` `status` `verified` | `id`（默认）`name` `followerCount` `videoCount` |
 | keywords | `q` `isHot` `isBanned` | `weight`（默认）`sortOrder` `word` `id` |
 
+帖子（`AdminPost`）的两段文字：
+
+- `text`：**标题**，必填、最多 5000 字，显示在社区卡片和详情页顶部（也是社区搜索的全文索引内容）。
+- `content`：**详情正文**，选填、最多 20000 字（按字数算，emoji 算 1 个），只显示在 App 的帖子详情页。
+  保存时换行统一成 `\n`、去掉每行行尾和整段首尾的空白（段落之间的空行保留）；`PATCH` 时 `null` 或空串 = 清空，不传 = 不改。
+- 列表的 `q` 同时搜标题、详情正文、标签（纯数字时也按 ID）。
+
 批量操作的 `action`：
 
 | 类型 | action |
@@ -371,8 +410,10 @@ curl -X POST http://localhost:3000/api/admin/videos/import \
 - 视频只用**第一个非空的键**：填了编号但库里没有，就当新视频新建，不会再退到播放地址去匹配（否则几条共用同一个占位视频文件的新视频会互相覆盖）。只填了播放地址的行才按播放地址查重。
 - 播放地址按「同一个文件」比较：`/media/a b.mp4` 和 `/media/a%20b.mp4`、`/media/已有/x.mp4` 和它的编码写法、站内地址后面带 `?v=123` 都算同一个；扫描导入的「已导入」、素材的「被 N 个视频使用」用的是同一套规则。外部 `http(s)` 地址的查询串保留比较。
 - 「已更新」的结果带 `message` 写明按哪个键匹配到的（如「按播放地址匹配到 ID 15，已更新」），预检里就能看出来。
-- **空单元格**：新建时用默认值；更新时表示「不改这一项」。
+- **空单元格**：新建时用默认值；更新时表示「不改这一项」（帖子的「正文」列留空不会清空详情正文，要清空请在后台编辑）。
 - 导入后统一重算一次专题视频数。
+- 帖子有「标题」（`text`，别名 title / 帖子标题 / 文案）和「正文」（`content`，别名 content / body / 详情 / 详情正文 / 帖子正文 / 正文内容 / 内容 / 帖子内容）两列，正文单元格可以多行。
+  注意：加详情正文之前导出的帖子表格，表头「正文」那一列其实是**标题**；这种旧文件再导入时它会被自动对应到「正文」，请在「对应列」那一步把它改成「标题」。
 
 单元格写法（服务端解析，所以脚本也能直接用中文）：
 
@@ -429,6 +470,7 @@ curl -X POST http://localhost:3000/api/admin/videos/import \
 
 老库不用重建，接口服务启动时会自动补上：
 
-- `posts_fts_update` 触发器：帖子改了正文 / 标签，社区搜索的全文索引跟着更新（新库由 `views.sql` 建）。
+- `posts.content` 列（帖子详情正文，`TEXT NOT NULL DEFAULT ''`）：老库没有这一列时 `ALTER TABLE` 补上，日志里提示一次；已有的帖子正文为空，可在后台补写或用导入批量填。
+- `posts_fts_update` 触发器：帖子改了标题 / 标签，社区搜索的全文索引跟着更新（新库由 `views.sql` 建）。
 - 索引：`idx_videos_playback` / `idx_videos_cover`（按地址查重、统计素材引用、统计缺播放地址 / 封面）、`idx_videos_pubtime` / `idx_videos_created`（列表按发布 / 创建时间排序，几万条视频时不用临时排序）、`idx_videos_nodur`（缺时长）、`idx_creators_name`（按名称找创作者）。
 - 修复读不出来的时长：早期版本导入时可能写进超过 2^53 的整数或超大小数，读这一行会让列表、导出、App 详情页报错。启动时把这类时长清零（变成「缺时长」，可在后台重填），并在日志里提示条数。

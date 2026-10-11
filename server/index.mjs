@@ -23,7 +23,10 @@
  *   GET  /api/shorts                    短视频流
  *   GET  /api/community/tabs            社区 tab
  *   GET  /api/community/posts           社区帖子（?tab=0）
+ *   GET  /api/community/posts/:id       帖子详情（标题、正文、图片、关联视频、下一篇；登录时带关注 / 收藏状态）
+ *   POST /api/community/posts/:id/view  阅读数 +1（公开，无请求体）→ { read }
  *   POST /api/community/posts/:id/fav   收藏 / 取消收藏
+ *   POST /api/creators/:id/follow       关注 / 取消关注创作者（body: { on }）
  *   GET  /api/live/tabs                 直播 tab
  *   GET  /api/live                      直播列表（?tab=0）
  *   GET  /api/nearby/filters            同城筛选项
@@ -110,6 +113,9 @@ const routes = [
 
   ['GET', /^\/api\/community\/tabs$/, () => api.getCommunityTabs()],
   ['GET', /^\/api\/community\/posts$/, (m, q, b, c) => api.getPosts(+(q.tab || 0), { limit: +(q.limit || 20), offset: +(q.offset || 0) }, c.userId)],
+  ['GET', /^\/api\/community\/posts\/(\d+)$/, (m, q, b, c) => api.getPost(+m[1], c.userId)],
+  // 阅读数 +1：公开，不需要登录、不需要请求体（详情页每打开一次调一次）
+  ['POST', /^\/api\/community\/posts\/(\d+)\/view$/, m => api.viewPost(+m[1])],
 
   ['GET', /^\/api\/live\/tabs$/, () => api.getLiveTabs()],
   ['GET', /^\/api\/live$/, (m, q) => api.getLives({ tab: +(q.tab || 0), limit: +(q.limit || 20), offset: +(q.offset || 0) })],

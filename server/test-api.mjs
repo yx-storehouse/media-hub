@@ -8,9 +8,10 @@
  */
 import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
-import { rmSync, existsSync } from 'node:fs'
+import { rmSync, existsSync, mkdtempSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const argBase = process.argv.includes('--base') ? process.argv[process.argv.indexOf('--base') + 1] : null
@@ -181,6 +182,123 @@ await t('社区帖子类型与认证', 'GET', '/api/community/posts?tab=0', d =>
 await t('社区·热门', 'GET', '/api/community/posts?tab=1', d => Array.isArray(d) ? `${d.length} 条` : false)
 await t('社区·收藏', 'GET', '/api/community/posts?tab=3', d => Array.isArray(d) ? `${d.length} 条` : false)
 
+/* ---- 帖子详情 ---- */
+const POST_KEYS = 'id,title,content,kind,author,following,tags,images,video,read,fav,faved,publishedAt,time,next'
+const isCover = c => !!c && typeof c === 'object' && 'src' in c && 'fallback' in c && !!(c.src || c.fallback)
+const DUR_RE = /^(\d\d:\d\d|\d+:\d\d:\d\d)$/
+const json = v => JSON.stringify(v)
+/** 不带令牌（未登录）请求 */
+const anonCall = async (method, path) => {
+  const res = await fetch(base + path, { method })
+  return { status: res.status, json: await res.json().catch(() => null) }
+}
+/** 图片规则：视频帖 + 关联视频已上架 + 有主图 → 主图是视频封面、images 只放配图；否则 images = [主图, ...配图] */
+const expectMedia = p => (p.kind === 'video' && p.videoId != null && p.media.main
+  ? { cover: p.media.main, images: p.media.thumbs.filter(Boolean) }
+  : { cover: null, images: [p.media.main, ...p.media.thumbs].filter(Boolean) })
+
+await check('帖子详情：结构与列表一致', async () => {
+  const list = await data('GET', '/api/community/posts?tab=0&limit=50')
+  must(list.length >= 4, '社区帖子不足 4 条')
+  for (const lp of list) {
+    const d = await data('GET', `/api/community/posts/${lp.id}`)
+    const tag = `#${lp.id}`
+    must(Object.keys(d).join() === POST_KEYS, `${tag} 字段 ${Object.keys(d).join()}`)
+    must(d.id === lp.id && d.title === lp.text && typeof d.content === 'string' && d.kind === lp.kind, `${tag} 基本字段`)
+    must(d.author.id > 0 && d.author.name === lp.name && d.author.handle === lp.handle && d.author.verified === lp.verified && isCover(d.author.avatar), `${tag} author ${json(d.author.name)}`)
+    must(typeof d.following === 'boolean' && typeof d.faved === 'boolean', `${tag} following / faved 应是布尔`)
+    must(json(d.tags) === json(lp.tags) && d.tags.every(x => !x.startsWith('#')), `${tag} tags ${json(d.tags)}`)
+    must(d.images.every(isCover), `${tag} images 里有空图`)
+    must(d.read === lp.read && d.fav === lp.fav && d.publishedAt === lp.publishedAt && typeof d.time === 'string' && d.time, `${tag} 计数 / 时间`)
+    if (lp.videoId != null) {
+      must(d.video && d.video.id === lp.videoId && typeof d.video.title === 'string' && isCover(d.video.cover) && DUR_RE.test(d.video.dur) && Number.isInteger(d.video.len), `${tag} video ${json(d.video)}`)
+    } else must(d.video === null, `${tag} 没有已上架的关联视频，video 应为 null`)
+  }
+  return `${list.length} 条，字段 ${POST_KEYS.split(',').length} 个`
+})
+
+await check('帖子详情：图片规则（视频帖主图当封面 / 其余主图并入 images）', async () => {
+  const list = await data('GET', '/api/community/posts?tab=0&limit=50')
+  let asCover = 0, merged = 0, maxImages = 0
+  for (const lp of list) {
+    const d = await data('GET', `/api/community/posts/${lp.id}`)
+    const exp = expectMedia(lp)
+    must(json(d.images) === json(exp.images), `#${lp.id} images ${d.images.length} 张，期望 ${exp.images.length} 张`)
+    if (exp.cover) { must(json(d.video.cover) === json(exp.cover), `#${lp.id} 视频封面应是帖子主图`); asCover++ } else merged++
+    maxImages = Math.max(maxImages, d.images.length)
+  }
+  must(asCover > 0 && merged > 0, `两种情况都要覆盖：主图当封面 ${asCover}，并入 images ${merged}`)
+  must(maxImages >= 4, '至少要有一条帖子 ≥ 4 张图，实际最多 ' + maxImages)
+  return `主图当封面 ${asCover} 条，并入 images ${merged} 条，最多 ${maxImages} 张图`
+})
+
+await check('帖子详情：种子帖子有多段正文', async () => {
+  const list = await data('GET', '/api/community/posts?tab=0&limit=50')
+  const bodies = await Promise.all(list.map(p => data('GET', `/api/community/posts/${p.id}`).then(d => d.content)))
+  must(bodies.every(c => c.split('\n\n').length >= 2 && c === c.trim()), '正文 ' + json(bodies.map(c => c.slice(0, 12))))
+  return bodies.map(c => c.split('\n\n').length + ' 段').join(' / ')
+})
+
+await check('帖子详情：下一篇按「最新」顺序', async () => {
+  const list = await data('GET', '/api/community/posts?tab=0&limit=50')
+  for (let i = 0; i < list.length; i++) {
+    const d = await data('GET', `/api/community/posts/${list[i].id}`)
+    const exp = list[i + 1]
+    if (!exp) {
+      if (list.length < 50) must(d.next === null, `最后一篇 #${list[i].id} 的 next 应为 null：${json(d.next)}`)
+      continue
+    }
+    must(d.next && d.next.id === exp.id && d.next.title === exp.text, `#${list[i].id} 的下一篇是 ${d.next?.id}，期望 ${exp.id}`)
+    const thumb = exp.media.main || exp.media.thumbs.find(Boolean) || null
+    must(json(d.next.thumb) === json(thumb), `#${exp.id} 的缩略图应是主图（没有就第一张配图）`)
+  }
+  return list.map(p => '#' + p.id).join(' → ') + ' → null'
+})
+
+await check('帖子详情：不存在返回 400', async () => {
+  for (const path of ['/api/community/posts/99999999', '/api/community/posts/99999999999999999999999']) {
+    const { status, json: j } = await call('GET', path)
+    must(status === 400 && j?.message === '帖子不存在或已下架', `${path} → HTTP ${status} ${j?.message}`)
+  }
+  const v = await call('POST', '/api/community/posts/99999999/view')
+  must(v.status === 400 && v.json?.message === '帖子不存在或已下架', `view → HTTP ${v.status} ${v.json?.message}`)
+  return '400 · 帖子不存在或已下架'
+})
+
+await check('帖子阅读数 +1（未登录也算，详情 GET 不算）', async () => {
+  const id = (await data('GET', '/api/community/posts?tab=0'))[0].id
+  const before = (await data('GET', `/api/community/posts/${id}`)).read
+  const r1 = await data('POST', `/api/community/posts/${id}/view`)
+  must(Object.keys(r1).join() === 'read' && r1.read === before + 1, '登录 ' + json(r1))
+  const r2 = await anonCall('POST', `/api/community/posts/${id}/view`)
+  must(r2.status === 200 && r2.json?.data?.read === before + 2, '未登录 ' + json(r2.json))
+  const d = await data('GET', `/api/community/posts/${id}`)
+  const lp = (await data('GET', '/api/community/posts?tab=0')).find(p => p.id === id)
+  must(d.read === before + 2 && lp.read === before + 2, `详情 ${d.read} / 列表 ${lp.read}，期望 ${before + 2}`)
+  return `${before} → ${d.read}`
+})
+
+await check('帖子详情：关注 / 收藏状态按当前用户', async () => {
+  const id = (await data('GET', '/api/community/posts?tab=0'))[0].id
+  const aid = (await data('GET', `/api/community/posts/${id}`)).author.id
+  await data('POST', `/api/creators/${aid}/follow`, { on: false })
+  await data('POST', `/api/community/posts/${id}/fav`, { on: false })
+  const d0 = await data('GET', `/api/community/posts/${id}`)
+  must(d0.following === false && d0.faved === false, '起始应为未关注、未收藏')
+  must((await data('POST', `/api/creators/${aid}/follow`, { on: true })).active === true, '关注失败')
+  must((await data('POST', `/api/community/posts/${id}/fav`, { on: true })).active === true, '收藏失败')
+  const d1 = await data('GET', `/api/community/posts/${id}`)
+  must(d1.following === true && d1.faved === true && d1.fav === d0.fav + 1, '登录后 ' + json({ following: d1.following, faved: d1.faved, fav: d1.fav }))
+  const anon = await anonCall('GET', `/api/community/posts/${id}`)
+  const a = anon.json?.data
+  must(anon.status === 200 && a.following === false && a.faved === false && a.fav === d1.fav, '未登录 ' + json(a && { following: a.following, faved: a.faved }))
+  await data('POST', `/api/creators/${aid}/follow`, { on: false })
+  await data('POST', `/api/community/posts/${id}/fav`, { on: false })
+  const d2 = await data('GET', `/api/community/posts/${id}`)
+  must(d2.following === false && d2.faved === false && d2.fav === d0.fav, '取消后应复原')
+  return '登录后 true，未登录 false，取消后复原'
+})
+
 /* ---- 直播 / 同城 ---- */
 await t('直播 tab', 'GET', '/api/live/tabs', d => isArr(d, 5) ? d.join(',') : false)
 await t('直播列表', 'GET', '/api/live?tab=0', d => isArr(d, 6) && d[0].cover ? `${d.length} 个，首个「${d[0].title}」${d[0].viewers}` : false)
@@ -295,10 +413,138 @@ adminCheck('图文 / 视频帖：类型、认证、关联视频', async () => {
   return 'image / video，认证按创作者'
 })
 
+adminCheck('帖子详情：图片规则 / 正文 / 时长写法', async () => {
+  const creators = (await data('GET', '/api/admin/creators?pageSize=100')).list
+  const cid = creators.find(c => c.handle === 'trip').id
+  const v1 = await data('POST', '/api/admin/videos', { title: '详情测试视频', status: 1, durationSec: 462, coverUrl: '/media/covers/v1.jpg' })
+  const v2 = await data('POST', '/api/admin/videos', { title: '一小时的视频', status: 1, durationSec: 3725, coverUrl: '/media/covers/v2.jpg' })
+  const off = await data('POST', '/api/admin/videos', { title: '下架视频', status: 2, coverUrl: '/media/covers/off.jpg' })
+  const mk = body => data('POST', '/api/admin/posts', { creatorId: cid, text: '详情测试', ...body })
+  const srcs = d => d.images.map(c => c.src).join()
+  const made = []
+  try {
+    // 视频帖 + 主图：主图当视频封面，images 只有配图
+    const a = await mk({ mediaKind: 1, videoId: v1.id, mainImage: '/m/a.jpg', images: ['/m/a1.jpg', '/m/a2.jpg'], content: '第一段\n\n第二段' })
+    made.push(a.id)
+    let d = await data('GET', `/api/community/posts/${a.id}`)
+    must(d.kind === 'video' && d.video.cover.src === '/m/a.jpg' && srcs(d) === '/m/a1.jpg,/m/a2.jpg', '视频帖 ' + json({ cover: d.video.cover.src, images: srcs(d) }))
+    must(d.video.id === v1.id && d.video.title === '详情测试视频' && d.video.dur === '07:42' && d.video.len === 462, 'video ' + json(d.video))
+    must(d.title === '详情测试' && d.content === '第一段\n\n第二段', '标题 / 正文 ' + json([d.title, d.content]))
+    // 图文帖 + 关联视频：主图并入 images，视频封面用视频自己的封面；超过 1 小时写成 h:mm:ss
+    const b = await mk({ mediaKind: 0, videoId: v2.id, mainImage: '/m/b.jpg', images: ['/m/b1.jpg'] })
+    made.push(b.id)
+    d = await data('GET', `/api/community/posts/${b.id}`)
+    must(d.kind === 'image' && srcs(d) === '/m/b.jpg,/m/b1.jpg' && d.video.cover.src === '/media/covers/v2.jpg', '图文帖 ' + json({ images: srcs(d), cover: d.video.cover.src }))
+    must(d.video.dur === '1:02:05' && d.content === '', '时长 ' + d.video.dur)
+    // 视频帖没有主图：images = 配图，封面用视频的
+    const c = await mk({ mediaKind: 1, videoId: v1.id, images: ['/m/c1.jpg', '/m/c2.jpg'] })
+    made.push(c.id)
+    d = await data('GET', `/api/community/posts/${c.id}`)
+    must(srcs(d) === '/m/c1.jpg,/m/c2.jpg' && d.video.cover.src === '/media/covers/v1.jpg', '无主图视频帖 ' + json({ images: srcs(d), cover: d.video.cover.src }))
+    // 关联视频已下架：video 为 null，主图回到 images
+    const e = await mk({ mediaKind: 1, videoId: off.id, mainImage: '/m/e.jpg', images: ['/m/e1.jpg'] })
+    made.push(e.id)
+    d = await data('GET', `/api/community/posts/${e.id}`)
+    must(d.video === null && srcs(d) === '/m/e.jpg,/m/e1.jpg', '下架视频 ' + json({ video: d.video, images: srcs(d) }))
+    // 后台改正文，详情马上变
+    await data('PATCH', `/api/admin/posts/${e.id}`, { content: '后台改的正文\r\n第二行  ' })
+    must((await data('GET', `/api/community/posts/${e.id}`)).content === '后台改的正文\n第二行', '改正文后')
+    return '主图当封面 / 并入 images / 下架视频 / 07:42 · 1:02:05'
+  } finally {
+    for (const id of made) await data('DELETE', `/api/admin/posts/${id}`).catch(() => {})
+  }
+})
+
+adminCheck('帖子详情：草稿 / 下架返回 400，同一时间按 id 排下一篇', async () => {
+  const creators = (await data('GET', '/api/admin/creators?pageSize=100')).list
+  const cid = creators.find(c => c.handle === 'craft').id
+  // 比所有帖子都早的一个时间点，这几条就是「最新」列表的最后几条
+  const T = dayStart(30) + 3600
+  const mk = body => data('POST', '/api/admin/posts', { creatorId: cid, publishedAt: T, ...body })
+  const made = []
+  const get400 = async (path, method = 'GET') => {
+    const { status, json: j } = await call(method, path)
+    return status === 400 && j?.message === '帖子不存在或已下架'
+  }
+  try {
+    const old = await mk({ text: '更早的一篇', publishedAt: T - 10, images: ['/m/old1.jpg', '/m/old2.jpg'] })
+    const pa = await mk({ text: '同一时间 A' })
+    const draft = await mk({ text: '同一时间草稿', status: 0 })
+    const pb = await mk({ text: '同一时间 B' })
+    made.push(old.id, pa.id, draft.id, pb.id)
+    must(old.id < pa.id && pa.id < draft.id && draft.id < pb.id, 'id 顺序')
+    must(await get400(`/api/community/posts/${draft.id}`), '草稿详情应 400')
+    must(await get400(`/api/community/posts/${draft.id}/view`, 'POST'), '草稿 view 应 400')
+    must((await data('GET', `/api/admin/posts/${draft.id}`)).readCount === 0, '草稿的阅读数不该变')
+    let d = await data('GET', `/api/community/posts/${pb.id}`)
+    must(d.next?.id === pa.id && d.next.title === '同一时间 A' && d.next.thumb === null, 'B 的下一篇应是 A（跳过草稿，没图时 thumb 为 null）：' + json(d.next))
+    d = await data('GET', `/api/community/posts/${pa.id}`)
+    must(d.next?.id === old.id && d.next.thumb?.src === '/m/old1.jpg', 'A 的下一篇应是更早的一篇，缩略图取第一张配图：' + json(d.next))
+    must((await data('GET', `/api/community/posts/${old.id}`)).next === null, '最早的一篇 next 应为 null')
+    await data('PATCH', `/api/admin/posts/${pa.id}`, { status: 2 })
+    must(await get400(`/api/community/posts/${pa.id}`), '下架后详情应 400')
+    must((await data('GET', `/api/community/posts/${pb.id}`)).next?.id === old.id, 'A 下架后 B 的下一篇应跳过 A')
+    await data('PATCH', `/api/admin/posts/${pa.id}`, { status: 1 })
+    must((await data('GET', `/api/community/posts/${pa.id}`)).id === pa.id, '重新上架后能打开')
+    return `#${pb.id} → #${pa.id} → #${old.id} → null，草稿 / 下架 400`
+  } finally {
+    for (const id of made) await data('DELETE', `/api/admin/posts/${id}`).catch(() => {})
+  }
+})
+
 for (const [name, fn] of adminChecks) {
   if (argBase) results.push({ name, ok: true, note: '跳过（--base 模式不写管理数据）' })
   else await check(name, fn)
 }
+
+/*
+ * ---- 老库迁移：按现在的表结构建库、再删掉 posts.content，模拟升级前的库 ----
+ * 另起一个服务（端口 3182）指向它：启动时应自动补上这一列，详情接口照常可用（正文为空串）。
+ */
+async function oldDbCheck() {
+  const dir = mkdtempSync(join(tmpdir(), 'reel-old-db-'))
+  const OLD_DB = join(dir, 'old.db')
+  const OLD_PORT = 3182
+  let srv = null
+  try {
+    await new Promise(r => spawn(process.execPath, [join(here, 'db', 'seed.mjs')], { env: { ...process.env, DB_PATH: OLD_DB }, stdio: 'ignore' }).on('exit', r))
+    const w = new DatabaseSync(OLD_DB)
+    w.exec('ALTER TABLE posts DROP COLUMN content')
+    const before = w.prepare('PRAGMA table_info(posts)').all().some(c => c.name === 'content')
+    w.close()
+    must(!before, '没能删掉 content 列')
+    let log = ''
+    srv = spawn(process.execPath, [join(here, 'index.mjs')], { env: { ...process.env, PORT: String(OLD_PORT), DB_PATH: OLD_DB, MEDIA_DIR: TEST_MEDIA }, stdio: ['ignore', 'pipe', 'pipe'] })
+    srv.stdout.on('data', d => { log += d })
+    srv.stderr.on('data', d => { log += d })
+    const oldBase = `http://127.0.0.1:${OLD_PORT}`
+    let up = false
+    for (let i = 0; i < 100 && srv.exitCode === null && !up; i++) {
+      up = await fetch(oldBase + '/api/health').then(r => r.ok, () => false)
+      if (!up) await new Promise(r => setTimeout(r, 100))
+    }
+    must(up, '老库上的服务没启动起来：' + log.slice(0, 200))
+    const res = await fetch(oldBase + '/api/community/posts/1').then(r => r.json())
+    must(res.code === 0 && res.data.content === '' && res.data.title && res.data.next?.id === 2, '详情 ' + JSON.stringify(res).slice(0, 160))
+    const view = await fetch(oldBase + '/api/community/posts/1/view', { method: 'POST' }).then(r => r.json())
+    must(view.code === 0 && view.data.read > 0, 'view ' + JSON.stringify(view))
+    const r = new DatabaseSync(OLD_DB, { readOnly: true })
+    const col = r.prepare('PRAGMA table_info(posts)').all().find(c => c.name === 'content')
+    r.close()
+    must(col && col.notnull === 1 && col.dflt_value === "''", '补上的列 ' + JSON.stringify(col))
+    must(/补上 content 列/.test(log), '启动日志里应提示补列')
+    return 'content 列已补上（NOT NULL DEFAULT \'\'），详情 / 阅读数正常'
+  } finally {
+    if (srv && srv.exitCode === null) {
+      const exited = new Promise(r => srv.once('exit', r))
+      srv.kill()
+      await Promise.race([exited, new Promise(r => setTimeout(r, 3000))])
+    }
+    try { rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
+}
+if (argBase) results.push({ name: '老库自动补 posts.content 列', ok: true, note: '跳过（--base 模式）' })
+else await check('老库自动补 posts.content 列', oldDbCheck)
 
 /* ---- 错误处理：这些用例「必须失败」 ---- */
 async function tFail(name, method, path, expectHint, body) {

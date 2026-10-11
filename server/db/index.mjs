@@ -55,7 +55,14 @@ if (get("SELECT 1 x FROM sqlite_master WHERE type = 'table' AND name = 'videos'"
   db.exec('CREATE INDEX IF NOT EXISTS idx_videos_related ON videos(status, topic_id, category_key, play_count DESC)')
 }
 
-/* 帖子改正文 / 标签后全文索引要跟着变；老库没有这个触发器，启动时补建（与 views.sql 一致） */
+/* 帖子详情正文 posts.content：老库没有这一列，启动时补上（新库由 schema.sql 建） */
+if (get("SELECT 1 x FROM sqlite_master WHERE type = 'table' AND name = 'posts'") &&
+    !all('PRAGMA table_info(posts)').some(c => c.name === 'content')) {
+  db.exec("ALTER TABLE posts ADD COLUMN content TEXT NOT NULL DEFAULT ''")
+  console.log('已为 posts 表补上 content 列（帖子详情正文）')
+}
+
+/* 帖子改标题 / 标签后全文索引要跟着变；老库没有这个触发器，启动时补建（与 views.sql 一致） */
 if (get("SELECT 1 x FROM sqlite_master WHERE type = 'table' AND name = 'posts_fts'")) {
   db.exec(`CREATE TRIGGER IF NOT EXISTS posts_fts_update AFTER UPDATE OF text, tags ON posts BEGIN
     INSERT INTO posts_fts(posts_fts, rowid, text, tags) VALUES ('delete', old.id, old.text, old.tags);
@@ -454,6 +461,79 @@ export function postMedia(postId) {
     thumbs: rows.filter(r => r.role === 1).map(r => toCover(r.url, r.fallback)),
     durationSec: main?.duration_sec ?? null
   }
+}
+
+/** 秒 → 详情页视频块上的时长：不到 1 小时 mm:ss，否则 h:mm:ss */
+export function clock(sec) {
+  const s = Math.max(0, Math.round(Number(sec) || 0))
+  const p = n => String(n).padStart(2, '0')
+  const h = Math.floor(s / 3600)
+  return h ? `${h}:${p(Math.floor((s % 3600) / 60))}:${p(s % 60)}` : `${p(Math.floor(s / 60))}:${p(s % 60)}`
+}
+
+/**
+ * 帖子详情（只认已发布的帖子，v_posts 已过滤），不存在返回 null。
+ *   title = posts.text（社区卡片上的那一句），content = 详情正文
+ *   图片：视频帖 + 关联视频已上架 + 有主图 → 主图当视频封面，images 只放配图；
+ *         其余情况 images = [主图, ...配图]，视频封面用视频自己的封面
+ *   next：社区「最新」顺序（published_at DESC, id DESC）里的下一篇，也就是更早发布的那一篇
+ */
+export function postDetail(id, userId = null) {
+  const r = get(`SELECT ${POST_COLS}, pp.content FROM v_posts p JOIN posts pp ON pp.id = p.id ${POST_VIDEO}
+                 WHERE p.id = ?`, id)
+  if (!r) return null
+  const kind = POST_KINDS[r.media_kind] || 'image'
+  const v = r.video_live ? get('SELECT id, title, cover_src, cover_fallback, len FROM v_videos WHERE id = ?', r.video_id) : null
+  const video = v ? { id: v.id, title: v.title, cover: toCover(v.cover_src, v.cover_fallback), dur: clock(v.len), len: v.len } : null
+  const media = postMedia(r.id)
+  const thumbs = media.thumbs.filter(Boolean)
+  let images
+  if (kind === 'video' && video && media.main) {
+    video.cover = media.main
+    images = thumbs
+  } else {
+    images = media.main ? [media.main, ...thumbs] : thumbs
+  }
+  const has = (sql, ...a) => !!(userId && get(sql, userId, ...a))
+  return {
+    id: r.id,
+    title: r.text,
+    content: r.content || '',
+    kind,
+    author: {
+      id: r.creator_id ?? null,
+      name: r.author_name ?? '',
+      handle: r.author_handle ?? '',
+      verified: !!r.author_verified,
+      avatar: toCover(r.avatar_src, r.avatar_fallback)
+    },
+    following: r.creator_id != null && has('SELECT 1 x FROM user_follows WHERE user_id = ? AND creator_id = ?', r.creator_id),
+    tags: parseTags(r.tags).map(t => String(t).replace(/^[#＃]+/, '')).filter(Boolean),
+    images,
+    video,
+    read: r.read,
+    fav: r.fav,
+    faved: has('SELECT 1 x FROM post_favs WHERE user_id = ? AND post_id = ?', r.id),
+    publishedAt: r.published_at,
+    time: relativeTime(r.published_at),
+    next: nextPost(r)
+  }
+}
+
+/** 「下一篇」：走 idx_posts_pub(status, published_at DESC)；缩略图取主图，没有就取第一张配图 */
+function nextPost(r) {
+  const n = get(`SELECT id, text FROM posts
+                 WHERE status = 1 AND (published_at < ? OR (published_at = ? AND id < ?))
+                 ORDER BY published_at DESC, id DESC LIMIT 1`, r.published_at, r.published_at, r.id)
+  if (!n) return null
+  const m = get(`SELECT url, fallback FROM post_media WHERE post_id = ? AND (url IS NOT NULL OR fallback IS NOT NULL)
+                 ORDER BY role, sort_order, id LIMIT 1`, n.id)
+  return { id: n.id, title: n.text, thumb: m ? toCover(m.url, m.fallback) : null }
+}
+
+/** 阅读数 +1（只算已发布的帖子），返回新的阅读数；帖子不存在 / 未发布返回 null */
+export function addPostView(id) {
+  return get('UPDATE posts SET read_count = read_count + 1 WHERE id = ? AND status = 1 RETURNING read_count', id)?.read_count ?? null
 }
 
 export const communityTabs = () => ['最新', '热门', '关注', '收藏']

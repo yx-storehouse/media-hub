@@ -61,6 +61,7 @@ src/
   App.vue               根组件：路由出口 + 底部导航 + Toast
   router/               路由表
   stores/app.js         全局状态（Pinia）：上次的首页 Tab、静音、播放设置、点赞/收藏
+  stores/posts.js       帖子的收藏 / 阅读数最新值：详情页和社区列表共用，返回列表时一致
   api/index.js          数据接口层：请求 server/ 的接口，连不上时读取类自动退回 mock
   mock/                 模拟数据和占位图生成（接口不可用时的演示数据）
   admin/                管理后台源码（说明见 src/admin/README.md）
@@ -76,6 +77,7 @@ src/
     SearchView.vue      搜索
     TopicView.vue       专题详情
     CommunityView.vue   社区
+    PostView.vue        帖子详情
     LiveView.vue        直播
     NearbyView.vue      同城
     MeView.vue          我的
@@ -95,6 +97,7 @@ src/
 | `#/me` | 我的 |
 | `#/search?q=` | 搜索 |
 | `#/topic/:id` | 专题详情（数字 id，与片库分类、首页分区共用一套专题表） |
+| `#/post/:id` | 帖子详情（点社区卡片进来；作者栏可关注，正文、配图、关联视频、话题，底部阅读数 / 分享 / 收藏；「下一篇」替换当前记录，返回键直接回到进来之前的页面） |
 | `#/video/:id` | 播放页（视频卡片点进来就是它；数据库 `videos.playback_url` 有地址时播放真实视频，没有时用封面模拟） |
 | `#/history` | 观看历史 |
 | `#/library` | 片库 |
@@ -120,7 +123,7 @@ src/
 node server/create-admin.mjs admin 你的密码
 ```
 
-- 未登录也能正常浏览，只有点赞、收藏、观看历史需要登录 —— 点这些按钮会弹出登录框，不会跳走页面。
+- 未登录也能正常浏览，只有点赞、收藏、关注、观看历史需要登录 —— 点这些按钮会弹出登录框，不会跳走页面。
 - 登录状态存在 `localStorage`，刷新和关掉重开都还在。
 - 管理员在「我的 → 账号管理」或管理后台的「账号」页里建账号、重置密码、停用账号。
 

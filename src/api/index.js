@@ -16,6 +16,8 @@
  *   Cover  { src: string|null, fallback?: string }   <Cover v-bind="cover">
  *   Video  { id, code, title, dur, len, cover, likes, liked, faved, ... }
  *   Post   { id, name, handle, verified, time, avatar, text, tags, kind: 'image'|'video'|'doc', dur, more, videoId, media: { main, thumbs } }
+ *   PostDetail { id, title, content, kind, author: { id, name, handle, verified, avatar }, following, tags, images: Cover[],
+ *                video: { id, title, cover, dur, len } | null, read, fav, faved, publishedAt, time, next: { id, title, thumb } | null }
  * 页面里的列表都用 shallowRef 存放（整体替换，不做原地修改）。
  */
 import { get, post, del } from './http'
@@ -131,6 +133,23 @@ export const getCommunityTabs = () => call('/api/community/tabs', { mock: () => 
 export const getPosts = (tab = 0, opts = {}) =>
   call('/api/community/posts', { query: { tab, limit: opts.limit ?? 20, offset: opts.offset ?? 0 }, mock: () => mockApi().then(m => m.getPosts(tab)) })
 
+/**
+ * 帖子详情（#/post/:id）：PostDetail。title 就是列表里的 text，content 是正文（纯文本，保留换行）。
+ * 视频帖关联了已上架的视频时，主图当视频封面（video.cover），images 只放配图；否则 images = [主图, ...配图]。
+ * next：社区「最新」顺序里的下一篇（更早发布的），没有时为 null。
+ * 帖子不存在或已下架时接口回 400「帖子不存在或已下架」。
+ */
+export const getPost = id =>
+  call(`/api/community/posts/${encodeURIComponent(id)}`, { mock: () => mockApi().then(m => m.getPost(id)) })
+
+/**
+ * 记一次阅读（每次打开详情页调一次），返回 { read } 最新阅读数。
+ * 只是计数：调用方不用等它；失败（含接口不可用）直接吞掉、返回 null，不提示，也不会退回 mock。
+ */
+export const viewPost = id =>
+  call(`/api/community/posts/${encodeURIComponent(id)}/view`, { method: 'POST', mock: () => mockApi().then(m => m.viewPost(id)) })
+    .catch(() => null)
+
 /* 互动写入：body { on } 是想要的最终状态（服务端按它设置，重复点击结果不变），返回 { active, ... } */
 export const togglePostFav = (postId, { on }) =>
   call(`/api/community/posts/${postId}/fav`, { method: 'POST', body: { on }, mock: () => mockApi().then(m => m.togglePostFav(postId, on)) })
@@ -143,6 +162,9 @@ export const toggleVideoDislike = (videoId, { on }) =>
   call(`/api/videos/${videoId}/dislike`, { method: 'POST', body: { on }, mock: () => mockApi().then(m => m.toggleVideoDislike(videoId, on)) })
 export const toggleTopicFav = (topicId, { on }) =>
   call(`/api/topics/${topicId}/fav`, { method: 'POST', body: { on }, mock: () => mockApi().then(m => m.toggleTopicFav(topicId, on)) })
+/** 关注 / 取消关注创作者，返回 { active } */
+export const toggleFollow = (creatorId, { on }) =>
+  call(`/api/creators/${encodeURIComponent(creatorId)}/follow`, { method: 'POST', body: { on }, mock: () => mockApi().then(m => m.toggleFollow(creatorId, on)) })
 
 /* ---------------- 直播 / 同城 ---------------- */
 

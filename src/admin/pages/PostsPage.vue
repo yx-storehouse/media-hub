@@ -45,7 +45,7 @@ const hotOptions = [{ value: '1', label: '热门' }, { value: '0', label: '非�
 const columns = [
   { key: 'id', label: 'ID', width: 64, sortable: true, class: 'dim' },
   { key: 'mainImage', label: '主图', width: 72 },
-  { key: 'text', label: '正文', minWidth: 200 },
+  { key: 'text', label: '标题', minWidth: 200 },
   { key: 'creatorName', label: '发布者', width: 100 },
   { key: 'mediaKind', label: '类型', width: 56 },
   { key: 'readCount', label: '阅读', width: 64, align: 'right', sortable: true },
@@ -55,15 +55,19 @@ const columns = [
 ]
 const thumbOf = r => r.mainImage || r.images?.[0] || ''
 
+/* 详情正文：和服务端一样去掉行尾空白和首尾空白再比较 / 提交（只改了空白不算改动） */
+const CONTENT_MAX = 20000
+const tidyContent = v => String(v ?? '').replace(/[^\S\n]+$/gm, '').trim()
+
 /* ③ 编辑抽屉 */
 const drawer = ref(null)
 const editor = useEditor({
   blank: () => ({
-    creatorId: null, text: '', mediaKind: 1, videoId: null, tags: [], mainImage: null, images: [],
+    creatorId: null, text: '', content: '', mediaKind: 1, videoId: null, tags: [], mainImage: null, images: [],
     moreCount: 0, readCount: 0, isHot: false, status: 1, publishedAt: null
   }),
   fromRow: r => ({
-    creatorId: r.creatorId ?? null, text: r.text || '', mediaKind: r.mediaKind ?? 1, videoId: r.videoId ?? null,
+    creatorId: r.creatorId ?? null, text: r.text || '', content: r.content || '', mediaKind: r.mediaKind ?? 1, videoId: r.videoId ?? null,
     tags: [...(r.tags || [])], mainImage: r.mainImage ?? null, images: [...(r.images || [])],
     moreCount: r.moreCount ?? 0, readCount: r.readCount ?? 0, isHot: !!r.isHot, status: r.status ?? 1, publishedAt: r.publishedAt ?? null
   }),
@@ -72,12 +76,13 @@ const editor = useEditor({
   whenReady: whenLoaded,
   create: createPost,
   update: updatePost,
-  toBody: f => ({ ...f, text: f.text.trim() }),
+  toBody: f => ({ ...f, text: f.text.trim(), content: tidyContent(f.content) }),
   validate: f => {
     const e = {}
     if (!f.creatorId) e.creatorId = '请选择发布者'
-    if (!f.text.trim()) e.text = '正文不能为空'
-    else if ([...f.text.trim()].length > 5000) e.text = '正文最多 5000 个字'
+    if (!f.text.trim()) e.text = '标题不能为空'
+    else if ([...f.text.trim()].length > 5000) e.text = '标题最多 5000 个字'
+    if ([...tidyContent(f.content)].length > CONTENT_MAX) e.content = `详情正文最多 ${fmtNum(CONTENT_MAX)} 个字`
     if (f.images.length > 9) e.images = '配图最多 9 张'
     return e
   },
@@ -157,7 +162,7 @@ const subtitle = computed(() => (loaded.value ? `共 ${fmtNum(total.value)} 条`
     </PageHeader>
 
     <div class="filters">
-      <SearchBox v-model="query.q" placeholder="搜索正文 / 标签 / ID" :width="230" />
+      <SearchBox v-model="query.q" placeholder="搜索标题 / 正文 / 标签 / ID" :width="250" />
       <label class="sr-only" for="pf-status">状态</label>
       <SelectInput id="pf-status" v-model="query.status" class="f-sel" :options="statusOptions" clearable placeholder="全部状态" />
       <label class="sr-only" for="pf-creator">发布者</label>

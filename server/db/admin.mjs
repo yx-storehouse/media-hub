@@ -65,7 +65,7 @@ const LIKE = "LIKE ? ESCAPE '\\'"
 const COLUMNS = {
   videos: ['public_id', 'title', 'description', 'creator_id', 'topic_id', 'duration_sec', 'cover_url', 'cover_fallback',
     'playback_url', 'region', 'category_key', 'quality', 'tags', 'status', 'published_at', 'created_at'],
-  posts: ['creator_id', 'text', 'media_kind', 'video_id', 'tags', 'thumb_count', 'more_count', 'read_count', 'is_hot',
+  posts: ['creator_id', 'text', 'content', 'media_kind', 'video_id', 'tags', 'thumb_count', 'more_count', 'read_count', 'is_hot',
     'status', 'published_at', 'created_at'],
   topics: ['slug', 'name', 'description', 'kind', 'is_featured', 'sort_order', 'card_size', 'plays_count', 'status', 'created_at'],
   creators: ['handle', 'name', 'avatar_url', 'avatar_fallback', 'is_verified', 'is_official', 'bio', 'status', 'created_at'],
@@ -275,7 +275,7 @@ const toBrief = r => ({
 /* ---------------- 帖子 ---------------- */
 
 const POST_SELECT = `
-  SELECT p.id, p.creator_id, c.name AS creator_name, c.handle AS creator_handle, p.text, p.media_kind,
+  SELECT p.id, p.creator_id, c.name AS creator_name, c.handle AS creator_handle, p.text, p.content, p.media_kind,
          p.video_id, v.title AS video_title, v.public_id AS video_public_id, p.tags, p.more_count, p.read_count,
          p.fav_count, p.is_hot, p.status, p.published_at, p.created_at
   FROM posts p
@@ -305,7 +305,7 @@ export function toAdminPost(r) {
   if (!r) return null
   return {
     id: r.id, creatorId: r.creator_id, creatorName: r.creator_name ?? null, creatorHandle: r.creator_handle ?? null,
-    text: r.text, mediaKind: r.media_kind, videoId: r.video_id, videoTitle: r.video_title ?? null,
+    text: r.text, content: r.content ?? '', mediaKind: r.media_kind, videoId: r.video_id, videoTitle: r.video_title ?? null,
     videoPublicId: r.video_public_id ?? null, tags: parseTags(r.tags), mainImage: r.main_image ?? null,
     images: r.images ?? [], moreCount: r.more_count, readCount: r.read_count, favCount: r.fav_count,
     isHot: !!r.is_hot, status: r.status, publishedAt: r.published_at, createdAt: r.created_at
@@ -318,8 +318,9 @@ function postWhere(f) {
   const w = [], a = []
   if (f.q) {
     const like = likeArg(f.q)
-    let c = `p.text ${LIKE} OR p.tags ${LIKE}`
-    a.push(like, like)
+    // 标题 / 详情正文 / 标签都搜
+    let c = `p.text ${LIKE} OR p.content ${LIKE} OR p.tags ${LIKE}`
+    a.push(like, like, like)
     if (/^\d+$/.test(f.q)) { c += ' OR p.id = ?'; a.push(Number(f.q)) }
     w.push(`(${c})`)
   }

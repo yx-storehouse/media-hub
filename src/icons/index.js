@@ -13,6 +13,7 @@ export const icons = {
   chevL: s('<path d="m15 5-7 7 7 7"/>'),
   chevD: s('<path d="m5 9 7 7 7-7"/>'),
   close: s('<path d="M6 6l12 12M18 6 6 18"/>'),
+  plus: s('<path d="M12 5v14M5 12h14"/>'),
   list: s('<path d="M10 6.5h11M10 12h11M10 17.5h11"/><path d="M4 6.5h.01M4 12h.01M4 17.5h.01" stroke-width="2.8"/>'),
   refresh: s('<path d="M20.5 12a8.5 8.5 0 1 1-2.6-6.1"/><path d="M20.5 3.8v4.6h-4.6"/>'),
   more: s('<circle cx="12" cy="12" r="9"/><path d="M8.2 12h.01M12 12h.01M15.8 12h.01" stroke-width="2.6"/>'),

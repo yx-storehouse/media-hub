@@ -7,6 +7,7 @@ import { ref, watch } from 'vue'
  * - lazy loads the photo (native loading="lazy", async decode) and fades it in
  * - if the photo fails (offline / blocked) the fallback art simply stays visible
  * - size, radius etc. come from the class the parent puts on it
+ * - emits `load` with the native event once the photo is in (e.g. to read its natural size)
  */
 const props = defineProps({
   src: { type: String, default: null },
@@ -14,6 +15,7 @@ const props = defineProps({
   /** load immediately (above-the-fold hero images) */
   eager: Boolean
 })
+const emit = defineEmits(['load'])
 
 const loaded = ref(false)
 const failed = ref(false)
@@ -21,6 +23,11 @@ watch(() => props.src, () => {
   loaded.value = false
   failed.value = false
 })
+
+function onLoad(e) {
+  loaded.value = true
+  emit('load', e)
+}
 </script>
 
 <template>
@@ -33,7 +40,7 @@ watch(() => props.src, () => {
       decoding="async"
       draggable="false"
       :class="{ on: loaded }"
-      @load="loaded = true"
+      @load="onLoad"
       @error="failed = true"
     >
     <slot />

@@ -206,7 +206,8 @@ CREATE INDEX IF NOT EXISTS idx_episodes_series ON series_episodes(series_id, epi
 CREATE TABLE IF NOT EXISTS posts (
   id            INTEGER PRIMARY KEY,
   creator_id    INTEGER REFERENCES creators(id) ON DELETE CASCADE,
-  text          TEXT    NOT NULL,
+  text          TEXT    NOT NULL,               -- 标题：社区卡片和详情页顶部显示的这一句
+  content       TEXT    NOT NULL DEFAULT '',    -- 详情正文（纯文本，保留换行）；老库由 db/index.mjs 启动时补列
   media_kind    INTEGER NOT NULL DEFAULT 0,     -- 0=图文 1=视频 2=文档/长文
   video_id      INTEGER REFERENCES videos(id) ON DELETE SET NULL,  -- 视频帖关联的视频
   tags          TEXT    NOT NULL DEFAULT '[]',  -- JSON 数组 ["AI","剧情"]，展示为 #AI #剧情

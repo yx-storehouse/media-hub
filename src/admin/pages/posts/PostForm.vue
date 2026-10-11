@@ -21,6 +21,7 @@ import { rovingKeydown, rovingTabindex } from '../../utils/roving'
 
 /*
  * 帖子编辑表单（放在 PostsPage 的抽屉里）：左边表单，右边按前台社区卡片的样子实时预览。
+ * 「标题」就是 posts.text（卡片和详情页顶部那一句），「详情正文」是 posts.content（只在详情页显示）。
  * editor 是 useEditor 返回的 reactive 对象，这里直接改 editor.form.*。
  */
 const props = defineProps({
@@ -97,8 +98,11 @@ watch(() => form.value.creatorId, async id => {
         <FormField class="full" label="发布者" field="creatorId" required :error="errors.creatorId">
           <SelectInput v-model="form.creatorId" :options="creatorOptions" searchable placeholder="选择创作者" />
         </FormField>
-        <FormField class="full" label="正文" field="text" required :error="errors.text">
-          <TextArea v-model="form.text" :rows="4" :max-rows="12" :maxlength="5000" show-count placeholder="写点什么…" />
+        <FormField class="full" label="标题" field="text" required :error="errors.text" hint="显示在社区列表和详情页顶部">
+          <TextArea v-model="form.text" :rows="2" :max-rows="6" :maxlength="5000" show-count placeholder="一句话说清楚这条帖子" />
+        </FormField>
+        <FormField class="full" label="详情正文" field="content" :error="errors.content" hint="显示在帖子详情页标题下面，支持换行">
+          <TextArea v-model="form.content" :rows="5" :max-rows="18" :maxlength="20000" show-count placeholder="正文内容，可以分段…" />
         </FormField>
 
         <FormField class="full" label="类型" field="mediaKind" :error="errors.mediaKind" hint="视频：主图带播放按钮；文档：配图显示成文档页">

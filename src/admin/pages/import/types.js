@@ -21,7 +21,7 @@ export const TYPES = [
     type: 'posts',
     label: '帖子',
     icon: 'post',
-    desc: '社区帖子：发布者、正文、配图、关联视频',
+    desc: '社区帖子：发布者、标题、正文、配图、关联视频',
     keyCols: ['text', 'creator'],
     hasStatus: true,
     autoCreate: '自动创建不存在的创作者',
@@ -72,7 +72,7 @@ export const STATUS_CHIP = { created: 'ok', updated: 'solid', skipped: '', error
 const MARK = '（示例行，导入前请删除）'
 const TEMPLATE_EXAMPLES = {
   videos: { id: '', publicId: '', title: '示例视频' + MARK, playbackUrl: '/media/videos/example.mp4', coverUrl: '/media/covers/example.jpg' },
-  posts: { id: '', text: '示例帖子正文' + MARK, creator: '@example_user', video: '', mainImage: '/media/images/example.jpg', images: '/media/images/example-1.jpg,/media/images/example-2.jpg' },
+  posts: { id: '', text: '示例帖子标题' + MARK, content: '这里是详情页的正文，可以换行。', creator: '@example_user', video: '', mainImage: '/media/images/example.jpg', images: '/media/images/example-1.jpg,/media/images/example-2.jpg' },
   topics: { id: '', name: '示例专题' + MARK, slug: 'example-topic', covers: '/media/covers/example.jpg' },
   creators: { id: '', handle: 'example_user', name: '示例创作者' + MARK, avatarUrl: '/media/images/example.jpg' },
   keywords: { word: '示例热词' + MARK }

@@ -287,7 +287,8 @@ function deleteVideo(id) {
 
 const POST_SPEC = {
   creatorId: { col: 'creator_id', label: '发布者', required: '请选择发布者', parse: pCreatorRef },
-  text: { col: 'text', label: '正文', required: '正文不能为空', parse: pText('正文', 5000, true) },
+  text: { col: 'text', label: '标题', required: '标题不能为空', parse: pText('标题', 5000, true) },
+  content: { col: 'content', label: '详情正文', blank: '', parse: (v, k) => F.toLongText(v, k, '详情正文', { max: F.POST_CONTENT_MAX }) },
   mediaKind: { col: 'media_kind', label: '类型', blank: 1, parse: (v, k) => F.toEnum(v, k, '类型', F.POST_KIND_WORDS, ['视频', '图文', '文档']) },
   videoId: { col: 'video_id', label: '关联视频', nullable: true, parse: pVideoRef },
   tags: { col: 'tags', label: '标签', blank: '[]', parse: (v, k) => JSON.stringify(F.toTags(v, k, { hash: false })) },
@@ -1162,7 +1163,7 @@ export function exportRows(type, q = {}) {
     }))
   } else if (type === 'posts') {
     rows = A.exportPosts(f, opts).map(r => ({
-      id: str(r.id), creator: creatorRef(r.creator_handle), text: str(r.text), kind: F.postKindLabel(r.media_kind),
+      id: str(r.id), creator: creatorRef(r.creator_handle), text: str(r.text), content: str(r.content), kind: F.postKindLabel(r.media_kind),
       video: r.video_id ? (digits(r.video_public_id) || !r.video_public_id ? String(r.video_id) : r.video_public_id) : '',
       tags: parseTags(r.tags).join(','), mainImage: str(r.main_image), images: (r.images || []).join('\n'),
       moreCount: str(r.more_count), readCount: str(r.read_count), isHot: F.fmtBool(r.is_hot),

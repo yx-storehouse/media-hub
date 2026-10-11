@@ -94,6 +94,21 @@ export function toText(v, field, label, { max = 200, required = false } = {}) {
   return s
 }
 
+/** 帖子详情正文的长度上限（字） */
+export const POST_CONTENT_MAX = 20000
+
+/**
+ * 多行长文本（帖子详情正文）：换行统一成 \n，去掉每行行尾的空白和整段首尾的空白
+ * （和导入时的单元格清理一致，导出再导入不会变），段落之间的空行、后面各行的行首缩进保留；限长、拒绝控制字符
+ */
+export function toLongText(v, field, label, { max = POST_CONTENT_MAX } = {}) {
+  scalar(v, field, label)
+  const s = (v == null ? '' : String(v)).replace(/\r\n?/g, '\n').replace(/[^\S\n]+$/gm, '').trim()
+  if (chars(s) > max) bad(field, `${label}最多 ${max} 个字`)
+  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(s)) bad(field, `${label}包含非法字符`)
+  return s
+}
+
 /**
  * 整数：支持千分位「1,234」和单位「1.2w / 1.2万 / 3.4k / 1亿」
  */
@@ -340,7 +355,8 @@ export const SCHEMAS = {
     fields: [
       f('id', 'ID', 'id', ['id', '帖子id'], { help: '已有帖子的 ID：填了就更新这条帖子（不存在会报错）；新增留空' }),
       f('creator', '发布者', 'ref', ['creator', 'creatorid', 'creator_id', '作者', '创作者', '发帖人', 'author'], { required: true, example: '@aijc', help: '必填：创作者 ID、账号（可带 @）或名称；不存在时可自动创建' }),
-      f('text', '正文', 'longtext', ['text', 'content', '内容', '文案', '帖子内容', '正文内容'], { required: true, example: '川西环线十日自驾攻略', help: '必填，最多 5000 字' }),
+      f('text', '标题', 'longtext', ['text', 'title', '帖子标题', '文案'], { required: true, example: '川西环线十日自驾攻略', help: '必填，最多 5000 字；显示在社区列表和详情页顶部' }),
+      f('content', '正文', 'longtext', ['content', 'body', '详情', '详情正文', '帖子正文', '正文内容', '内容', '帖子内容'], { example: '路线：成都 → 康定 → 新都桥 → 理塘 → 稻城亚丁', help: `详情页标题下面的正文，可以换行；最多 ${POST_CONTENT_MAX} 字；更新时留空表示不改` }),
       f('kind', '类型', 'enum', ['kind', 'mediakind', 'media_kind', '帖子类型', '媒体类型'], { example: '视频', help: '视频 / 图文 / 文档（或 1 / 0 / 2）；留空为视频', options: POST_KINDS.map(o => ({ value: o.value, label: o.label })) }),
       f('video', '关联视频', 'ref', ['video', 'videoid', 'video_id', '视频', '视频id', '视频编号'], { example: 'VID-1001', help: '视频 ID 或编号' }),
       f('tags', '标签', 'tags', ['tags', 'tag', '话题', '关键词'], { example: 'AI,剧情', help: '多个用逗号或分号隔开，不需要写 #；最多 20 个' }),

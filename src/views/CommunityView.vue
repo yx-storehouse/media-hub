@@ -3,6 +3,7 @@ import { ref, shallowRef } from 'vue'
 import { getCommunityTabs, getPosts } from '@/api'
 import { toast } from '@/composables/useToast'
 import { useKeepScroll } from '@/composables/useKeepScroll'
+import { usePostStore } from '@/stores/posts'
 import Icon from '@/components/Icon.vue'
 import PostCard from '@/components/community/PostCard.vue'
 
@@ -17,12 +18,16 @@ const scroller = ref(null)
 const { reset } = useKeepScroll(scroller)
 
 const failed = ref(false)
+const postStore = usePostStore()
 
 async function load(tab) {
+  const started = Date.now()
   try {
     const list = await getPosts(tab)
     if (tab !== active.value) return   // 用户已经切到别的 tab，丢弃这次结果
     posts.value = list
+    // 新列表就是接口的最新数据：之前在详情页 / 卡片上记下的收藏、阅读数不再需要（加载期间新改的保留）
+    postStore.prune(started)
     feedKey.value++
     failed.value = false
     reset()

@@ -28,6 +28,10 @@ const db = new DatabaseSync(DB_PATH)
 db.exec('PRAGMA journal_mode = WAL')
 db.exec('PRAGMA foreign_keys = ON')
 db.exec(readFileSync(join(here, 'schema.sql'), 'utf8'))
+/* 不带 --reset 时库可能是老版本建的：先补上帖子详情正文列（与 db/index.mjs 启动时的补列一致） */
+if (!db.prepare('PRAGMA table_info(posts)').all().some(c => c.name === 'content')) {
+  db.exec("ALTER TABLE posts ADD COLUMN content TEXT NOT NULL DEFAULT ''")
+}
 db.exec(readFileSync(join(here, 'views.sql'), 'utf8'))
 console.log('表结构已就绪')
 
@@ -77,12 +81,47 @@ const SHORTS = [
   { tags: ['#森林', '#徒步', '#山间', '#自然'], title: '雨后的山林有一种特别的味道，苔藓和泥土被打开了', like: 64, fav: 98, len: 54 }
 ]
 
+/*
+ * 帖子：text 是标题（社区卡片和详情页顶部那一句），content 是详情页的正文（段落之间空一行）。
+ * thumbs：配图张数，默认 3；手作帖多给几张，详情页的图片竖排能看到 4 张以上的效果。
+ */
 const POSTS = [
-  { handle: 'aijc', text: 'AI短剧《暮色长安》第28集 重逢的那一夜，灯火与风雪同时落下', tags: ['AI', '剧情', '暮色长安', '每日大赛', 'AI短剧'], media: 'video', more: 5, read: 175, fav: 0 },
-  { handle: 'mrds', text: '同人小说 山海录系列 少年游同人文 听雨篇 三部曲附带番外篇', tags: ['同人', '山海录', '每日大赛', '小说'], media: 'doc', more: 1, read: 98, fav: 3 },
-  { handle: 'trip', text: '川西环线十日自驾攻略，附详细路线、住宿和避坑清单，收藏起来慢慢看', tags: ['旅行', '川西', '自驾攻略'], media: 'video', more: 8, read: 642, fav: 51 },
-  { handle: 'craft', text: '周末给自己做了一只羊毛毡小猫，全程无声教程，治愈到不行', tags: ['手作', '羊毛毡', '治愈'], media: 'video', more: 3, read: 321, fav: 27 }
+  {
+    handle: 'aijc', text: 'AI短剧《暮色长安》第28集 重逢的那一夜，灯火与风雪同时落下', tags: ['AI', '剧情', '暮色长安', '每日大赛', 'AI短剧'], media: 'video', more: 5, read: 175, fav: 0,
+    content: [
+      '第28集讲的是分别三年后的重逢。长安城下了今冬第一场雪，沈砚在城门口等到了从边关回来的旧友，两个人在灯火里站了很久，谁都没有先开口。',
+      '这一集的画面全部由 AI 生成，团队花了两周时间反复调整雪夜的光影和人物神态。灯笼的暖光和雪地的冷色放在同一个画面里，是这一季最满意的一组镜头。',
+      '下一集预告：旧案重提，城中那盏长明灯为什么一直没有熄灭？每晚八点更新，欢迎追更。'
+    ]
+  },
+  {
+    handle: 'mrds', text: '同人小说 山海录系列 少年游同人文 听雨篇 三部曲附带番外篇', tags: ['同人', '山海录', '每日大赛', '小说'], media: 'doc', more: 1, read: 98, fav: 3,
+    content: [
+      '《听雨篇》是山海录同人系列的第三部，讲几个少年离开书院之后各自远行，又在江南的一场春雨里重逢的故事。',
+      '三部曲按时间顺序整理在一起：上篇《初见》、中篇《别离》、下篇《听雨》。番外是书院时期的几段日常小事，可以单独看。',
+      '全文约八万字，已经全部完结。文档最后附了人物关系表和地图，第一次看的朋友可以先翻到最后一页。'
+    ]
+  },
+  {
+    handle: 'trip', text: '川西环线十日自驾攻略，附详细路线、住宿和避坑清单，收藏起来慢慢看', tags: ['旅行', '川西', '自驾攻略'], media: 'video', more: 8, read: 642, fav: 51,
+    content: [
+      '路线：成都 → 康定 → 新都桥 → 理塘 → 稻城亚丁，返程经雅江、泸定回成都，全程约 2000 公里。建议安排 9 到 10 天，每天开车不超过 5 小时，沿途的观景台都值得停一停。',
+      '住宿：新都桥和稻城旺季一定要提前订，县城里的酒店大多有供氧；亚丁景区里住一晚，第二天清早能看到雪山的日照金山。',
+      '避坑清单：高反药提前三天开始吃；山路弯多，长下坡别一直踩刹车；加油站间隔远，油表过半就加；带一件厚外套，海拔四千米以上的晚上很冷。',
+      '视频里是一路拍下的风景和每天的行程，喜欢的话收藏起来，出发前再翻出来对照着看。'
+    ]
+  },
+  {
+    handle: 'craft', text: '周末给自己做了一只羊毛毡小猫，全程无声教程，治愈到不行', tags: ['手作', '羊毛毡', '治愈'], media: 'video', more: 3, read: 321, fav: 27, thumbs: 6,
+    content: [
+      '材料：白色和灰色羊毛条各 10 克，粗、中、细三种戳针，一块海绵垫，少量黑色和粉色羊毛，再准备两颗 4 毫米的玻璃眼珠。',
+      '步骤：先把白色羊毛卷紧，戳出身体和头的大形，再换细针把表面戳平；耳朵单独在海绵上戳成三角片，最后接到头上。灰色羊毛薄薄铺在背上做花纹，眼睛和鼻子留到最后再定位。',
+      '整只做下来大概三个小时。新手最容易戳歪的是脸，可以先用珠针标出眼睛的位置再下针。配图是每一步的进度，视频是完整的无声过程。'
+    ]
+  }
 ]
+/* 配图里第 4 张起换几种比例（竖图 / 横图 / 方图），详情页按原始比例显示 */
+const EXTRA_THUMB_SIZES = [[720, 960], [800, 600], [720, 720]]
 
 const LIVES = [
   ['qingchuan', '晴川的深夜电台', '夜聊·音乐·陪伴', 23000], ['nanqiao', '南乔手作课堂', '羊毛毡新手教学', 11000],
@@ -148,8 +187,8 @@ const insVideo = db.prepare(`INSERT INTO videos(public_id,title,creator_id,topic
                              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 const insSection = db.prepare(`INSERT INTO home_sections(topic_id,title,is_featured,card_size,sort_order,updated_at) VALUES(?,?,?,?,?,?)`)
 const insSectionItem = db.prepare(`INSERT INTO home_section_items(section_id,video_id,sort_order,batch_key,batch_no) VALUES(?,?,?,?,?)`)
-const insPost = db.prepare(`INSERT INTO posts(creator_id,text,media_kind,video_id,tags,thumb_count,more_count,read_count,fav_count,
-                            is_hot,status,published_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+const insPost = db.prepare(`INSERT INTO posts(creator_id,text,content,media_kind,video_id,tags,thumb_count,more_count,read_count,fav_count,
+                            is_hot,status,published_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 const insPostMedia = db.prepare(`INSERT INTO post_media(post_id,media_type,role,url,fallback,duration_sec,sort_order) VALUES(?,?,?,?,?,?,?)`)
 const insLive = db.prepare(`INSERT INTO live_rooms(creator_id,title,subtitle,category,cover_url,cover_fallback,status,viewer_count,started_at,created_at)
                             VALUES(?,?,?,?,?,?,?,?,?,?)`)
@@ -264,15 +303,17 @@ tx(() => {
   POSTS.forEach((p, i) => {
     const creatorId = creatorIdByHandle.get(p.handle)
     const videoId = i === 0 ? videoIdsByTopic.get(0)[0] : (i >= 2 ? videoIdsByTopic.get(7)[i] : null)
-    const postId = Number(insPost.run(creatorId, p.text, p.media === 'video' ? 1 : 2, videoId,
-      JSON.stringify(p.tags), 3, p.more, p.read, p.fav, i === 0 ? 1 : 0, 1, now - (i + 1) * 600, now - (i + 1) * 600).lastInsertRowid)
+    const thumbs = p.thumbs || 3
+    const postId = Number(insPost.run(creatorId, p.text, p.content.join('\n\n'), p.media === 'video' ? 1 : 2, videoId,
+      JSON.stringify(p.tags), thumbs, p.more, p.read, p.fav, i === 0 ? 1 : 0, 1, now - (i + 1) * 600, now - (i + 1) * 600).lastInsertRowid)
     if (p.media === 'video') {
       const main = cover('post' + i, { vignette: false, w: 800, h: 450 })
       insPostMedia.run(postId, 1, 0, ...coverCols(main), videoId ? 441 : null, 0)
     }
-    for (let k = 0; k < 3; k++) {
+    for (let k = 0; k < thumbs; k++) {
+      const [w, h] = k < 3 ? [360, 320] : EXTRA_THUMB_SIZES[(k - 3) % EXTRA_THUMB_SIZES.length]
       const c = p.media === 'video'
-        ? cover(`post${i}t${k}`, { kind: (i + k + 1) % 6, w: 360, h: 320 })
+        ? cover(`post${i}t${k}`, { kind: (i + k + 1) % 6, w, h })
         : docThumb('doc' + k, k === 2)
       insPostMedia.run(postId, p.media === 'video' ? 0 : 2, 1, ...coverCols(c), null, k)
     }

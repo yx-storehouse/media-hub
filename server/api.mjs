@@ -164,6 +164,23 @@ export function getPosts(tab = 0, opts = {}, userId = null) {
   return Promise.resolve(q.attachPostState(list, userId))
 }
 
+/*
+ * 帖子详情：公开接口，登录时按当前用户回填 following / faved。
+ * 不存在或未发布是正常的业务答复（400），不能当成服务端故障（500）。
+ */
+export function getPost(id, userId = null) {
+  const p = Number.isSafeInteger(id) ? q.postDetail(id, userId) : null
+  if (!p) inputError('帖子不存在或已下架')
+  return Promise.resolve(p)
+}
+
+/** 打开一次详情页记一次阅读（公开接口，不需要登录），返回 { read } 新的阅读数 */
+export function viewPost(id) {
+  const read = Number.isSafeInteger(id) ? q.addPostView(id) : null
+  if (read == null) inputError('帖子不存在或已下架')
+  return Promise.resolve({ read })
+}
+
 /* 互动：必须登录，未登录时 requireUser 会抛出「未登录」 */
 /* on：true / false = 设为该状态；undefined = 切换（兼容旧调用） */
 export const togglePostFav = (postId, userId, on) => Promise.resolve(q.togglePostFav(requireUser(userId), postId, on))

@@ -291,7 +291,7 @@ CREATE TRIGGER IF NOT EXISTS posts_fts_delete AFTER DELETE ON posts BEGIN
   INSERT INTO posts_fts(posts_fts, rowid, text, tags) VALUES ('delete', old.id, old.text, old.tags);
 END;
 
--- 管理后台会改帖子正文 / 标签，索引要同步（老库由 db/index.mjs 启动时补建）
+-- 管理后台会改帖子标题 / 标签，索引要同步（老库由 db/index.mjs 启动时补建）
 CREATE TRIGGER IF NOT EXISTS posts_fts_update AFTER UPDATE OF text, tags ON posts BEGIN
   INSERT INTO posts_fts(posts_fts, rowid, text, tags) VALUES ('delete', old.id, old.text, old.tags);
   INSERT INTO posts_fts(rowid, text, tags) VALUES (new.id, new.text, new.tags);

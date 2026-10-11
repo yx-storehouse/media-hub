@@ -46,4 +46,24 @@ export const getSomething = (id) =>
 - 所有函数返回 Promise，失败时抛 `ApiError`（`message` 可直接展示给用户）。
 - 后端统一返回 `{ code: 0, data }` / `{ code: 1, message }`，`code !== 0` 会被当成错误抛出。
 - 列表统一支持 `limit` / `offset`，暂不支持游标分页。
-- 互动类接口（点赞、收藏）返回 `{ active: boolean }` 表示最新状态。
+- 互动类接口（点赞、收藏、关注）请求体是 `{ on }`（想要的最终状态），返回 `{ active: boolean }` 表示最新状态。
+- 只为计数的写操作（帖子阅读数 `viewPost`）不等结果、失败直接吞掉（返回 `null`），不提示也不退回 mock。
+- 演示数据的 id 不一定是数字（如视频 `rec0:3`），拼进路径时用 `encodeURIComponent`。
+
+## 帖子详情
+
+`getPost(id)` → `GET /api/community/posts/:id`，返回：
+
+```js
+{ id, title, content, kind,                 // title 即列表里的 text；content 纯文本，空行分段
+  author: { id, name, handle, verified, avatar },
+  following,                                // 当前用户是否关注作者（未登录为 false）
+  tags,                                     // 不带 #
+  images,                                   // Cover[]；视频帖有关联视频时主图当视频封面，这里只放配图
+  video,                                    // { id, title, cover, dur, len } | null（只有已上架的关联视频）
+  read, fav, faved, publishedAt, time,
+  next }                                    // 社区「最新」顺序里的下一篇 { id, title, thumb } | null
+```
+
+帖子不存在或已下架时回 400「帖子不存在或已下架」（页面显示提示，不给重试）。详情页每次打开调一次
+`viewPost(id)`（`POST …/view` → `{ read }`），关注用 `toggleFollow(creatorId, { on })`（`POST /api/creators/:id/follow`）。

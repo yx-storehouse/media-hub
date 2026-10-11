@@ -28,6 +28,8 @@ const routes = [
   { path: '/search', name: 'search', component: () => import('@/views/SearchView.vue') },
   // 播放页；id 来自接口（数字）或演示数据（如 rec0:3），链接里统一 encodeURIComponent
   { path: '/video/:id', name: 'video', component: () => import('@/views/VideoView.vue') },
+  // 帖子详情（社区卡片点进来）；id 同样可能来自接口或演示数据，链接里 encodeURIComponent
+  { path: '/post/:id', name: 'post', component: () => import('@/views/PostView.vue') },
   // numeric ids only; anything else falls through to the catch-all
   { path: '/topic/:id(\\d+)', name: 'topic', component: () => import('@/views/TopicView.vue') },
   { path: '/history', name: 'history', component: () => import('@/views/HistoryView.vue') },
