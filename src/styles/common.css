@@ -24,7 +24,21 @@
   line-height: 17px;
   font-variant-numeric: tabular-nums;
 }
-.tt { margin-top: 7px; overflow: hidden; color: var(--t-card); font-size: 12px; line-height: 17px; white-space: nowrap; text-overflow: ellipsis; }
+/* title: up to two lines; always reserves two so cards in a row line up */
+.tt {
+  display: -webkit-box;
+  min-height: 34px;
+  margin-top: 7px;
+  overflow: hidden;
+  color: var(--t-card);
+  font-size: 12px;
+  line-height: 17px;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+/* the full-width featured card has no neighbour to line up with: no empty second line */
+.vc.big .tt { min-height: 0; }
 
 /* ---- soft full-width button (换一批 / 看更多) ---- */
 .btn-soft { display: flex; flex: 1; align-items: center; justify-content: center; gap: 5px; height: 29px; border-radius: 8px; background: #1e1e1e; color: var(--t2); font-size: 13px; }
@@ -83,8 +97,24 @@
 .ct-search > span { min-width: 0; padding-right: 12px; overflow: hidden; text-overflow: ellipsis; }
 
 /* ---- back arrow button ---- */
-.sh-back { display: grid; place-items: center; width: 24px; height: 36px; margin-right: 1px; }
+.sh-back { position: relative; display: grid; place-items: center; width: 24px; height: 36px; margin-right: 1px; }
 .sh-back svg { width: 22px; height: 22px; color: #fff; stroke-width: 2.8; }
+/* the arrow is only 24x36: give the finger a 44x44 target without changing the look (more room on the left, toward the edge) */
+.sh-back::after { content: ''; position: absolute; inset: -4px -8px -4px -12px; }
+
+/*
+ * any small round / icon button: add class "hit-44" to grow its tap area to at least 44x44
+ * (centred, the look stays the same). The button must be positioned (relative / absolute / fixed)
+ * and must not use ::after for something else.
+ */
+.hit-44::after {
+  content: '';
+  position: absolute;
+  top: min(0px, calc(50% - 22px));
+  right: min(0px, calc(50% - 22px));
+  bottom: min(0px, calc(50% - 22px));
+  left: min(0px, calc(50% - 22px));
+}
 
 /* ---- bottom sheet content (BottomSheet.vue) ---- */
 .opts { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }

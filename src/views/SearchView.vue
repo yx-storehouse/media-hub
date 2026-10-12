@@ -1,110 +1,130 @@
+<script>
+/*
+ * 返回恢复（做法同 CreatorView）：搜索页不常驻（不在 KeepAlive 里），从结果点进视频 / 帖子再返回时，
+ * 用离开前存下的结果（两个标签已加载的列表、当前标签、各自的滚动位置）原样放回，不重新请求，也不回到顶部。
+ * 只在「返回到这条历史记录」时恢复（history.state.forward 有值）；重新进来是全新的一页。
+ */
+const snapshots = new Map()
+const SNAPSHOT_TTL = 10 * 60 * 1000
+const SNAPSHOT_MAX = 6
+</script>
+
 <script setup>
-import { ref, shallowRef, onMounted } from 'vue'
+import { ref, shallowRef, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter, onBeforeRouteUpdate } from 'vue-router'
 import Icon from '@/components/Icon.vue'
 import Cover from '@/components/Cover.vue'
 import VideoCard from '@/components/VideoCard.vue'
+import PostCard from '@/components/community/PostCard.vue'
+import SkeletonGrid from '@/components/home/SkeletonGrid.vue'
+import ListFoot from '@/components/home/ListFoot.vue'
+import { createPagedFeed, feedCount, useScrollMore } from '@/components/search/paging'
+import { useRecentSearches } from '@/components/search/recent'
 import { useBack } from '@/composables/useBack'
 import { toast } from '@/composables/useToast'
-import { getHotWords, getCreators, getRecentSearches, searchVideos } from '@/api'
+import { getHotWords, getCreators, searchVideos, searchPosts } from '@/api'
 
+/*
+ * 搜索页（#/search?q=关键词&type=post）。
+ * 没有关键词时是建议页：近期搜索（搜过的关键词，可删除）、热门搜索、热门创作者。
+ * 有关键词时是结果页：「视频 / 帖子」两个标签同时搜，标签上是各自的结果数，滚到底自动加载下一页。
+ * 关键词和标签记在地址栏，刷新 / 返回还是同样的结果；type 省略 = 视频。
+ * 从建议页搜索多一条历史（返回回到建议页），结果页里再换词、切标签不多。
+ * 帖子里的话题、社区的搜索框带 type=post 进来，默认显示「帖子」。
+ */
 defineOptions({ name: 'SearchView' })
+
+const TYPES = [{ key: 'video', label: '视频', unit: '个' }, { key: 'post', label: '帖子', unit: '条' }]
+const typeInfo = key => TYPES.find(x => x.key === key)
+const typeOf = v => (v === 'post' ? 'post' : 'video')
+const otherOf = key => (key === 'video' ? 'post' : 'video')
+const queryParam = raw => (typeof raw === 'string' ? raw.trim() : '')
+const fmtCount = n => (n >= 10000 ? (n / 10000).toFixed(1).replace(/\.0$/, '') + 'w' : String(n))
 
 const route = useRoute()
 const router = useRouter()
 const back = useBack()
 
 const inputEl = ref(null)
-const recentEl = ref(null)
+const scroller = ref(null)
 
-/** text in the field; `query` is what the results currently show ('' = suggestions) */
+/** 输入框里的字；`query` 是结果页正在显示的关键词（'' = 建议页） */
 const text = ref('')
 const query = ref('')
-/** { q, total, list, key }; `key` re-mounts the grid so every search fades in */
-const results = shallowRef(null)
-let searchSeq = 0
+const type = ref(typeOf(route.query.type))
+/* 每搜一次 +1：重建结果列表，新结果淡入 */
+const resultKey = ref(0)
+
+let currentQ = ''
+const feeds = {
+  video: createPagedFeed(page => searchVideos(currentQ, page)),
+  post: createPagedFeed(page => searchPosts(currentQ, page))
+}
+const checkMore = useScrollMore(scroller, () => (query.value ? feeds[type.value] : null))
+/* 各标签自己的滚动位置：切标签时各回各的位置 */
+const savedTop = { video: 0, post: 0 }
+
+const placeholder = computed(() => (type.value === 'post' && !query.value ? '搜索帖子、话题' : '搜您想搜,看您所想'))
+
+/* ---------- 建议页：近期搜索 / 热门搜索 / 热门创作者 ---------- */
+
+const recent = useRecentSearches()
+const recentList = recent.list
+/* 近期搜索的编辑状态：点「清除」后每个词带 ×，点一下删掉；「全部清除」清空 */
+const editing = ref(false)
+watch(recentList, list => { if (!list.length) editing.value = false })
 
 const hotWords = shallowRef([])
+/* 一批热门词的个数（和服务端 /api/search/hot 一致）；不够一批说明没有别的可换 */
+const HOT_BATCH = 8
 const creators = shallowRef([])
-const recent = shallowRef([])
-/* 换一批 pages; an answer for a page that is no longer current is dropped */
+/* 换一批的页码；答复回来时页码已经变了就丢掉 */
 let hotPage = 0
-let recentPage = 0
-let suggestionsLoaded = false
-
-const queryParam = raw => (typeof raw === 'string' ? raw.trim() : '')
+let hotLoaded = false
+let creatorsLoaded = false
 
 async function loadHotWords() {
   const page = hotPage
-  const words = await getHotWords(page)
-  if (page === hotPage) hotWords.value = words
-}
-
-/** Resolves to false when the answer is stale. */
-async function loadRecent() {
-  const page = recentPage
-  const videos = await getRecentSearches(page)
-  if (page !== recentPage) return false
-  recent.value = videos
-  return true
-}
-
-async function loadSuggestions() {
-  if (suggestionsLoaded) return
-  suggestionsLoaded = true
-  loadHotWords()
-  loadRecent()
-  creators.value = await getCreators()
-}
-
-async function showResults(q) {
-  query.value = q
-  const key = ++searchSeq
-  const res = await searchVideos(q)
-  if (key !== searchSeq) return
-  results.value = { q, total: res.total, list: res.list, key }
-}
-
-function showSuggestions() {
-  ++searchSeq
-  query.value = ''
-  results.value = null
-  loadSuggestions()
-}
-
-/** Show what the URL asks for: ?q=… -> results, otherwise suggestions. */
-function applyQuery(q) {
-  text.value = q
-  if (q) showResults(q)
-  else showSuggestions()
-}
-
-/* the query lives in the URL (replace, no extra history entry) so refresh / back restore the results */
-function syncUrl(q) {
-  if (queryParam(route.query.q) === q) return
-  router.replace({ query: q ? { q } : {} })
-}
-
-function search() {
-  const q = text.value.trim()
-  if (!q) {
-    toast('请输入搜索内容')
-    return
+  hotLoaded = true
+  try {
+    const words = await getHotWords(page)
+    if (page === hotPage) hotWords.value = words
+  } catch {
+    if (page === hotPage) hotLoaded = false   // 下次显示时再试
   }
-  inputEl.value.blur()
-  showResults(q)
-  syncUrl(q)
 }
 
-function searchFor(word) {
-  text.value = word
-  search()
+async function loadCreators() {
+  creatorsLoaded = true
+  try {
+    creators.value = await getCreators()
+  } catch {
+    creatorsLoaded = false
+  }
 }
 
-function onEnter(e) {
-  // the Enter that confirms an IME composition must not search (Safari reports it as keyCode 229)
-  if (e.isComposing || e.keyCode === 229) return
-  search()
+function loadSuggestions() {
+  if (!hotLoaded) loadHotWords()
+  if (!creatorsLoaded) loadCreators()
+  recent.load()
+}
+
+/* 没结果时推荐的词：去掉正在搜的这个 */
+const hotForEmpty = computed(() => hotWords.value.filter(w => w.word !== query.value))
+
+function shuffleHot() {
+  hotPage++
+  loadHotWords()
+}
+
+function onKeyword(k) {
+  if (editing.value) recent.remove(k)
+  else searchFor(k)
+}
+
+function clearRecent() {
+  editing.value = false
+  recent.clear()
 }
 
 /* 热门创作者：有 id 就进主页；拿不到 id 的（旧数据）还是按名字搜索 */
@@ -113,41 +133,191 @@ function openCreator(c) {
   else searchFor(c.name)
 }
 
+/* ---------- 结果页 ---------- */
+
+function showResults(q, t = type.value) {
+  query.value = currentQ = q
+  type.value = t
+  editing.value = false
+  feeds.video.reset()
+  feeds.post.reset()
+  savedTop.video = savedTop.post = 0
+  resultKey.value++
+  if (scroller.value) scroller.value.scrollTop = 0
+  // 两个标签一起搜：标签上马上有各自的结果数，切过去也不用再等
+  feeds.video.more()
+  feeds.post.more()
+  // 没结果时要列出热门搜索词
+  if (!hotLoaded) loadHotWords()
+  recent.note(q)
+}
+
+function showSuggestions(t = type.value) {
+  query.value = currentQ = ''
+  type.value = t
+  feeds.video.reset()
+  feeds.post.reset()
+  if (scroller.value) scroller.value.scrollTop = 0
+  loadSuggestions()
+}
+
+/** 按地址栏显示：?q=… 结果页，否则建议页 */
+function applyQuery(q, t) {
+  text.value = q
+  if (q) showResults(q, t)
+  else showSuggestions(t)
+}
+
+/*
+ * 关键词和标签记在地址栏，刷新 / 返回能还原。
+ * 从建议页搜索时 push（返回回到近期搜索 / 热门搜索）；结果页里换关键词、切标签、清空用 replace，不多一条历史。
+ */
+function syncUrl(push = false) {
+  const q = query.value
+  if (queryParam(route.query.q) === q && typeOf(route.query.type) === type.value) return
+  const to = { query: { ...(q ? { q } : {}), ...(type.value === 'post' ? { type: 'post' } : {}) } }
+  if (push) router.push(to)
+  else router.replace(to)
+}
+
+function search() {
+  const q = text.value.trim()
+  if (!q) {
+    toast('请输入搜索内容')
+    return
+  }
+  const fromSuggestions = !query.value
+  inputEl.value?.blur()
+  showResults(q)
+  syncUrl(fromSuggestions)
+}
+
+function searchFor(word) {
+  text.value = word
+  search()
+}
+
+function onEnter(e) {
+  // 输入法确认候选词的那次回车不算搜索（Safari 报 keyCode 229）
+  if (e.isComposing || e.keyCode === 229) return
+  search()
+}
+
 function clear() {
   text.value = ''
   showSuggestions()
-  syncUrl('')
-  inputEl.value.focus()
+  syncUrl()
+  inputEl.value?.focus()
 }
 
-function shuffleHot() {
-  hotPage++
-  loadHotWords()
+function selectType(key) {
+  const el = scroller.value
+  if (key === type.value) {
+    // 再点一次当前标签：回到列表开头
+    if (el && el.scrollTop > 0) el.scrollTo({ top: 0, behavior: 'smooth' })
+    return
+  }
+  if (el) savedTop[type.value] = el.scrollTop
+  type.value = key
+  syncUrl()
+  nextTick(() => {
+    if (el) el.scrollTop = savedTop[key]
+    checkMore()
+  })
 }
 
-async function shuffleRecent() {
-  recentPage++
-  // the row may be gone (a search started) by the time the answer arrives
-  if (await loadRecent() && recentEl.value) recentEl.value.scrollLeft = 0
+/* 方向键在两个标签之间切换（只有选中的标签能 Tab 进入） */
+function onTabKey(e) {
+  if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
+  e.preventDefault()
+  const next = otherOf(type.value)
+  selectType(next)
+  nextTick(() => document.getElementById(`sr-tab-${next}`)?.focus())
 }
 
-applyQuery(queryParam(route.query.q))
-onBeforeRouteUpdate(to => {
-  // our own router.replace() already shows that query; only react to back/forward or external links
-  const q = queryParam(to.query.q)
-  if (q !== query.value) applyQuery(q)
-})
+function onScroll() {
+  if (query.value && scroller.value) savedTop[type.value] = scroller.value.scrollTop
+}
+
+/* ---------- 返回恢复 ---------- */
+
+let snapKey = window.history.state?.position ?? ''
+
+function saveSnapshot() {
+  if (!query.value) return
+  const el = scroller.value
+  if (el && el.isConnected && el.clientHeight) savedTop[type.value] = el.scrollTop
+  snapshots.delete(snapKey)
+  snapshots.set(snapKey, {
+    at: Date.now(),
+    q: query.value,
+    video: feeds.video.snapshot(),
+    post: feeds.post.snapshot(),
+    top: { ...savedTop }
+  })
+  while (snapshots.size > SNAPSHOT_MAX) snapshots.delete(snapshots.keys().next().value)
+}
+
+function restoreSnapshot(q, t) {
+  const s = window.history.state?.forward ? snapshots.get(snapKey) : null
+  snapshots.delete(snapKey)
+  if (!s || s.q !== q || Date.now() - s.at > SNAPSHOT_TTL) return false
+  text.value = query.value = currentQ = q
+  type.value = t
+  editing.value = false
+  feeds.video.restore(s.video)
+  feeds.post.restore(s.post)
+  // 离开时第一页还没回来的列表：重新取
+  for (const f of Object.values(feeds)) if (f.total === null) f.more()
+  Object.assign(savedTop, s.top)
+  return true
+}
+
+function scrollToSaved() {
+  nextTick(() => {
+    if (scroller.value) scroller.value.scrollTop = savedTop[type.value]
+    checkMore()
+  })
+}
+
+const startQ = queryParam(route.query.q)
+const restored = !!startQ && restoreSnapshot(startQ, typeOf(route.query.type))
+if (!restored) applyQuery(startQ, typeOf(route.query.type))
 
 onMounted(() => {
-  // only auto-focus with a real pointer: on touch devices it would pop the keyboard over the suggestions
-  if (!query.value && window.matchMedia('(hover: hover)').matches) inputEl.value.focus()
+  if (restored) {
+    scrollToSaved()
+    return
+  }
+  // 只在有鼠标的设备上自动聚焦：触屏上会弹出键盘挡住建议
+  if (!query.value && window.matchMedia('(hover: hover)').matches) inputEl.value?.focus()
+})
+onBeforeUnmount(saveSnapshot)
+
+/* 同一页里换了关键词（比如结果里帖子的话题）：先给当前结果存一份，按返回能原样回来 */
+onBeforeRouteUpdate(to => {
+  if (queryParam(to.query.q) !== query.value) saveSnapshot()
+})
+/* 地址栏变了（返回 / 前进、外部链接）；自己 replace 的地址和页面一致，不会重新搜索 */
+watch(() => route.fullPath, () => {
+  if (route.name !== 'search') return   // 正在离开搜索页
+  snapKey = window.history.state?.position ?? ''
+  const q = queryParam(route.query.q)
+  const t = typeOf(route.query.type)
+  if (q !== query.value) {
+    if (q && restoreSnapshot(q, t)) scrollToSaved()
+    else applyQuery(q, t)
+  } else if (t !== type.value) {
+    if (q) selectType(t)
+    else type.value = t
+  }
 })
 </script>
 
 <template>
-  <div class="page search">
+  <div class="page search" :class="{ 'has-res': query }">
     <div class="sh-hd">
-      <button class="sh-back" aria-label="返回" @click="back"><Icon name="chevL" /></button>
+      <button type="button" class="sh-back" aria-label="返回" @click="back"><Icon name="chevL" /></button>
       <div class="sh-field">
         <Icon name="search" />
         <input
@@ -157,53 +327,139 @@ onMounted(() => {
           enterkeyhint="search"
           autocomplete="off"
           aria-label="搜索"
-          placeholder="搜您想搜,看您所想"
+          :placeholder="placeholder"
           @keydown.enter="onEnter"
         >
-        <button v-show="text" class="clr" aria-label="清除" @click="clear"><Icon name="close" /></button>
+        <button v-show="text" type="button" class="clr" aria-label="清除" @click="clear"><Icon name="close" /></button>
       </div>
-      <button class="sh-btn" @click="search">搜索</button>
+      <button type="button" class="sh-btn" @click="search">搜索</button>
     </div>
 
-    <div class="scroll">
-      <template v-if="results">
-        <div class="res-t">“{{ results.q }}”<span>共 {{ results.total }} 个结果</span></div>
-        <div :key="results.key" v-fade-in class="grid g16">
-          <VideoCard v-for="v in results.list" :key="v.id" :video="v" />
-        </div>
+    <!-- 结果页：视频 / 帖子 -->
+    <div v-if="query" class="sr-tabs" role="tablist" aria-label="搜索结果">
+      <button
+        v-for="t in TYPES"
+        :id="`sr-tab-${t.key}`"
+        :key="t.key"
+        type="button"
+        role="tab"
+        class="sr-tab"
+        :class="{ on: type === t.key }"
+        :aria-selected="type === t.key"
+        :aria-controls="`sr-pane-${t.key}`"
+        :tabindex="type === t.key ? 0 : -1"
+        @click="selectType(t.key)"
+        @keydown="onTabKey"
+      >
+        {{ t.label }}<span v-if="feedCount(feeds[t.key]) !== null" class="n">{{ fmtCount(feedCount(feeds[t.key])) }}</span>
+      </button>
+    </div>
+
+    <div ref="scroller" class="scroll" @scroll.passive="onScroll">
+      <template v-if="query">
+        <section
+          v-for="t in TYPES"
+          v-show="type === t.key"
+          :id="`sr-pane-${t.key}`"
+          :key="t.key"
+          class="sr-pane"
+          role="tabpanel"
+          :aria-labelledby="`sr-tab-${t.key}`"
+        >
+          <!-- 第一页还没回来：骨架；第一页失败：重试 -->
+          <template v-if="feeds[t.key].total === null">
+            <div v-if="feeds[t.key].error" class="empty">
+              加载失败，请检查网络
+              <button type="button" class="retry" @click="feeds[t.key].more()">重试</button>
+            </div>
+            <SkeletonGrid v-else-if="t.key === 'video'" :count="6" gap="g16" />
+            <div v-else aria-hidden="true">
+              <div v-for="i in 3" :key="i" class="sk-post">
+                <div class="sk av" />
+                <div class="bd"><div class="sk l1" /><div class="sk l2" /><div class="sk md" /></div>
+              </div>
+            </div>
+          </template>
+
+          <!-- 没有结果：换个词，或者看看另一个标签 -->
+          <div v-else-if="!feeds[t.key].list.length" class="sr-none">
+            <p class="t1">没有找到相关{{ t.label }}</p>
+            <p class="t2">换个关键词试试</p>
+            <button
+              v-if="feedCount(feeds[otherOf(t.key)]) > 0"
+              type="button"
+              class="sr-alt"
+              @click="selectType(otherOf(t.key))"
+            >
+              看看相关{{ typeInfo(otherOf(t.key)).label }} · {{ fmtCount(feedCount(feeds[otherOf(t.key)])) }} {{ typeInfo(otherOf(t.key)).unit }}<Icon name="chevR" />
+            </button>
+            <template v-if="hotForEmpty.length">
+              <div class="sr-hot-t">大家都在搜</div>
+              <div class="kws">
+                <button v-for="w in hotForEmpty" :key="w.word" type="button" class="kw" @click="searchFor(w.word)"><span>{{ w.word }}</span></button>
+              </div>
+            </template>
+          </div>
+
+          <template v-else>
+            <div v-if="t.key === 'video'" :key="resultKey" v-fade-in class="grid g16 sr-grid">
+              <VideoCard v-for="v in feeds.video.list" :key="v.id" :video="v" />
+            </div>
+            <div v-else :key="resultKey">
+              <PostCard v-for="p in feeds.post.list" :key="p.id" :post="p" />
+            </div>
+            <ListFoot :feed="feeds[t.key]" />
+          </template>
+        </section>
       </template>
 
-      <!-- suggestions; a search whose first results are still loading shows neither -->
-      <template v-else-if="!query">
-        <div class="sh-st">
-          <div class="t">热门搜索</div>
-          <button class="pill" @click="shuffleHot">换一批</button>
-        </div>
-        <div class="hot">
-          <button v-for="w in hotWords" :key="w.word" @click="searchFor(w.word)">
-            {{ w.word }}<Icon v-if="w.hot" name="flame" class="fl" />
-          </button>
-        </div>
+      <!-- 建议页 -->
+      <template v-else>
+        <template v-if="recentList.length">
+          <div class="sh-st">
+            <div class="t">近期搜索</div>
+            <button v-if="!editing" type="button" class="pill" @click="editing = true">清除</button>
+            <div v-else class="sh-ops">
+              <button type="button" class="pill" @click="clearRecent">全部清除</button>
+              <button type="button" class="pill" @click="editing = false">完成</button>
+            </div>
+          </div>
+          <div class="kws recent" :class="{ editing }">
+            <button
+              v-for="k in recentList"
+              :key="k"
+              type="button"
+              class="kw"
+              :aria-label="editing ? `删除 ${k}` : undefined"
+              @click="onKeyword(k)"
+            >
+              <span>{{ k }}</span><Icon v-if="editing" name="close" class="x" />
+            </button>
+          </div>
+        </template>
+
+        <!-- 热门搜索：服务端只给搜得到东西的词；一个都没有就整块不显示，不够一批时没有「换一批」 -->
+        <template v-if="hotWords.length">
+          <div class="sh-st">
+            <div class="t">热门搜索</div>
+            <button v-if="hotWords.length >= HOT_BATCH" type="button" class="pill" @click="shuffleHot">换一批</button>
+          </div>
+          <div class="hot">
+            <button v-for="w in hotWords" :key="w.word" type="button" @click="searchFor(w.word)">
+              {{ w.word }}<Icon v-if="w.hot" name="flame" class="fl" />
+            </button>
+          </div>
+        </template>
 
         <div class="sh-st">
           <div class="t">热门创作者</div>
-          <button class="pill r" @click="toast('创作者列表即将上线')">查看全部<Icon name="chevR" /></button>
+          <button type="button" class="pill r" @click="toast('创作者列表即将上线')">查看全部<Icon name="chevR" /></button>
         </div>
         <div class="stars">
           <div v-for="c in creators" :key="c.id ?? c.name" v-press class="st" :aria-label="c.id != null ? `${c.name} 的主页` : undefined" @click="openCreator(c)">
             <Cover class="av" v-bind="c.avatar" />
             <div class="nm">{{ c.name }}</div>
           </div>
-        </div>
-
-        <div class="sh-st">
-          <div class="t">近期搜索</div>
-          <button class="pill" @click="shuffleRecent">换一批</button>
-        </div>
-        <div ref="recentEl" class="recent hs">
-          <VideoCard v-for="v in recent" :key="v.id" :video="v">
-            <template #badge><span class="code">{{ v.code }}</span></template>
-          </VideoCard>
         </div>
       </template>
       <div class="pad-b" />
@@ -214,6 +470,8 @@ onMounted(() => {
 <style scoped>
 /* ---- header ---- */
 .sh-hd { display: flex; flex: none; align-items: center; gap: 9px; height: 57px; padding: 0 14px; border-bottom: 1px solid var(--line); }
+/* 结果页下面紧跟着标签栏（它自己有分隔线） */
+.has-res .sh-hd { border-bottom-color: transparent; }
 .sh-field {
   display: flex;
   flex: 1;
@@ -227,11 +485,12 @@ onMounted(() => {
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .02);
 }
 .sh-field svg { width: 14px; height: 14px; color: var(--t2); stroke-width: 2.4; }
-.sh-field input { flex: 1; min-width: 0; border: 0; background: none; color: var(--t2); font-size: 14px; caret-color: #fff; }
+/* 输入的字用主文字色，和灰色的占位文字分得开；16px 让 iOS 聚焦时不自动放大页面 */
+.sh-field input { flex: 1; min-width: 0; height: 100%; border: 0; background: none; color: var(--t1); font-size: 16px; caret-color: #fff; }
 .sh-field input::placeholder { color: #6e6e6e; }
 /* the custom .clr button replaces the browser's own clear button of type="search" */
 .sh-field input::-webkit-search-cancel-button { display: none; }
-.sh-field .clr { position: relative; display: grid; place-items: center; width: 16px; height: 16px; border-radius: 50%; background: #3a3a3a; color: var(--bg); }
+.sh-field .clr { position: relative; display: grid; flex: none; place-items: center; width: 16px; height: 16px; border-radius: 50%; background: #3a3a3a; color: var(--bg); }
 /* 16px is too small to tap: enlarge the hit area only */
 .sh-field .clr::after { content: ''; position: absolute; inset: -10px; }
 .sh-field .clr svg { width: 10px; height: 10px; color: var(--bg); stroke-width: 3; }
@@ -242,6 +501,28 @@ onMounted(() => {
 .sh-st { display: flex; align-items: center; justify-content: space-between; height: 44px; padding: 0 14px 0 12px; }
 .sh-st .t { display: flex; align-items: center; gap: 6px; color: var(--t2); font-size: 13px; font-weight: 500; }
 .sh-st .t::before { content: ''; width: 3px; height: 13px; border-radius: 2px; background: var(--accent); }
+.sh-ops { display: flex; gap: 14px; }
+
+/* 关键词标签（近期搜索、没结果时的「大家都在搜」） */
+.kws { display: flex; flex-wrap: wrap; gap: 9px 8px; padding: 0 14px; }
+.kws.recent { margin-bottom: 14px; }
+.kw {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  height: 30px;
+  padding: 0 13px;
+  border-radius: 15px;
+  background: var(--chip);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .04);
+  color: #e6e6e6;
+  font-size: 13px;
+}
+.kw span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kw:active { background: #222; }
+.kw .x { flex: none; width: 11px; height: 11px; margin-right: -3px; color: var(--t2); stroke-width: 2.8; }
+.editing .kw { padding-right: 11px; }
 
 .hot { display: grid; grid-template-columns: 189.5px 1fr; margin-bottom: 22px; padding-left: 22px; }
 .hot button { display: flex; align-items: center; gap: 7px; height: 29px; color: #fff; font-size: 13px; white-space: nowrap; }
@@ -253,12 +534,32 @@ onMounted(() => {
 .stars .av { width: 55px; height: 55px; margin: 0 auto; border-radius: 50%; background-color: transparent; box-shadow: 0 0 0 1px rgba(255, 255, 255, .18); filter: var(--media); }
 .stars .nm { margin-top: 6px; color: #fff; font-size: 12px; line-height: 17px; }
 
-.recent { display: flex; gap: 10px; padding: 0 12px; }
-.recent .vc { flex: none; width: 148px; }
-.recent .code { position: absolute; left: 9px; top: 7px; color: #fff; font-size: 11px; font-weight: 700; letter-spacing: .2px; text-shadow: 0 1px 3px rgba(0, 0, 0, .7); }
-.recent :deep(.tt) { color: #fff; }
-
 /* ---- results ---- */
-.res-t { padding: 14px 14px 10px; font-size: 15px; font-weight: 600; }
-.res-t span { margin-left: 6px; color: var(--t2); font-size: 12px; font-weight: 400; }
+.sr-tabs { display: flex; flex: none; gap: 28px; height: 42px; padding: 0 18px; border-bottom: 1px solid var(--line); }
+.sr-tab { position: relative; display: flex; align-items: center; gap: 4px; height: 100%; color: var(--t2); font-size: 15px; font-weight: 500; }
+.sr-tab .n { font-size: 12px; font-weight: 400; font-variant-numeric: tabular-nums; }
+.sr-tab.on { color: var(--t1); font-weight: 600; }
+.sr-tab.on::after { content: ''; position: absolute; left: 50%; bottom: 0; width: 20px; height: 3px; margin-left: -10px; border-radius: 2px; background: var(--accent); }
+.sr-grid, .sr-pane > .sk-grid { padding-top: 12px; }
+
+.sr-none { padding: 56px 0 8px; text-align: center; }
+.sr-none .t1 { color: var(--t1); font-size: 15px; font-weight: 500; }
+.sr-none .t2 { margin-top: 6px; color: var(--t2); font-size: 13px; }
+.sr-alt { display: inline-flex; align-items: center; gap: 2px; height: 32px; margin-top: 18px; padding: 0 12px 0 16px; border-radius: 16px; background: var(--chip); color: var(--t1); font-size: 13px; }
+.sr-alt svg { width: 12px; height: 12px; stroke-width: 2.6; }
+.sr-hot-t { margin: 40px 0 12px; color: var(--t2); font-size: 12px; }
+.sr-none .kws { justify-content: center; }
+
+/* 帖子骨架（和社区卡片一样的位置） */
+.sk { border-radius: 6px; background: #161616; animation: sk 1.2s ease-in-out infinite; }
+.sk-post { display: flex; gap: 11px; padding: 14px; border-bottom: 1px solid var(--line); }
+.sk-post .av { flex: none; width: 44px; height: 44px; border-radius: 50%; }
+.sk-post .bd { flex: 1; min-width: 0; }
+.sk-post .l1 { width: 40%; height: 14px; margin-top: 4px; }
+.sk-post .l2 { width: 86%; height: 14px; margin-top: 12px; }
+.sk-post .md { margin-top: 12px; aspect-ratio: 16 / 9; border-radius: 7px; }
+@keyframes sk { 50% { opacity: .5; } }
+@media (prefers-reduced-motion: reduce) {
+  .sk { animation: none; }
+}
 </style>

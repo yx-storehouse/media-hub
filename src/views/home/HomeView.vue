@@ -5,6 +5,7 @@ import { HOME_TABS } from '@/config/nav'
 import AppLogo from '@/components/AppLogo.vue'
 import Icon from '@/components/Icon.vue'
 import BottomSheet from '@/components/BottomSheet.vue'
+import { useTabRetap } from '@/composables/useTabRetap'
 import RecommendTab from './RecommendTab.vue'
 import LatestTab from './LatestTab.vue'
 import CategoryTab from './CategoryTab.vue'
@@ -37,6 +38,10 @@ onActivated(() => centerActiveTab('auto'))
 /* 当前该渲染哪个分类页：推荐 / 最新各有独立组件，其余共用一个组件、靠 tab 参数区分 */
 const CATEGORY_VIEWS = { recommend: RecommendTab, latest: LatestTab }
 const activeTab = computed(() => CATEGORY_VIEWS[tab.value] || CategoryTab)
+
+/* 再点一次底部「首页」：当前分类页滚动过就平滑回到顶部，已经在顶部就刷新（推荐页整页换一批） */
+const body = ref(null)
+useTabRetap('home', () => body.value?.retap?.())
 
 const sheetOpen = ref(false)
 function chooseTab(id) {
@@ -76,7 +81,7 @@ function chooseTab(id) {
       组件类型或 key（分类页是 tab）一变就创建新实例，旧的进缓存。
     -->
     <KeepAlive>
-      <component :is="activeTab" :key="tab" :tab="tab" class="tab-body" />
+      <component :is="activeTab" ref="body" :key="tab" :tab="tab" class="tab-body" />
     </KeepAlive>
 
     <BottomSheet v-model:open="sheetOpen" title="全部分类">

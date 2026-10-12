@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAppStore } from '@/stores/app'
-import { MAIN_TABS } from '@/config/nav'
+import { MAIN_TABS, isHomePath } from '@/config/nav'
 import { emitTabRetap } from '@/composables/useTabRetap'
 import Icon from './Icon.vue'
 
@@ -14,15 +14,19 @@ const current = computed(() => route.meta.tab)
 const target = t => (t.id === 'home' ? `/home/${store.lastHomeTab}` : t.path)
 
 /*
- * Switching bottom tabs replaces the history entry like a native tab bar, so back leaves the
- * section instead of cycling through tabs. If the previous entry already is the target, step
- * back to it rather than stacking a duplicate.
- * Tapping the tab that is already open is a "retap" (the short feed refreshes on it).
+ * 返回键先回首页，再按一次才离开（和抖音、B 站一样）：
+ *   - 从首页切到别的 Tab：压栈，首页留在下面；
+ *   - 非首页 Tab 之间：替换，返回键不在 Tab 之间来回跳，下面始终是首页；
+ *   - 切回首页 / 切到下面那条记录：退回去，不叠重复记录。
+ * 一打开就落在非首页 Tab（书签、分享链接）时，路由会在下面垫一条首页（router/index.js）。
+ * 点当前所在的 Tab 是「再点一次」（短视频页借此刷新）。
  */
 function go(t) {
   const to = target(t)
   if (to === route.fullPath) return emitTabRetap(t.id)
-  if (window.history.state && window.history.state.back === to) router.back()
+  const back = window.history.state && window.history.state.back
+  if (route.meta.tab === 'home') router.push(to)
+  else if (back === to || (t.id === 'home' && isHomePath(back))) router.back()
   else router.replace(to)
 }
 </script>

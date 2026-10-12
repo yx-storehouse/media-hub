@@ -1,6 +1,8 @@
 <script setup>
 import { computed } from 'vue'
 import Cover from './Cover.vue'
+// 点进播放页时先记下封面和标题，播放页加载期间先显示它们（见 components/video/preview.js）
+import { rememberVideo } from './video/preview'
 
 const props = defineProps({
   /** Video: { id, title, dur, cover } */
@@ -15,7 +17,7 @@ const target = computed(() => props.to || `/video/${encodeURIComponent(props.vid
 </script>
 
 <template>
-  <RouterLink :to="target" class="vc" :class="{ big }">
+  <RouterLink :to="target" class="vc" :class="{ big }" @click="rememberVideo(video)">
     <Cover class="cv" v-bind="video.cover">
       <!-- extra overlays (e.g. the code badge on recent searches) -->
       <slot name="badge" />

@@ -13,9 +13,10 @@ export const TITLES = [
 
 export const SECTION_TITLES = ['热门推荐', '治愈日常', '悬疑短剧', '城市漫游', '动漫新番', '高分纪录片', '美食探店', '旅行日记']
 
-export const LATEST_REGIONS = [['国产', 18], ['日韩', 19], ['其他', 192]]
-export const LATEST_DATE_COUNTS = [232, 345, 295, 274, 267, 251, 238]
-export const CATEGORY_FILTERS = ['全部', '最热', '最新', '高分']
+/** [code, label]：与接口的地区一致（「全部」由 mock-fallback 加在最前面） */
+export const LATEST_REGIONS = [['cn', '国产'], ['jk', '日韩'], ['other', '其他']]
+/** [label, sort_key]：与接口 category_filters 的结构一致 */
+export const CATEGORY_FILTERS = [['全部', 'default'], ['最热', 'play_count'], ['最新', 'published_at'], ['高分', 'like_count']]
 
 /** [word, isHot] */
 export const HOT_POOL = [

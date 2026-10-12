@@ -15,7 +15,7 @@ node server/index.mjs                        # 启动接口服务，默认 http:
 测试：
 
 ```bash
-node server/test-api.mjs     # 89 项接口测试（含帖子详情、创作者主页、短视频推荐流、老库补列）
+node server/test-api.mjs     # 100 项接口测试（含帖子详情、创作者主页、短视频推荐流、我的收藏 / 关注 / 历史、搜索记录、压缩与缓存、老库补列）
 node server/test-auth.mjs    # 37 项鉴权测试
 node server/test-admin.mjs   # 95 项管理后台测试（导入 / 导出 / 素材文件 / 首页分区 / 超时…）
 ```
@@ -24,6 +24,7 @@ node server/test-admin.mjs   # 95 项管理后台测试（导入 / 导出 / 素�
 
 换个位置放数据库：`DB_PATH=/path/to/reel.db node server/index.mjs`
 换端口：`PORT=4000 node server/index.mjs`
+换托管的前端打包目录（默认项目里的 `dist/`）：`DIST_DIR=/path/to/build node server/index.mjs`
 素材目录 / 上传上限：`MEDIA_DIR=/data/reel-media MAX_UPLOAD_MB=4096 node server/index.mjs`（见「管理后台接口」）
 
 ## 目录
@@ -50,7 +51,7 @@ server/
     admin.mjs      管理后台的全部 SQL
     reel.db        SQLite 数据库文件（自动生成，已在 .gitignore）
   lib/             随机数与占位图（art.mjs 与 src/mock 同步，保证前后端图片一致；lite-art.mjs 是后台新建数据用的轻量占位图）、
-                   地址比较（urls.mjs：编码 / 未编码算同一个文件）、InputError（errors.mjs）
+                   地址比较（urls.mjs：编码 / 未编码算同一个文件）、InputError（errors.mjs）、响应压缩（compress.mjs）
 ```
 
 ## 设计要点
@@ -102,21 +103,23 @@ server/
 | GET | `/api/home/tabs` | 首页分类 Tab |
 | GET | `/api/home/recommend` | `getRecommendSections()` |
 | GET | `/api/home/section/:id/videos?batch=` | `getVideos()` |
-| GET | `/api/home/latest/filters` | `getLatestFilters()` |
-| GET | `/api/home/latest/videos?date=&region=` | `getLatestVideos()` |
+| GET | `/api/home/latest/filters?date=` | `getLatestFilters()`：地区第一项是「全部」，每个地区带 7 天的 `counts`（见下面「最新」） |
+| GET | `/api/home/latest/videos?date=&region=` | `getLatestVideos()`：`region` 0 = 全部，也可以传地区 code |
 | GET | `/api/category/:tab/filters` | `getCategoryFilters()` |
 | GET | `/api/category/:tab/videos?filter=` | `getCategoryVideos()` |
-| GET | `/api/search/hot?page=` | `getHotWords()` |
+| GET | `/api/search/hot?page=` | `getHotWords()`：只列搜得到东西的词（见下面「搜索」） |
 | GET | `/api/search/creators` | `getCreators()` |
-| GET | `/api/search/recent` | `getRecentSearches()` |
-| GET | `/api/search?q=` | `searchVideos()` |
-| GET | `/api/topic/:id` | `getTopic()` |
+| GET | `/api/search/recent` | `getRecentSearches()`（旧版：每次搜索第一条结果的视频卡片，已弃用） |
+| GET | `/api/search?q=` | `searchVideos()`：登录时顺便记搜索词（见下面「搜索」） |
+| GET | `/api/search/posts?q=&limit=&offset=` | `searchPosts()`：搜帖子标题和话题 → `{ total, list }` |
+| GET / DELETE | `/api/search/history[?keyword=]` | `getSearchHistory()` / `clearSearchHistory()`：近期搜索的关键词（要登录） |
+| GET | `/api/topic/:id` | `getTopic()`：播放 / 收藏数由专题内视频汇总，登录时带 `faved` |
 | GET | `/api/topic/:id/videos?sort=` | `getTopicVideos()` |
 | GET | `/api/library` | `getLibrary()` |
-| GET | `/api/videos/:id` | `getVideo()`：播放页详情（含 `src` 播放地址、标签、热榜名次） |
+| GET | `/api/videos/:id` | `getVideo()`：播放页详情（含 `src` 播放地址、标签、热榜名次；登录时带上次看到的 `progressSec` / `watchedAt`） |
 | GET | `/api/videos/:id/related?batch=&limit=` | `getRelatedVideos()`：相似推荐，`batch` 递增 = 换一批 |
 | GET | `/api/shorts?seed=&offset=&limit=&exclude=` | `getShorts()`：短视频推荐流（见下面「短视频推荐流」） |
-| GET | `/api/community/posts?tab=` | `getPosts()` |
+| GET | `/api/community/posts?tab=` | `getPosts()`：`tab` 2 关注 / 3 收藏没登录时是 `[]` |
 | GET | `/api/community/posts/:id` | `getPost()`：帖子详情（见下面「帖子详情」） |
 | POST | `/api/community/posts/:id/view` | `viewPost()`：阅读数 +1，公开、无请求体 → `{ read }` |
 | POST | `/api/community/posts/:id/fav` | `togglePostFav()` |
@@ -128,9 +131,12 @@ server/
 | POST | `/api/topics/:id/fav` | `toggleTopicFav()` |
 | GET | `/api/live?tab=` | `getLives()` |
 | GET | `/api/nearby?filter=` | `getNearby()` |
-| GET | `/api/me` | `getProfile()` |
-| GET | `/api/me/history` | `getHistory()` |
+| GET | `/api/me` | `getProfile()`：计数实时统计（见下面「我的」） |
+| GET | `/api/me/history?limit=&offset=` | `getHistory()` → `{ total, list }`，每条带 `progressSec` / `watchedAt`（要登录） |
 | POST | `/api/me/history` | `addHistory()` |
+| DELETE | `/api/me/history[/:videoId]` | `clearHistory()` / `removeHistory()` → `{ removed, total }`（要登录） |
+| GET | `/api/me/favs?type=video\|post\|topic&limit=&offset=` | `getMyFavs()` → `{ total, list }`（要登录） |
+| GET | `/api/me/follows?limit=&offset=` | `getMyFollows()` → `{ total, list }`（要登录） |
 
 响应统一：
 
@@ -200,15 +206,85 @@ server/
 
 `GET /api/shorts?seed=&offset=&limit=&exclude=` → `{ seed, list, hasMore }`，公开接口，带了登录令牌时按当前用户。
 
-- 候选是**全部已上架视频**；后台「加入短视频」的（`short_clips`）大幅加权，首屏基本是它们，但不只有它们。
-- 每条的分数 = 热度（log 播放数，按全库最大值归一）+ 新鲜度（发布时间，半衰期 14 天）+ 短视频加权 + 互动率（(赞 + 藏) / 播放，封顶）+ 按 `seed` 的随机扰动，
+- 候选是**全部已上架视频**，分档加权：后台「加入短视频」的（`short_clips`，+3.5）、有视频文件的（`playback_url` 不为空，+3）、时长 5 分钟以内的（+1，10 分钟以内 +0.4）。
+  结果大致是：有文件的精选在最前，接着是精选 / 有文件的短片，再是有文件的长视频、没有文件的短片，没有文件的长视频垫底（没有文件的只能看封面）。
+- 每条的分数 = 热度（log 播放数，按全库最大值归一）+ 新鲜度（发布时间，半衰期 14 天）+ 上面的分档加权 + 互动率（(赞 + 藏) / 播放，封顶）+ 按 `seed` 的随机扰动，
   再减去：登录用户 3 天内看过的（重罚）/ 30 天内看过的（轻罚，按 `watch_history`），以及 `exclude` 里的 id（重罚）。排好后再去一遍同质：同一创作者 / 同一专题尽量不挨着（后面几条里分差不大的换上来）。
+- **不喜欢**：登录用户点过「不喜欢」（`video_dislikes`）的视频罚到最后，而且出页时直接跳过——排序缓存着的这一轮里它还在原位，刚点完往下翻也不会再刷到；
+  同一创作者的其他视频小幅降分（每条被不喜欢的 −0.4，最多 −1.2）。未登录时 App 把这条的 id 放进 `exclude`。
 - `seed`：同一个 seed 顺序固定（翻页稳定、不重复），不同 seed 顺序不同；不传时服务端随机生成并在结果里返回，翻页时带回来。App 每次打开、再点一次「短视频」Tab 都换一个 seed。
 - `exclude`：逗号分隔的视频 id，最多 100 个，非法的忽略。App 把本机最近刷到过的 id 带上，未登录也能每次打开都不一样。
 - `limit` 1～50（默认 10），`offset` 从 0 起。翻过整个候选池后用派生 seed（`seed:r1`、`seed:r2`…）再排一轮接着给，所以 `hasMore` 恒为 `true`（库里一条已上架视频都没有时是 `false`、`list` 为空）；新一轮的开头会避开上一轮末尾的几条。
 - 每条是 `Video` + `{ src, like, fav, likes, favs }`，`creator` 是 `{ id, name, handle, avatar }`（没有创作者时为 `null`）。这一页里刚被下架 / 删除的视频直接跳过，`list` 可能比 `limit` 短，下一页照样从 `offset + limit` 开始。
 - 性能：整个排序按「用户 + seed + 轮次」只算一次，放在内存里（最多 64 份，5 分钟没人翻就丢），翻页只是切片。排序只读 `videos` 的几个数字列 + 短视频 id + 当前用户 30 天内的观看记录，2 万条视频约 70 ms。
-  缓存期间 `exclude`、观看记录的变化不影响这一份顺序；后台加入短视频后，新打开的 App（新 seed）马上能看到。
+  缓存期间 `exclude`、观看记录的变化不影响这一份顺序（「不喜欢」例外，出页时实时跳过）；后台加入短视频后，新打开的 App（新 seed）马上能看到。
+
+### 最新
+
+- `GET /api/home/latest/filters?date=0` → `{ dates, regions }`：
+  - `dates`：最近 7 天 `[{ label: '今天' | '昨天' | '10/9', count }]`，`count` 是这一天全部地区的视频数（按服务器本地日期分天）。
+  - `regions`：**第一项是「全部」**（`code: 'all'`，默认选它），后面是 `regions` 表里的地区。每项 `{ code, label, count, counts }`，
+    `counts[d]` 是这个地区第 `d` 天的视频数，`count = counts[date]`（`date` 是当前选中的日期），所以地区上的数字和列表的条数对得上；
+    `regions[0].counts[d] === dates[d].count`。没填地区、或地区不在表里的视频算「其他」。一条 `GROUP BY` 查完，不按地区逐个 COUNT。
+- `GET /api/home/latest/videos?date=0&region=0&limit=&offset=`：`region` 是上面 `regions` 的下标（0 = 全部），也可以直接传地区 code（`all` / `cn` / `jk` / `other`），认不出的按全部。
+  按发布时间倒序（同一秒按 id），翻页稳定。
+
+### 搜索
+
+- **热门搜索** `GET /api/search/hot?page=` → `[{ word, hot }]`，每批 8 个：只列没屏蔽、而且**搜得到东西**的词（已发布的视频或帖子至少命中一条，和下面的搜索同一套匹配），App 里点热词不会是 0 条结果；后台加了搜不到内容的词，前台不显示。`page` 是「换一批」的次数，翻到末尾接回开头，每批都是满的；能显示的词不到 8 个时全部返回。
+- `GET /api/search?q=`（视频）、`GET /api/search/posts?q=`（帖子标题 + 话题标签）→ `{ total, list }`，公开；`q` 为空或全是空白回 400「缺少 q 参数」。
+  帖子搜索 3 个字以上走 FTS5 trigram（按相关度，同分新的在前），1～2 个字退回 LIKE（新的在前），只算已发布的；每条和社区列表结构一样（含 `media`、`time`、`faved`）。
+- **搜索记录**：登录用户搜第一页（`offset` 0）时记一次关键词，**没有结果也记**；同一个词只留最新一条，每人最多 50 条，关键词最长 100 字。翻页不重复记。
+  - `GET /api/search/history?limit=10`（要登录）→ `{ list: [{ keyword, searchedAt }] }`，新的在前。
+  - `DELETE /api/search/history`（要登录）清空；带 `?keyword=` 只删这一个词 → `{ removed }`。
+  - 旧的 `GET /api/search/recent`（每次搜索第一条结果的视频卡片）已弃用，没有结果的记录在这里跳过；App 改用关键词列表后删除。
+
+### 我的
+
+`GET /api/me`（未登录 `null`）：
+
+```js
+{ id, name, uid, avatar,
+  stats: [{ key: 'history', label: '观看历史', value, to: '/history' },
+          { key: 'favs',    label: '我的收藏', value, to: '/favorites' },   // 视频 + 帖子 + 专题
+          { key: 'follows', label: '我的关注', value, to: '/follows' }],
+  counts: { history, favVideos, favPosts, favTopics, follows } }
+```
+
+- 计数由 `v_users` **实时统计**（子查询，只算已上架的视频 / 帖子 / 专题、正常状态的创作者），和下面各列表的 `total` 一致；
+  不再读 `user_stats` 里没人维护的 `fav_count` / `follow_count`（收藏、关注以前恒为 0）。「离线缓存」功能没做，不再返回这一格。
+  老库启动时按 `views.sql` 里的定义自动重建 `v_users`（见「启动时的自动补建」）。
+- 下面几个都要登录（未登录 401），分页 `limit` 1～50（默认 20）、`offset` 从 0 起，返回 `{ total, list }`，新的在前：
+
+| 接口 | 每条 |
+|---|---|
+| `GET /api/me/favs?type=video` | `Video`（带 `liked` / `faved`）+ `favedAt` |
+| `GET /api/me/favs?type=post` | 和社区列表同结构的帖子 + `favedAt` |
+| `GET /api/me/favs?type=topic` | 片库卡片 `{ id, name, count, cover }` + `favedAt` |
+| `GET /api/me/follows` | `{ id, name, handle, avatar, verified, bio, followers, followedAt, following: true }` |
+| `GET /api/me/history` | `Video` + `{ progressSec, watchedAt }`（`len` 是总秒数，进度 = `progressSec / len`） |
+
+`type` 认不出时按 `video`。取消收藏 / 关注用原来的 `POST …/fav`、`POST /api/creators/:id/follow`（`{ on: false }`）。
+
+- `DELETE /api/me/history/:videoId` 删一条、`DELETE /api/me/history` 清空 → `{ removed, total }`（`total` 是剩下的条数）。
+- `GET /api/videos/:id` 登录时多带 `progressSec` / `watchedAt`（没看过为 `0` / `null`），App 重开也能续播。
+- `POST /api/me/history { videoId, progressSec, progressOnly }`：开始播放那次上报（计播放数、进度 0）**不覆盖**已存的进度，
+  否则重新打开视频、还没来得及上报就被杀掉时，上次看到的位置就丢了；`progressOnly` 的上报照常覆盖（传 0 就是清零）。
+- 社区 `GET /api/community/posts?tab=2|3`（关注 / 收藏）没登录时返回 `[]`，不再退成全部帖子。
+
+### 专题
+
+`GET /api/topic/:id`：`plays`（显示用字符串，满 1 万写成 `1.2w`）/ `playCount` = max(后台填的播放数, 专题内已上架视频的播放数之和)；
+`favs` = 专题被收藏的次数 + 专题内已上架视频的收藏数之和；`faved` 是当前用户收藏过这个专题（未登录 `false`）。
+
+### 压缩与缓存
+
+- 文本类响应（JSON、HTML、JS、CSS、SVG、manifest、map、txt）满 1 KB 时按 `Accept-Encoding` 压缩：br 优先（接口现压用 4 档，几十 KB 约 1 ms，在 zlib 线程池里），
+  其次 gzip；带 `vary: accept-encoding`。20 条视频的列表 235 KB → br 约 26 KB。打包好的前端文件压一次就记在内存里（按路径 + 大小 + 修改时间区分版本，总量 64 MB 封顶）。
+- 接口响应 `cache-control: no-store`。
+- 托管的 `dist/`（或 `DIST_DIR`）：`assets/` 下带 hash 的文件 `public, max-age=31536000, immutable`；`index.html`、`admin.html`、图标、manifest 等
+  不带 hash 的用 `no-cache` + `ETag`（每次向服务器确认，没变回 304），重新部署后马上用上新版本。
+  `assets/` 下找不到的文件回 404（重新部署后旧页面还在要旧分包时，不能拿 index.html 冒充脚本）。
 
 ## 接入前端
 
@@ -258,9 +334,9 @@ server: {
 | 列表长度 | 固定条数 | 支持 `limit` / `offset` 分页 |
 | 「换一批」 | 前端用 seed 拼字符串 | 服务端按 `batch` 返回预排好的批次 |
 | 收藏 / 点赞 | 存在 Pinia 里，刷新就没了 | 写进数据库，持久化 |
-| 观看历史 | 固定 14 条假数据 | 真实记录，且播放数会累加 |
+| 观看历史 | 没有（mock 模式为空） | 真实记录，且播放数会累加 |
 | 搜索 | 按关键词现编数据 | 真实 FTS 检索 |
-| 社区「关注」「收藏」tab | 反转列表 | 按真实关注 / 收藏关系过滤 |
+| 社区「关注」「收藏」tab | 只有演示数据里关注 / 收藏过的 | 按真实关注 / 收藏关系过滤，未登录为空 |
 
 ## 后续可以补的
 
@@ -270,7 +346,7 @@ server: {
 - **评论**：`comments` 表已建好、计数触发器已接，但没有对应的接口和前端页面。
 - **上传**：`video_uploads` 表用于用户投稿审核流程，接口未实现。
 - **弹幕**：`danmaku` 表 + 计数触发器已接，接口未实现。
-- **推荐算法**：短视频流已经按热度、新鲜度、短视频加权、互动率、看过的往后排来推荐（见「短视频推荐流」）；首页「推荐」分区仍是后台编排。`short_clips.sort_order` / `weight` 现在不参与排序。
+- **推荐算法**：短视频流已经按热度、新鲜度、短视频 / 有文件 / 时长加权、互动率、看过的往后排、不喜欢来推荐（见「短视频推荐流」）；首页「推荐」分区仍是后台编排。`short_clips.sort_order` / `weight` 现在不参与排序。
 - **分页游标**：目前用 `limit/offset`，数据量大后建议换成上一页最后一条的 id（keyset 分页）。
 - **迁移工具**：现在靠 `schema.sql` 全量重建（`seed.mjs --reset`）。上线前建议接入迁移工具（如 `node-pg-migrate` 之于 Postgres，SQLite 可用简单的 `migrations/` 目录 + 版本表）。
 
@@ -455,6 +531,7 @@ curl -X POST http://localhost:3000/api/admin/videos/import \
 - 「已更新」的结果带 `message` 写明按哪个键匹配到的（如「按播放地址匹配到 ID 15，已更新」），预检里就能看出来。
 - **空单元格**：新建时用默认值；更新时表示「不改这一项」（帖子的「正文」列留空不会清空详情正文，要清空请在后台编辑）。
 - 导入后统一重算一次专题视频数。
+- 帖子不再有「折叠数」列：App 卡片上的 +N 按真实配图数算（最多 3 张缩略图，多出来的张数显示在第 3 张上）；旧表格里的「折叠数」列对应成「不导入」，接口请求里带了 `moreCount` 也忽略，导出不再有这一列。
 - 帖子有「标题」（`text`，别名 title / 帖子标题 / 文案）和「正文」（`content`，别名 content / body / 详情 / 详情正文 / 帖子正文 / 正文内容 / 内容 / 帖子内容）两列，正文单元格可以多行。
   注意：加详情正文之前导出的帖子表格，表头「正文」那一列其实是**标题**；这种旧文件再导入时它会被自动对应到「正文」，请在「对应列」那一步把它改成「标题」。
 
@@ -517,3 +594,4 @@ curl -X POST http://localhost:3000/api/admin/videos/import \
 - `posts_fts_update` 触发器：帖子改了标题 / 标签，社区搜索的全文索引跟着更新（新库由 `views.sql` 建）。
 - 索引：`idx_videos_playback` / `idx_videos_cover`（按地址查重、统计素材引用、统计缺播放地址 / 封面）、`idx_videos_pubtime` / `idx_videos_created`（列表按发布 / 创建时间排序，几万条视频时不用临时排序）、`idx_videos_nodur`（缺时长）、`idx_creators_name`（按名称找创作者）。
 - 修复读不出来的时长：早期版本导入时可能写进超过 2^53 的整数或超大小数，读这一行会让列表、导出、App 详情页报错。启动时把这类时长清零（变成「缺时长」，可在后台重填），并在日志里提示条数。
+- `v_users` 视图：老库的定义还读 `user_stats` 里没人维护的收藏 / 关注计数时，按 `views.sql` 里的新定义重建（「我的」页计数改为实时统计），日志里提示一次。

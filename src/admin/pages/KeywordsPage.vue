@@ -133,7 +133,7 @@ async function toggleFlag(row, key, value) {
       <SearchBox v-model="query.q" placeholder="搜索热词" />
       <button v-if="hasFilters" type="button" class="reset" @click="resetFilters">清除筛选</button>
       <span class="grow" />
-      <span class="dim small tip">权重越大越靠前；屏蔽的词不会出现在前台「热门搜索」</span>
+      <span class="dim small tip">权重越大越靠前；屏蔽的词、搜不到任何已发布视频 / 帖子的词不会出现在前台「热门搜索」</span>
     </div>
 
     <div class="table-area">

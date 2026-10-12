@@ -40,9 +40,10 @@ export class ApiError extends Error {
  * @param {object} [options.body]   POST / PATCH / PUT 的 JSON 请求体
  * @param {AbortSignal} [options.signal]
  * @param {number} [options.timeout] 毫秒，默认 12 秒
+ * @param {boolean} [options.keepalive] 页面卸载后也把请求发完（请求体要小于 64 KB）
  */
 export async function request(path, options = {}) {
-  const { query, method = 'GET', body, signal, timeout = 12000 } = options
+  const { query, method = 'GET', body, signal, timeout = 12000, keepalive = false } = options
 
   let url = BASE + path
   if (query) {
@@ -70,7 +71,9 @@ export async function request(path, options = {}) {
         ...(token ? { authorization: 'Bearer ' + token } : {})
       },
       body: body ? JSON.stringify(body) : undefined,
-      signal: ctrl.signal
+      signal: ctrl.signal,
+      // 页面隐藏 / 关闭时的上报（如观看进度）：页面卸载后浏览器也会把请求发完
+      keepalive
     })
 
     // 令牌失效：交给 auth store 处理（清登录态 + 弹登录框）

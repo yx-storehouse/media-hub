@@ -860,8 +860,14 @@ await t('热词：增删改查 + 批量', async () => {
   mustFail(await req('POST', '/api/admin/keywords', { body: { word: '新热词' } }), 'word', 400, /热词已存在/)
   mustFail(await req('POST', '/api/admin/keywords', { body: { word: 'x'.repeat(21) } }), 'word')
   mustFail(await req('POST', '/api/admin/keywords', { body: { word: 'ok', weight: 'abc' } }), 'weight')
+  // App 只列搜得到内容的热词：「新热词」搜不到任何视频 / 帖子，不显示；搜得到的「城市」权重最高，排第一
+  must(!(await get('/api/search/hot')).some(x => x.word === '新热词'), '搜不到内容的热词不应显示')
+  const k3 = await post('/api/admin/keywords', { word: '城市', weight: 2000 })
   const hot = await get('/api/search/hot')
-  must(hot[0].word === '新热词', 'App 热词第一位应是权重最高的新词')
+  must(hot.length === 8 && hot[0].word === '城市', 'App 热词第一位应是权重最高的新词 ' + hot.map(x => x.word).join(','))
+  must((await post('/api/admin/keywords/batch', { ids: [k3.id], action: 'ban' })).affected === 1, 'ban 城市')
+  must(!(await get('/api/search/hot?page=0')).some(x => x.word === '城市'), '屏蔽后 App 不应显示')
+  must((await del(`/api/admin/keywords/${k3.id}`)).ok, '删除城市')
   const p = await patch(`/api/admin/keywords/${k.id}`, { weight: 5, sortOrder: 99 })
   must(p.weight === 5 && p.sortOrder === 99, JSON.stringify(p))
   mustFail(await req('PATCH', `/api/admin/keywords/${k.id}`, { body: { word: '露营' } }), 'word')
@@ -874,7 +880,6 @@ await t('热词：增删改查 + 批量', async () => {
     must(check(await get(`/api/admin/keywords/${k.id}`)), action + ' 没生效')
   }
   must((await post('/api/admin/keywords/batch', { ids: [k.id], action: 'ban' })).affected === 1, 'ban')
-  must(!(await get('/api/search/hot?page=0')).some(x => x.word === '新热词'), '屏蔽后 App 不应显示')
   const k2 = await post('/api/admin/keywords', { word: '待删热词' })
   must((await del(`/api/admin/keywords/${k2.id}`)).ok, '单条删除')
   must((await post('/api/admin/keywords/batch', { ids: [k.id], action: 'delete' })).affected === 1, '批量删除')
@@ -1080,6 +1085,7 @@ await t('导入：参数校验', async () => {
 
 await t('导入：帖子（账号 / 名称 / 视频编号 / 1.2w / 千分位）', async () => {
   const d = await importRows('posts', [
+    // moreCount（旧的「折叠数」列）不再导入：App 按真实图片数显示 +N，这一列忽略
     { creator: '@aijc', text: '导入帖子一', kind: '文档', tags: '#AI #剧情,短剧', readCount: '1.2w', moreCount: '1,234', video: 'VID-1002', isHot: 'y', images: '/i/1.jpg /i/2.jpg' },
     { creator: '晴川', text: '导入帖子二', kind: 'image', mainImage: 'https://e.com/m.jpg' },
     { creator: '全新作者', text: '自动建作者' },
@@ -1087,7 +1093,7 @@ await t('导入：帖子（账号 / 名称 / 视频编号 / 1.2w / 千分位）'
   ])
   must(d.created === 3 && d.failed === 1 && d.results[3].field === 'text', JSON.stringify(d.results))
   const [p1, p2, p3] = await Promise.all(d.results.slice(0, 3).map(r => get(`/api/admin/posts/${r.id}`)))
-  must(p1.creatorHandle === 'aijc' && p1.mediaKind === 2 && p1.readCount === 12000 && p1.moreCount === 1234 && p1.videoPublicId === 'VID-1002' && p1.isHot, JSON.stringify(p1))
+  must(p1.creatorHandle === 'aijc' && p1.mediaKind === 2 && p1.readCount === 12000 && p1.moreCount === 0 && p1.videoPublicId === 'VID-1002' && p1.isHot, JSON.stringify(p1))
   must(JSON.stringify(p1.tags) === '["AI","剧情","短剧"]' && p1.images.length === 2, '帖子标签不带 # ' + JSON.stringify(p1.tags))
   must(p2.creatorHandle === 'qingchuan' && p2.mediaKind === 0 && p2.mainImage === 'https://e.com/m.jpg', JSON.stringify(p2))
   must(p3.creatorName === '全新作者' && /^c\d+$/.test(p3.creatorHandle) && d.autoCreated.creators.join() === '全新作者', '中文名自动建作者账号应为 c<id>')

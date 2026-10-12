@@ -105,7 +105,7 @@ watch(() => form.value.creatorId, async id => {
           <TextArea v-model="form.content" :rows="5" :max-rows="18" :maxlength="20000" show-count placeholder="正文内容，可以分段…" />
         </FormField>
 
-        <FormField class="full" label="类型" field="mediaKind" :error="errors.mediaKind" hint="视频：主图带播放按钮；文档：配图显示成文档页">
+        <FormField class="full" label="类型" field="mediaKind" :error="errors.mediaKind" hint="视频：关联了视频时主图带播放按钮；文档：配图显示成文档页">
           <div class="seg" role="radiogroup" aria-label="类型" @keydown="rovingKeydown">
             <button
               v-for="(o, i) in postKindOptions"
@@ -147,13 +147,10 @@ watch(() => form.value.creatorId, async id => {
         <FormField class="full" label="主图" field="mainImage" :error="errors.mainImage" hint="卡片上 16:9 的大图；视频帖一般用视频封面">
           <MediaUrlInput v-model="form.mainImage" kind="image" upload-dir="images" />
         </FormField>
-        <FormField class="full" label="配图" field="images" :error="errors.images" hint="最多 9 张，三列显示">
+        <FormField class="full" label="配图" field="images" :error="errors.images" hint="最多 9 张；App 卡片上显示前 3 张，多出来的张数显示在第 3 张上（+N）">
           <UrlListInput v-model="form.images" :max="9" upload-dir="images" />
         </FormField>
 
-        <FormField label="折叠数" field="moreCount" :error="errors.moreCount" hint="最后一张配图上的「+N」">
-          <NumberInput v-model="form.moreCount" :min="0" required />
-        </FormField>
         <FormField label="阅读数" field="readCount" :error="errors.readCount">
           <NumberInput v-model="form.readCount" :min="0" required />
         </FormField>

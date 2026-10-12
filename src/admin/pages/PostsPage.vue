@@ -64,12 +64,12 @@ const drawer = ref(null)
 const editor = useEditor({
   blank: () => ({
     creatorId: null, text: '', content: '', mediaKind: 1, videoId: null, tags: [], mainImage: null, images: [],
-    moreCount: 0, readCount: 0, isHot: false, status: 1, publishedAt: null
+    readCount: 0, isHot: false, status: 1, publishedAt: null
   }),
   fromRow: r => ({
     creatorId: r.creatorId ?? null, text: r.text || '', content: r.content || '', mediaKind: r.mediaKind ?? 1, videoId: r.videoId ?? null,
     tags: [...(r.tags || [])], mainImage: r.mainImage ?? null, images: [...(r.images || [])],
-    moreCount: r.moreCount ?? 0, readCount: r.readCount ?? 0, isHot: !!r.isHot, status: r.status ?? 1, publishedAt: r.publishedAt ?? null
+    readCount: r.readCount ?? 0, isHot: !!r.isHot, status: r.status ?? 1, publishedAt: r.publishedAt ?? null
   }),
   findRow: id => rows.value.find(r => r.id === id),
   fetchRow: getPost,

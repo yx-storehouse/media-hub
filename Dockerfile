@@ -14,6 +14,9 @@ RUN npm ci --registry="$NPM_REGISTRY" --no-audit --no-fund
 COPY index.html admin.html vite.config.js ./
 COPY public ./public
 COPY src ./src
+# 线上只用真实接口：接口连不上时页面报错重试，永远不悄悄换成演示数据
+# （.dockerignore 不带 .env.* 文件进镜像，所以在这里设；和仓库里的 .env.production 一致）
+ENV VITE_API_MODE=http
 RUN npm run build
 
 # ---- 第二阶段：运行（接口服务零依赖，只要 Node 本身） ----

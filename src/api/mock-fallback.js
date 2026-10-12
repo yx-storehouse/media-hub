@@ -1,9 +1,12 @@
 /*
- * 本地兜底数据：接口连不上时使用（见 src/api/index.js 的 auto 模式）。
+ * 本地演示数据：mock 模式，以及开发时 auto 模式下某次列表读取连不上接口时使用（见 src/api/index.js）。
  *
  * 这里保持「同步返回 Promise」的老行为，结构和新接口一致，
- * 所以页面代码不用判断自己拿到的是接口数据还是兜底数据。
+ * 所以页面代码不用判断自己拿到的是接口数据还是演示数据。
  * 全部内容由种子随机数生成，刷新页面不会变。
+ *
+ * 所有 id 都是 'demo:' 开头的字符串（demoId），和接口的数字 id 永远撞不上：
+ * 带演示 id 的读取由 index.js 直接转到这里，写操作（点赞、收藏、关注…）根本不会发出去。
  */
 import { rng } from '@/mock/random'
 import { cover, avatar, brandAvatar, docThumb } from '@/mock/art'
@@ -12,12 +15,16 @@ import { ApiError } from './http'
 
 const ok = value => Promise.resolve(value)
 
+/** 演示 id：'demo:' + 原来的键；rawId 反过来去掉前缀（也接受没有前缀的老 id） */
+const demoId = key => 'demo:' + key
+const rawId = id => String(id).replace(/^demo:/, '')
+
 /** 生成第 i 条视频；同 seedBase + i 必然得到同一条内容 */
 function makeVideo(seedBase, i, dark = false) {
   const seed = `${seedBase}:${i}`, r = rng(seed)
   const len = 300 + Math.floor(r() * 2400)
   return {
-    id: seed,
+    id: demoId(seed),
     code: 'VID-' + (1000 + i),
     title: D.TITLES[Math.floor(r() * D.TITLES.length)],
     dur: '00:' + String(5 + Math.floor(r() * 34)).padStart(2, '0') + ':' + String(Math.floor(r() * 60)).padStart(2, '0'),
@@ -48,12 +55,12 @@ function withDetail(v) {
   return { ...v, tags, playCount: 800 + Math.floor(r() * 9000), likeCount: v.likes, favCount: 40 + Math.floor(r() * 400) }
 }
 
-/** 由 id 还原出列表里的同一条视频：mock 的 id 是「种子前缀:序号」，如 rec0:3 */
+/** 由 id 还原出列表里的同一条视频：演示视频的 id 是 demo:「种子前缀:序号」，如 demo:rec0:3 */
 function videoById(id) {
-  const s = String(id), k = s.lastIndexOf(':')
+  const s = rawId(id), k = s.lastIndexOf(':')
   const i = k > 0 ? Number(s.slice(k + 1)) : NaN
-  // 不是「前缀:序号」的 id（比如接口的数字 id）：用整个 id 当种子，id 原样返回
-  if (!Number.isInteger(i) || i < 0) return { ...makeVideo('id:' + s, 0), id: s }
+  // 不是「前缀:序号」的 id：用整个 id 当种子，id 仍然是演示 id
+  if (!Number.isInteger(i) || i < 0) return { ...makeVideo('id:' + s, 0), id: demoId(s) }
   const base = s.slice(0, k)
   const v = makeVideo(base, i, base.startsWith('late'))
   // 搜索结果的标题带着关键词前缀（见 searchVideos），这里补回去
@@ -62,7 +69,7 @@ function videoById(id) {
 
 /* ---------------- 首页 ---------------- */
 
-export const getHomeTabs = () => ok(D.HOME_TABS ?? [
+export const getHomeTabs = () => ok([
   { key: 'latest', label: '最新' }, { key: 'recommend', label: '推荐' }, { key: 'ai', label: 'AI短剧', hot: true },
   { key: 'cn', label: '国产' }, { key: 'jk', label: '日韩' }, { key: 'anime', label: '动漫' },
   { key: 'show', label: '综艺' }, { key: 'doc', label: '纪录片' }
@@ -75,8 +82,8 @@ export const getMainTabs = () => ok([
 ])
 
 export const getRecommendSections = () => ok(D.SECTION_TITLES.slice(0, 6).map((title, i) => ({
-  id: i,
-  topicId: i,
+  id: demoId(i),
+  topicId: demoId(i),
   title,
   subtitle: '',
   featured: i === 0,
@@ -87,18 +94,32 @@ export const getRecommendSections = () => ok(D.SECTION_TITLES.slice(0, 6).map((t
 
 export const getVideos = (seed, size = 4) => ok(makeVideos(size, String(seed)))
 
-export const getLatestFilters = () => ok({
-  dates: D.LATEST_DATE_COUNTS.map((count, i) => {
-    const d = new Date()
-    d.setDate(d.getDate() - i)
-    return { label: i === 0 ? '今天' : i === 1 ? '昨天' : `${d.getMonth() + 1}/${d.getDate()}`, count }
-  }),
-  regions: D.LATEST_REGIONS.map(([label, count]) => ({ label, count }))
+/* 和接口一致：地区第一项是「全部」，每个地区带 7 天的 counts，日期上的数字 = 全部地区之和 */
+const LATEST_COUNTS = D.LATEST_REGIONS.map(([code], k) => {
+  const r = rng('latest:' + code)
+  return Array.from({ length: 7 }, () => 2 + Math.floor(r() * (8 - k * 2)))
 })
+export const getLatestFilters = ({ date = 0 } = {}) => {
+  const day = Math.min(Math.max(Number(date) || 0, 0), 6)
+  const all = Array.from({ length: 7 }, (_, d) => LATEST_COUNTS.reduce((sum, c) => sum + c[d], 0))
+  const regions = [
+    { code: 'all', label: '全部', counts: all },
+    ...D.LATEST_REGIONS.map(([code, label], k) => ({ code, label, counts: LATEST_COUNTS[k] }))
+  ]
+  return ok({
+    dates: all.map((count, i) => {
+      const d = new Date()
+      d.setDate(d.getDate() - i)
+      return { label: i === 0 ? '今天' : i === 1 ? '昨天' : `${d.getMonth() + 1}/${d.getDate()}`, count }
+    }),
+    regions: regions.map(r => ({ ...r, counts: r.counts.slice(), count: r.counts[day] }))
+  })
+}
 
 export const getLatestVideos = ({ date = 0, region = 0 } = {}) => ok(makeVideos(14, `late${date}_${region}_0`, true))
 
-export const getCategoryFilters = () => ok(D.CATEGORY_FILTERS.slice())
+/* 分类筛选项和接口同结构 { label, sort_key } */
+export const getCategoryFilters = () => ok(D.CATEGORY_FILTERS.map(([label, sort_key]) => ({ label, sort_key })))
 export const getCategoryVideos = (tab, { filter = 0 } = {}) => ok(makeVideos(14, `tab_${tab}${filter}`))
 
 /* ---------------- 搜索 ---------------- */
@@ -108,9 +129,9 @@ export const getHotWords = (page = 0) => ok(Array.from({ length: 8 }, (_, i) => 
   return { word, hot: !!hot }
 }))
 
-/* 热门创作者的 id 是 c1、c2…（演示数据没有创作者表），点进去是 getCreator 生成的主页 */
+/* 热门创作者的 id 是 demo:c1、demo:c2…（演示数据没有创作者表），点进去是 getCreator 生成的主页 */
 const MOCK_CREATORS = D.CREATORS.map((name, i) => ({
-  id: 'c' + (i + 1), name, handle: 'creator' + (i + 1), verified: i % 3 === 0, avatar: avatar(name)
+  id: demoId('c' + (i + 1)), name, handle: 'creator' + (i + 1), verified: i % 3 === 0, avatar: avatar(name)
 }))
 export const getCreators = () => ok(MOCK_CREATORS.slice(0, 5).map(c => ({ ...c })))
 
@@ -123,6 +144,13 @@ export const searchVideos = q => {
   return ok({ total: list.length * 12 + 7, list })
 }
 
+/* 帖子搜索：在演示帖子的标题和话题里找 */
+export const searchPosts = (q, { limit = 20, offset = 0 } = {}) => {
+  const kw = String(q || '').trim().toLowerCase()
+  const hit = kw ? POSTS.filter(p => p.text.toLowerCase().includes(kw) || p.tags.some(t => t.toLowerCase().includes(kw))) : []
+  return ok({ total: hit.length, list: slice(hit, { limit, offset }) })
+}
+
 /* ---------------- 专题 ---------------- */
 
 /* 专题头图：场景按专题错开一位（与 server/db/seed.mjs 的 heroKinds 一致），片库卡片取第一张 */
@@ -130,14 +158,16 @@ const HERO_KINDS = [0, 2, 1, 5, 4, 3]
 const heroCovers = id => [0, 1, 2, 3].map(k =>
   cover(`hero${id}${k}`, { kind: HERO_KINDS[(id + k) % HERO_KINDS.length], vignette: false, w: 300, h: 600 }))
 
-export const getTopic = id => {
-  id = Number(id) || 0
+export const getTopic = topicId => {
+  const id = Number(rawId(topicId)) || 0
   return ok({
-    id,
+    id: demoId(id),
     slug: D.TOPIC_NAMES[id] ?? 'featured',
     name: D.TOPIC_NAMES[id] ?? D.TOPIC_NAMES[0],
     plays: '8.1k',
+    playCount: 8100,
     favs: 2,
+    faved: false,
     total: 45,
     covers: heroCovers(id),
     sorts: D.TOPIC_SORTS.slice()
@@ -146,23 +176,25 @@ export const getTopic = id => {
 
 export const getTopicVideos = (id, sort = 0, seed = 0) => ok({
   total: 45,
-  list: makeVideos(14, `topic${Number(id) || 0}:${sort}:${seed}`)
+  list: makeVideos(14, `topic${Number(rawId(id)) || 0}:${sort}:${seed}`)
 })
 
 /* 片库卡片用专题的第一张头图（与接口一致） */
 export const getLibrary = () => ok(D.LIBRARY_CATEGORIES.map((name, i) => {
   const id = D.TOPIC_NAMES.indexOf(name)
-  return { id, name, count: 120 + i * 37, cover: heroCovers(id)[0] }
+  return { id: demoId(id), name, count: 120 + i * 37, cover: heroCovers(id)[0] }
 }))
-
-/* ---------------- 短视频 ---------------- */
 
 /* ---------------- 播放页 ---------------- */
 
+/* region 是地区 code（和接口一致）；演示数据没有观看记录，progressSec 恒为 0 */
 export const getVideo = id => {
   const v = withDetail(videoById(id))
   const r = rng('rank:' + id)
-  return ok({ ...v, disliked: false, src: null, region: D.LATEST_REGIONS[Math.floor(r() * 3)][0], quality: 'hd', description: '', rank: r() < 0.5 ? 1 + Math.floor(r() * 20) : null })
+  return ok({
+    ...v, disliked: false, src: null, region: D.LATEST_REGIONS[Math.floor(r() * 3)][0], quality: 'hd', description: '',
+    rank: r() < 0.5 ? 1 + Math.floor(r() * 20) : null, progressSec: 0, watchedAt: null
+  })
 }
 
 export const getRelatedVideos = (id, batch = 0, limit = 6) => ok(makeVideos(limit, `rel_${id}_${batch}`).map(withDetail))
@@ -184,7 +216,7 @@ const SHORT_POOL = [
     return { tags, title: D.TITLES[Math.floor(r() * D.TITLES.length)], like: 20 + Math.floor(r() * 600), fav: 10 + Math.floor(r() * 400), len: 15 + Math.floor(r() * 75), curated: false }
   })
 ].map((s, i) => ({
-  id: i,
+  id: demoId('s' + i),
   tags: s.tags,
   title: s.title,
   like: s.like,
@@ -238,12 +270,12 @@ const postAvatar = a => {
  */
 const POSTS = D.POSTS.map((p, i) => ({
   ...p,
-  id: i + 1,
-  // 演示数据的作者用账号当 id（与帖子详情的 author.id 一致），点头像进 getCreator 的主页
-  creatorId: p.handle,
+  id: demoId('p' + (i + 1)),
+  // 演示数据的作者用 demo:账号 当 id（与帖子详情的 author.id 一致），点头像进 getCreator 的主页
+  creatorId: demoId(p.handle),
   time: p.time,
   faved: false,
-  videoId: p.kind === 'video' ? `post${i}v:0` : null,
+  videoId: p.kind === 'video' ? demoId(`post${i}v:0`) : null,
   avatar: postAvatar(p.avatar),
   media: p.kind === 'doc'
     ? { main: null, thumbs: [0, 1, 2].map(k => docThumb('doc' + k, k === 2)) }
@@ -254,15 +286,18 @@ const POSTS = D.POSTS.map((p, i) => ({
 }))
 
 export const getCommunityTabs = () => ok(D.COMMUNITY_TABS.slice())
+/* 0 最新 / 1 热门（倒过来）/ 2 关注、3 收藏：只给演示数据里关注 / 收藏过的（没有就是空的，和接口一致） */
 export const getPosts = (tab = 0) => {
+  if (tab === 2) return ok(POSTS.filter(p => followed.has(p.creatorId)))
+  if (tab === 3) return ok(POSTS.filter(p => p.faved))
   const list = POSTS.slice()
-  if (tab % 2) list.reverse()
+  if (tab === 1) list.reverse()
   return ok(list)
 }
 
 /* 详情页：演示数据没有创作者表，作者 id 用账号；关注只记在内存里 */
 const followed = new Set()
-const postIndex = id => POSTS.findIndex(p => String(p.id) === String(id))
+const postIndex = id => POSTS.findIndex(p => p.id === demoId(rawId(id)))
 const notFound = () => Promise.reject(new ApiError('帖子不存在或已下架', { status: 400, code: 1 }))
 const durSec = dur => String(dur || '').split(':').reduce((s, x) => s * 60 + (Number(x) || 0), 0)
 
@@ -278,8 +313,8 @@ export const getPost = id => {
     title: p.text,
     content: D.POST_CONTENT[i] || '',
     kind: p.kind,
-    author: { id: p.handle, name: p.name, handle: p.handle, verified: p.verified, avatar: p.avatar },
-    following: followed.has(p.handle),
+    author: { id: p.creatorId, name: p.name, handle: p.handle, verified: p.verified, avatar: p.avatar },
+    following: followed.has(p.creatorId),
     tags: p.tags.slice(),
     images: video && p.media.main ? thumbs : [p.media.main, ...thumbs].filter(Boolean),
     video,
@@ -300,8 +335,8 @@ export const viewPost = id => {
   return ok({ read: p.read })
 }
 export const toggleFollow = (id, on) => {
-  if (on) followed.add(String(id))
-  else followed.delete(String(id))
+  if (on) followed.add(demoId(rawId(id)))
+  else followed.delete(demoId(rawId(id)))
   const c = mockCreator(id)
   return ok(c ? { active: !!on, followers: mockFollowers(c) } : { active: !!on })
 }
@@ -309,20 +344,19 @@ export const toggleFollow = (id, on) => {
 /* ---------------- 创作者主页 ---------------- */
 
 /*
- * 演示数据没有创作者表：社区帖子的作者用账号当 id，热门创作者用 c1…c8；
- * 纯数字的 id（接口连不上时从真实数据点进来的）按 id 生成一个占位创作者，页面照样是满的；
- * 其余 id 当作不存在。数量、粉丝数都由 id 决定，刷新不变。
+ * 演示数据没有创作者表：社区帖子的作者 id 是 demo:账号，热门创作者是 demo:c1…demo:c8，
+ * demo:数字 生成一个占位创作者；其余 id 当作不存在。数量、粉丝数都由 id 决定，刷新不变。
  */
 const MOCK_BIOS = ['记录日常，分享喜欢的内容', '每周更新，欢迎关注', '']
 function mockCreator(id) {
-  const s = String(id)
-  const p = POSTS.find(x => x.handle === s)
-  const base = p ? { id: s, name: p.name, handle: p.handle, verified: p.verified, avatar: p.avatar }
-    : MOCK_CREATORS.find(x => x.id === s)
-      || (/^\d+$/.test(s) ? { id: s, name: '创作者' + s, handle: 'user' + s, verified: false, avatar: avatar('创', 'cr' + s) } : null)
+  const s = rawId(id), key = demoId(s)
+  const p = POSTS.find(x => x.creatorId === key)
+  const base = p ? { id: key, name: p.name, handle: p.handle, verified: p.verified, avatar: p.avatar }
+    : MOCK_CREATORS.find(x => x.id === key)
+      || (/^\d+$/.test(s) ? { id: key, name: '创作者' + s, handle: 'user' + s, verified: false, avatar: avatar('创', 'cr' + s) } : null)
   if (!base) return null
   const r = rng('creator:' + s)
-  const posts = POSTS.filter(x => x.handle === s)
+  const posts = POSTS.filter(x => x.creatorId === key)
   return {
     ...base,
     bio: MOCK_BIOS[Math.floor(r() * MOCK_BIOS.length)],
@@ -397,7 +431,7 @@ export const getLiveTabs = () => ok(D.LIVE_TABS.slice())
 export const getLives = ({ tab = 0 } = {}) => {
   const items = D.LIVES.concat(D.LIVES.slice().reverse())
   return ok(items.map(([title, sub, w], i) => ({
-    id: i,
+    id: demoId('l' + i),
     title,
     sub,
     live: i % 4 !== 3,
@@ -410,7 +444,7 @@ export const getNearbyFilters = () => ok(D.NEARBY_FILTERS.map(label => ({ label,
 export const getNearby = () => {
   const items = D.NEARBY.concat(D.NEARBY.slice().reverse())
   return ok(items.map(([title, tags, distance, price], i) => ({
-    id: i,
+    id: demoId('n' + i),
     title,
     tags,
     distance,
@@ -421,27 +455,25 @@ export const getNearby = () => {
 
 /* ---------------- 我的 ---------------- */
 
+/* 只在 mock 模式下用（auto 模式下个人信息不退回演示数据）；结构和接口一致，计数都是 0 */
 export const getProfile = () => ok({
-  id: 1,
-  name: '游客_10086',
-  uid: '10086',
-  loggedIn: false,
-  avatar: avatar('游', 'guest'),
+  id: demoId('u1'),
+  name: '演示用户',
+  uid: 'demo',
+  avatar: avatar('演', 'guest'),
   stats: [
-    { label: '观看历史', value: 128, to: '/history' },
-    { label: '我的收藏', value: 36 },
-    { label: '离线缓存', value: 12 },
-    { label: '我的关注', value: 5 }
-  ]
+    { key: 'history', label: '观看历史', value: 0, to: '/history' },
+    { key: 'favs', label: '我的收藏', value: 0, to: '/favorites' },
+    { key: 'follows', label: '我的关注', value: 0, to: '/follows' }
+  ],
+  counts: { history: 0, favVideos: 0, favPosts: 0, favTopics: 0, follows: 0 }
 })
-
-export const getHistory = () => ok(makeVideos(14, 'hist'))
 
 export default {
   getHomeTabs, getMainTabs, getRecommendSections, getVideos, getLatestFilters, getLatestVideos,
-  getCategoryFilters, getCategoryVideos, getHotWords, getCreators, getRecentSearches, searchVideos,
+  getCategoryFilters, getCategoryVideos, getHotWords, getCreators, getRecentSearches, searchVideos, searchPosts,
   getTopic, getTopicVideos, getLibrary, getVideo, getRelatedVideos, getShorts, getCommunityTabs, getPosts,
   getPost, viewPost, toggleFollow, togglePostFav, toggleVideoFav, toggleVideoLike, toggleVideoDislike, toggleTopicFav,
   getCreator, getCreatorVideos, getCreatorPosts,
-  getLiveTabs, getLives, getNearbyFilters, getNearby, getProfile, getHistory
+  getLiveTabs, getLives, getNearbyFilters, getNearby, getProfile
 }

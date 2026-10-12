@@ -3,8 +3,9 @@ import { computed } from 'vue'
 import { formatCount } from '@/utils/format'
 import Cover from '@/components/Cover.vue'
 import Icon from '@/components/Icon.vue'
+import { rememberVideo } from './preview'
 
-/* 播放页「相似推荐」的一行：左封面，右标题 + 标签 + 播放 / 收藏数 */
+/* 播放页「相似推荐」的一行：左封面，右标题 + 标签 + 播放 / 收藏数；点进去时先记下封面和标题，新页面加载时先显示 */
 const props = defineProps({
   /** Video + { tags, playCount, favCount } */
   video: { type: Object, required: true }
@@ -14,7 +15,7 @@ const tags = computed(() => (props.video.tags || []).slice(0, 3).map(t => String
 </script>
 
 <template>
-  <RouterLink :to="`/video/${encodeURIComponent(video.id)}`" class="rv">
+  <RouterLink :to="`/video/${encodeURIComponent(video.id)}`" class="rv" @click="rememberVideo(video)">
     <Cover class="rv-cv" v-bind="video.cover"><span class="dur">{{ video.dur }}</span></Cover>
     <div class="rv-bd">
       <div class="rv-tt">{{ video.title }}</div>

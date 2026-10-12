@@ -71,7 +71,8 @@ export function getVideos(sectionId, size = 4, batch = 0, userId = null) {
   return Promise.resolve(q.attachVideoState(q.sectionVideos(sectionId, size, batch), userId))
 }
 
-export const getLatestFilters = () => Promise.resolve(q.latestFilters())
+/** 「最新」筛选：regions[0] 是「全部」，每个地区带 7 天的 counts，count = counts[date] */
+export const getLatestFilters = (opts = {}) => Promise.resolve(q.latestFilters(opts))
 export const getLatestVideos = (opts = {}, userId = null) => Promise.resolve(q.attachVideoState(q.latestVideos(opts), userId))
 export const getCategoryFilters = tab => Promise.resolve(q.categoryFilters(tab))
 export const getCategoryVideos = (tab, opts = {}, userId = null) => Promise.resolve(q.attachVideoState(q.categoryVideos(tab, opts), userId))
@@ -87,37 +88,68 @@ export const getCreators = (limit = 5) => Promise.resolve(q.creators(limit).map(
   followers: c.follower_count,
   avatar: { src: c.avatar_url, fallback: c.avatar_fallback }
 })))
+/** 旧版「近期搜索」（视频卡片），已弃用：App 改用 getSearchHistory 的关键词列表后删除 */
 export const getRecentSearches = (userId = null, { limit = 5, offset = 0 } = {}) =>
   Promise.resolve(userId ? q.searchHistory(userId, { limit, offset }) : [])
 export function searchVideos(keyword, opts = {}, userId = null) {
   const { total, list } = q.searchVideos(keyword, opts)
   return Promise.resolve({ total, list: q.attachVideoState(list, userId) })
 }
-export function searchPosts(keyword, opts = {}, userId = null) {
-  const list = q.searchPosts(keyword, opts)
-  for (const p of list) p.time = q.relativeTime(p.publishedAt)
-  return Promise.resolve(q.attachPostState(list, userId))
+
+/** 登录用户搜第一页时记一次关键词（翻页不重复记）；没有结果也记，近期搜索里能看到搜过什么 */
+function noteSearch(userId, keyword, opts, firstVideoId = null) {
+  if (userId && !(Number(opts.offset) > 0)) q.addSearchHistory(userId, keyword, firstVideoId)
 }
 
-/** 搜索并记录历史（前端点「搜索」时调这个）；只有登录用户才记 */
+/** 搜帖子（标题 + 话题标签）→ { total, list }，每条和社区列表一样（media、time、faved） */
+export function searchPosts(keyword, opts = {}, userId = null) {
+  const page = pageOf(opts)
+  const { total, list } = q.searchPosts(keyword, page)
+  for (const p of list) p.time = q.relativeTime(p.publishedAt)
+  noteSearch(userId, keyword, page)
+  return Promise.resolve({ total, list: q.attachPostState(list, userId) })
+}
+
+/** 搜视频并记录历史（前端点「搜索」时调这个）→ { total, list } */
 export function doSearch(keyword, opts = {}, userId = null) {
-  const result = q.searchVideos(keyword, opts)
-  if (userId && result.list.length) q.addSearchHistory(userId, keyword, result.list[0].id)
-  return Promise.resolve(result)
+  const page = pageOf(opts)
+  const result = q.searchVideos(keyword, page)
+  noteSearch(userId, keyword, page, result.list[0]?.id ?? null)
+  return Promise.resolve({ total: result.total, list: q.attachVideoState(result.list, userId) })
+}
+
+/** 近期搜索的关键词 { list: [{ keyword, searchedAt }] }，新的在前 */
+export function getSearchHistory(userId, { limit = 10 } = {}) {
+  requireUser(userId)
+  return Promise.resolve({ list: q.searchKeywords(userId, { limit: pageOf({ limit }).limit }) })
+}
+
+/** 删一个搜索词；不传 keyword = 清空 → { removed } */
+export function clearSearchHistory(userId, keyword = null) {
+  requireUser(userId)
+  return Promise.resolve({ removed: q.removeSearchHistory(userId, keyword) })
 }
 
 /* ---------------- 专题 ---------------- */
 
 /* 专题不存在或已下架是正常的业务答复（400），不能当成服务端故障（500），否则前端会整体切到演示数据 */
-export function getTopic(id) {
+/*
+ * 播放数 = max(后台填的播放数, 专题内已上架视频的播放数之和)；收藏数 = 专题被收藏的次数 + 专题内视频的收藏数之和。
+ * 后台填的数字仍然有效（只会往上取），没人填时也不会一直是 0。faved：当前用户收藏过这个专题。
+ */
+export function getTopic(id, userId = null) {
   const t = q.topic(id)
   if (!t) inputError('专题不存在或已下架')
+  const sum = q.topicVideoTotals(id)
+  const playCount = Math.max(t.plays_count || 0, sum.plays)
   return Promise.resolve({
     id: t.id,
     slug: t.slug,
     name: t.name,
-    plays: t.plays_count >= 10000 ? (t.plays_count / 10000).toFixed(1) + 'w' : String(t.plays_count),
-    favs: t.fav_count,
+    plays: playCount >= 10000 ? (playCount / 10000).toFixed(1) + 'w' : String(playCount),
+    playCount,
+    favs: (t.fav_count || 0) + sum.favs,
+    faved: !!userId && q.isTopicFaved(userId, id),
     total: t.video_count,
     covers: q.topicCovers(id).map(c => ({ src: c.url, fallback: c.fallback })),
     sorts: q.topicSorts()
@@ -133,11 +165,13 @@ export const getLibrary = () => Promise.resolve(q.library())
 
 /* ---------------- 播放页 ---------------- */
 
+/** 播放页详情；登录时带上次看到的位置 progressSec / watchedAt（没看过为 0 / null），App 重开也能续播 */
 export function getVideo(id, userId = null) {
   const v = q.videoDetail(id)
   if (!v) inputError('视频不存在或已下架')
   q.attachVideoState([v], userId)
   if (userId) v.disliked = q.isVideoDisliked(userId, id)
+  Object.assign(v, userId ? q.watchProgress(userId, id) : { progressSec: 0, watchedAt: null })
   return Promise.resolve(v)
 }
 
@@ -252,26 +286,69 @@ export const getNearby = opts => Promise.resolve(q.nearby(opts))
 
 /* ---------------- 我的 ---------------- */
 
+/*
+ * 「我的」页：计数由 v_users 实时统计（只算已上架的内容），和下面几个列表的 total 一致。
+ * 「离线缓存」功能没做，不再返回这一格。
+ */
 export function getProfile(userId = null) {
   if (!userId) return Promise.resolve(null)   // 未登录：前端据此显示登录入口
   const u = q.userProfile(userId)
   if (!u) return Promise.resolve(null)
+  const favs = u.fav_video_count + u.fav_post_count + u.fav_topic_count
   return Promise.resolve({
     id: u.id,
     name: u.name,
     uid: u.uid,
     avatar: { src: u.avatar_url, fallback: u.avatar_fallback },
     stats: [
-      { label: '观看历史', value: u.history_count, to: '/history' },
-      { label: '我的收藏', value: u.fav_count },
-      { label: '离线缓存', value: u.download_count },
-      { label: '我的关注', value: u.follow_count }
-    ]
+      { key: 'history', label: '观看历史', value: u.history_count, to: '/history' },
+      { key: 'favs', label: '我的收藏', value: favs, to: '/favorites' },
+      { key: 'follows', label: '我的关注', value: u.follow_count, to: '/follows' }
+    ],
+    counts: {
+      history: u.history_count,
+      favVideos: u.fav_video_count,
+      favPosts: u.fav_post_count,
+      favTopics: u.fav_topic_count,
+      follows: u.follow_count
+    }
   })
 }
 
-export const getHistory = (opts = {}, userId = null) =>
-  Promise.resolve(userId ? q.attachVideoState(q.watchHistory(userId, opts), userId) : [])
+/** 观看历史一页 → { total, list }，每条 Video + { progressSec, watchedAt } */
+export function getHistory(opts = {}, userId = null) {
+  requireUser(userId)
+  const { total, list } = q.watchHistory(userId, pageOf(opts))
+  return Promise.resolve({ total, list: q.attachVideoState(list, userId) })
+}
+
+/** 删一条观看记录（videoId 为 null = 清空）→ { removed, total }（total 是剩下的条数） */
+export function removeHistory(videoId, userId = null) {
+  requireUser(userId)
+  const removed = q.removeWatchHistory(userId, videoId)
+  return Promise.resolve({ removed, total: q.watchHistory(userId, { limit: 1 }).total })
+}
+
+/** 我的收藏：type = video | post | topic（其他值按 video）→ { total, list }，最近收藏的在前 */
+export function getMyFavs(type = 'video', opts = {}, userId = null) {
+  requireUser(userId)
+  const page = pageOf(opts)
+  if (type === 'post') {
+    const { total, list } = q.favPosts(userId, page)
+    for (const p of list) p.time = q.relativeTime(p.publishedAt)
+    return Promise.resolve({ total, list: q.attachPostState(list, userId) })
+  }
+  if (type === 'topic') return Promise.resolve(q.favTopics(userId, page))
+  const { total, list } = q.favVideos(userId, page)
+  return Promise.resolve({ total, list: q.attachVideoState(list, userId) })
+}
+
+/** 我的关注 → { total, list: [{ id, name, handle, avatar, verified, bio, followers, followedAt, following }] } */
+export function getMyFollows(opts = {}, userId = null) {
+  requireUser(userId)
+  return Promise.resolve(q.followedCreators(userId, pageOf(opts)))
+}
+
 export function addHistory(videoId, progressSec = 0, userId = null, { countPlay = true } = {}) {
   if (!userId) return Promise.resolve({ added: false, reason: 'not-logged-in' })
   if (!q.videoExists(videoId)) inputError('视频不存在或已下架')

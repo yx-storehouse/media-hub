@@ -205,6 +205,9 @@ SELECT place_id, tag, sort_order FROM place_tags;
 
 -- ---------------------------------------------------------------------------
 -- 6. 用户侧
+--    「我的」页的计数实时统计（只算已上架的视频 / 帖子 / 专题、正常的创作者），
+--    和「我的收藏」「我的关注」「观看历史」列表的总数一致；不再读 user_stats 里没人维护的列。
+--    老库由 db/index.mjs 启动时按同样的定义重建（改这里时两边一起改）
 -- ---------------------------------------------------------------------------
 DROP VIEW IF EXISTS v_users;
 CREATE VIEW v_users AS
@@ -215,12 +218,17 @@ SELECT
   u.bio,
   u.avatar_url,
   u.avatar_fallback,
-  COALESCE(s.history_count, 0)                AS history_count,
-  COALESCE(s.fav_count, 0)                    AS fav_count,
-  COALESCE(s.download_count, 0)               AS download_count,
-  COALESCE(s.follow_count, 0)                 AS follow_count
+  (SELECT COUNT(*) FROM watch_history h JOIN videos v ON v.id = h.video_id AND v.status = 1
+    WHERE h.user_id = u.id)                   AS history_count,
+  (SELECT COUNT(*) FROM video_favs f JOIN videos v ON v.id = f.video_id AND v.status = 1
+    WHERE f.user_id = u.id)                   AS fav_video_count,
+  (SELECT COUNT(*) FROM post_favs f JOIN posts p ON p.id = f.post_id AND p.status = 1
+    WHERE f.user_id = u.id)                   AS fav_post_count,
+  (SELECT COUNT(*) FROM topic_favs f JOIN topics t ON t.id = f.topic_id AND t.status = 1
+    WHERE f.user_id = u.id)                   AS fav_topic_count,
+  (SELECT COUNT(*) FROM user_follows f JOIN creators c ON c.id = f.creator_id AND c.status = 1
+    WHERE f.user_id = u.id)                   AS follow_count
 FROM users u
-LEFT JOIN user_stats s ON s.user_id = u.id
 WHERE u.status = 1;
 
 DROP VIEW IF EXISTS v_watch_history;

@@ -1,14 +1,17 @@
 <script setup>
 import { ref, watch, nextTick, onDeactivated, useId } from 'vue'
 import { useRoute } from 'vue-router'
+import { useBackDismiss } from '@/composables/useBackDismiss'
 
 /*
  * Bottom sheet rendered over the whole app (teleported to #app).
  * Usage: <BottomSheet v-model:open="show" title="播放设置"> …content… </BottomSheet>
  * Content can use the shared classes .opts / .opt / .opt.on / .row2 / .sw / .sw.on (styles/common.css).
- * Closes on mask tap, Escape, route change and when its page is deactivated (KeepAlive).
+ * Closes on mask tap, Escape, the back button / gesture (only the sheet, the page stays),
+ * route change and when its page is deactivated (KeepAlive).
  */
 const open = defineModel('open', { type: Boolean, default: false })
+useBackDismiss(open)
 defineProps({ title: { type: String, default: '' } })
 
 const titleId = useId()

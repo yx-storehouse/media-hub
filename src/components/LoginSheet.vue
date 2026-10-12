@@ -1,31 +1,47 @@
 <script setup>
 import { ref, computed, watch, nextTick, useTemplateRef } from 'vue'
+import { useRoute } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { toast } from '@/composables/useToast'
+import { useBackDismiss } from '@/composables/useBackDismiss'
 import Icon from '@/components/Icon.vue'
 
 /*
  * 登录弹层：底部升起，和 App 其他弹层风格一致。
- * 未登录时点「点赞 / 收藏 / 我的」都会打开它（见 stores/auth.js 的 requireLogin）。
+ * 未登录时点「点赞 / 收藏 / 我的」都会打开它（见 stores/auth.js 的 requireLogin，登录后补做那次操作）。
+ * 返回键 / 返回手势只关登录框；换页面时自动关掉，不会留到下一个页面上。
  */
 const auth = useAuthStore()
 const open = computed(() => auth.loginOpen)
+useBackDismiss(open, () => auth.closeLogin())
+
+const route = useRoute()
+watch(() => route.fullPath, () => { if (auth.loginOpen) auth.closeLogin() })
 
 const uid = ref('')
 const password = ref('')
 const busy = ref(false)
 const error = ref('')
+const uidInput = useTemplateRef('uidInput')
 const pwdInput = useTemplateRef('pwdInput')
 
+// immediate：启动时就要登录（直接打开需要登录的页面）也照样聚焦
 watch(open, isOpen => {
   if (isOpen) {
     error.value = ''
     busy.value = false
-    nextTick(() => pwdInput.value?.focus?.())
+    // 先填账号；账号已经填过（上次输错密码）就直接到密码框
+    nextTick(() => (uid.value.trim() ? pwdInput : uidInput).value?.focus?.())
   } else {
     password.value = ''
   }
-})
+}, { immediate: true })
+
+/* 账号框回车：跳到密码框，而不是提交 */
+function nextField() {
+  if (uid.value.trim()) pwdInput.value?.focus()
+  else error.value = '请输入账号'
+}
 
 async function submit() {
   if (busy.value) return
@@ -47,7 +63,7 @@ async function submit() {
 }
 
 function close() {
-  auth.loginOpen = false
+  auth.closeLogin()
   error.value = ''
 }
 </script>
@@ -66,24 +82,29 @@ function close() {
           <label class="field">
             <Icon name="tMe" />
             <input
+              ref="uidInput"
               v-model="uid"
               type="text"
               name="username"
               autocomplete="username"
+              autocapitalize="off"
+              spellcheck="false"
+              enterkeyhint="next"
               placeholder="账号"
               :disabled="busy"
-              @keydown.enter.prevent="submit"
+              @keydown.enter.prevent="nextField"
             >
           </label>
 
           <label class="field">
-            <Icon name="iInfo" />
+            <Icon name="lock" />
             <input
               ref="pwdInput"
               v-model="password"
               type="password"
               name="password"
               autocomplete="current-password"
+              enterkeyhint="go"
               placeholder="密码"
               :disabled="busy"
               @keydown.enter.prevent="submit"

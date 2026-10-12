@@ -1,6 +1,8 @@
-import { createRouter, createWebHashHistory } from 'vue-router'
+import { createRouter, createWebHashHistory, START_LOCATION } from 'vue-router'
 import { useAppStore } from '@/stores/app'
 import { HOME_TABS, DEFAULT_HOME_TAB, KEEP_ALIVE_VIEWS } from '@/config/nav'
+// 弹层跟随返回键：它的 popstate 监听要比路由的先注册，所以在创建路由之前导入
+import { installBackDismiss } from '@/composables/useBackDismiss'
 // the landing page ships in the entry bundle (no extra round trip before first paint); other pages are lazy
 import HomeView from '@/views/home/HomeView.vue'
 
@@ -32,9 +34,12 @@ const routes = [
   { path: '/post/:id', name: 'post', component: () => import('@/views/PostView.vue') },
   // 创作者主页（?tab=videos|posts）；id 来自接口（数字）或演示数据（如 aijc、c1），链接里 encodeURIComponent
   { path: '/creator/:id', name: 'creator', component: () => import('@/views/CreatorView.vue') },
-  // numeric ids only; anything else falls through to the catch-all
-  { path: '/topic/:id(\\d+)', name: 'topic', component: () => import('@/views/TopicView.vue') },
+  // 只认数字 id（接口）和 demo:数字（演示数据，见 src/api/mock-fallback.js）；其他的落到最后的兜底路由
+  { path: '/topic/:id(\\d+|demo:\\d+)', name: 'topic', component: () => import('@/views/TopicView.vue') },
   { path: '/history', name: 'history', component: () => import('@/views/HistoryView.vue') },
+  // 我的收藏（?tab=video|post|topic）、我的关注：「我的」页统计行点进来，未登录时页面里给登录入口
+  { path: '/favorites', name: 'favorites', component: () => import('@/views/FavoritesView.vue') },
+  { path: '/follows', name: 'follows', component: () => import('@/views/FollowsView.vue') },
   // 账号管理：需要管理员（前端拦一次给出友好提示，服务端还会再校验一次）
   {
     path: '/admin/users',
@@ -51,30 +56,48 @@ const router = createRouter({
   history: createWebHashHistory(),
   routes
 })
+installBackDismiss(router)
 
 /*
  * 路由守卫：需要登录 / 需要管理员的页面，在进入前就拦下来。
- * 未登录时弹登录框并留在原地，而不是先进去再报错。
+ * 未登录时弹登录框并留在原地（登录后再进去），而不是先进去再报错。
+ * 一打开就是这一页（书签、刷新）时没有「原地」可留，拦下来会是白屏：改落到「我的」。
  */
-router.beforeEach(async to => {
+router.beforeEach(async (to, from) => {
   if (!to.meta.requiresAdmin) return true
   const { useAuthStore } = await import('@/stores/auth')
   const auth = useAuthStore()
   if (!auth.ready) await auth.init()
+  const stay = from === START_LOCATION ? '/me' : false
   if (!auth.loggedIn) {
     auth.requireLogin(to.fullPath)
-    return false
+    return stay
   }
   if (!auth.isAdmin) {
     const { toast } = await import('@/composables/useToast')
     toast('需要管理员权限')
-    return false
+    return stay
   }
   return true
 })
 
-router.afterEach(to => {
+/*
+ * 返回键先回首页（Tab 之间的切换见 TabBar.vue）：非首页 Tab 的下面总要有一条首页记录。
+ * 落在最底下一条的非首页 Tab（书签、分享链接直接打开；子页面没有上一页时退回 Tab）：
+ * 只改历史记录，不导航——当前记录改成首页，再把这个 Tab 压上去。页面不会先渲染一次首页，
+ * 按返回时才真正回到首页。刷新时记录里已经有上一页（state.back），不会重复垫。
+ */
+const isSideTab = r => !!r.meta.tabbar && r.meta.tab !== 'home'
+const homePath = () => `/home/${useAppStore().lastHomeTab}`
+
+router.afterEach((to, from, failure) => {
   if (to.name === 'home') useAppStore().lastHomeTab = to.params.tab
+
+  if (!failure && isSideTab(to) && !(window.history.state && window.history.state.back)) {
+    const h = router.options.history
+    h.replace(homePath())
+    h.push(to.fullPath)
+  }
 
   // a tab-bar page that is not in KEEP_ALIVE_VIEWS would silently lose its state on every switch
   if (import.meta.env.DEV && to.meta.tabbar) {

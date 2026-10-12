@@ -8,10 +8,12 @@
  */
 import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
-import { rmSync, existsSync, mkdtempSync } from 'node:fs'
+import { rmSync, existsSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { request as httpRequest } from 'node:http'
+import { brotliDecompressSync, gunzipSync } from 'node:zlib'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const argBase = process.argv.includes('--base') ? process.argv[process.argv.indexOf('--base') + 1] : null
@@ -19,6 +21,15 @@ const PORT = 3178
 /* 用独立的库，避免污染开发数据 */
 /* 素材目录也用临时的，测试不碰项目里的 media/ */
 const TEST_MEDIA = join(tmpdir(), `reel-media-${PORT}-${process.pid}`)
+/* 打包目录也用临时的假文件：测静态文件的缓存头 / 压缩，不依赖有没有 npm run build */
+const TEST_DIST = join(tmpdir(), `reel-dist-${PORT}-${process.pid}`)
+const DIST_JS = 'assets/app-Ab12Cd34.js'
+const DIST_FILES = {
+  'index.html': '<!doctype html><title>Reel</title>' + '<!-- 入口页 -->'.repeat(200),
+  'admin.html': '<!doctype html><title>Reel 管理后台</title>' + '<!-- 后台 -->'.repeat(200),
+  [DIST_JS]: 'export const hello = "world";\n'.repeat(300),
+  'favicon.svg': '<svg xmlns="http://www.w3.org/2000/svg"/>'
+}
 const TEST_DB = join(here, 'db', 'api-test.db')
 const base = argBase || `http://127.0.0.1:${PORT}`
 
@@ -31,7 +42,9 @@ if (!argBase) {
   child = spawn(process.execPath, [join(here, 'create-admin.mjs'), 'admin', 'admin12345'], { env: { ...process.env, DB_PATH: TEST_DB }, stdio: 'ignore' })
   await new Promise(r => child.on('exit', r))
 
-  child = spawn(process.execPath, [join(here, 'index.mjs')], { env: { ...process.env, PORT: String(PORT), DB_PATH: TEST_DB, MEDIA_DIR: TEST_MEDIA }, stdio: 'ignore' })
+  mkdirSync(join(TEST_DIST, 'assets'), { recursive: true })
+  for (const [f, body] of Object.entries(DIST_FILES)) writeFileSync(join(TEST_DIST, f), body)
+  child = spawn(process.execPath, [join(here, 'index.mjs')], { env: { ...process.env, PORT: String(PORT), DB_PATH: TEST_DB, MEDIA_DIR: TEST_MEDIA, DIST_DIR: TEST_DIST }, stdio: 'ignore' })
   await new Promise(r => setTimeout(r, 1400))
 }
 
@@ -122,7 +135,7 @@ await t('推荐分区', 'GET', '/api/home/recommend', d => isArr(d, 6) ? `${d.le
 await t('推荐分区带关联专题', 'GET', '/api/home/recommend', d => d.every(s => 'topicId' in s && s.batches > 0) && d.some(s => Number.isInteger(s.topicId)) ? d.map(s => `${s.id}→${s.topicId}`).join(' ') : false)
 await t('分区视频(第一批)', 'GET', '/api/home/section/1/videos?size=5&batch=0', d => isArr(d, 5) && d[0].cover?.src ? `${d.length} 条，首条「${d[0].title}」` : false)
 await t('分区视频(换一批)', 'GET', '/api/home/section/1/videos?size=5&batch=1', d => isArr(d, 5) ? `首条「${d[0].title}」` : false)
-await t('最新筛选项', 'GET', '/api/home/latest/filters', d => isArr(d.dates, 7) && isArr(d.regions, 3) ? `${d.dates.length} 个日期 / ${d.regions.length} 个地区` : false)
+await t('最新筛选项', 'GET', '/api/home/latest/filters', d => isArr(d.dates, 7) && isArr(d.regions, 4) && d.regions[0].code === 'all' ? `${d.dates.length} 个日期 / ${d.regions.length} 个地区（${d.regions.map(r => r.label).join(',')}）` : false)
 await t('最新视频', 'GET', '/api/home/latest/videos?date=0&region=0&limit=6', d => isArr(d, 6) ? `${d.length} 条` : false)
 await t('最新按本地日期分天', 'GET', '/api/home/latest/videos?date=1&region=0&limit=50', d => isArr(d) && d.every(v => v.publishedAt >= dayStart(1) && v.publishedAt < dayStart(0)) ? `昨天 ${d.length} 条都在本地 0 点之间` : false)
 await t('分类筛选项', 'GET', '/api/category/ai/filters', d => isArr(d, 4) ? d.map(x => x.label).join(',') : false)
@@ -131,6 +144,19 @@ await t('分类视频', 'GET', '/api/category/ai/videos?filter=1&limit=6', d => 
 /* ---- 搜索 ---- */
 await t('热门搜索词', 'GET', '/api/search/hot', d => isArr(d, 8) ? d.map(x => x.word).join(',') : false)
 await t('换一批搜索词', 'GET', '/api/search/hot?page=1', d => isArr(d, 8) ? `${d.length} 个` : false)
+await check('热门搜索词都搜得到东西（搜不到的词不列）', async () => {
+  const words = new Set()
+  for (const page of [0, 1, 2, 3]) for (const w of await data('GET', '/api/search/hot?page=' + page)) words.add(w.word)
+  must(!words.has('古风舞蹈'), '「古风舞蹈」搜不到内容，不应列出')
+  // 不带令牌搜，不往管理员的近期搜索里记
+  const anon = async path => (await (await fetch(base + path)).json()).data
+  for (const w of words) {
+    const q = encodeURIComponent(w)
+    const [v, p] = await Promise.all([anon('/api/search?q=' + q + '&limit=1'), anon('/api/search/posts?q=' + q + '&limit=1')])
+    must(v.total + p.total > 0, `「${w}」搜不到内容却列出来了`)
+  }
+  return `${words.size} 个词都有结果`
+})
 await t('热门创作者', 'GET', '/api/search/creators', d => isArr(d, 5) && d[0].avatar ? d.map(x => x.name).join(',') : false)
 await t('中文搜索(4字, FTS)', 'GET', '/api/search?q=' + encodeURIComponent('治愈日常'), d => d.total > 0 && isArr(d.list) ? `命中 ${d.total} 条，首条「${d.list[0].title}」` : false)
 await t('中文搜索(2字, LIKE)', 'GET', '/api/search?q=' + encodeURIComponent('露营'), d => d.total > 0 ? `命中 ${d.total} 条` : false)
@@ -441,11 +467,11 @@ await t('同城列表', 'GET', '/api/nearby?filter=0', d => isArr(d, 6) && d[0].
 await t('同城·美食', 'GET', '/api/nearby?filter=4', d => Array.isArray(d) ? `${d.length} 条` : false)
 
 /* ---- 我的 ---- */
-await t('个人信息', 'GET', '/api/me', d => hasKeys(d, 'name', 'uid', 'stats') && d.stats.length === 4 ? `${d.name}，${d.stats.map(s => s.label + '=' + s.value).join(' ')}` : false)
-await t('观看历史', 'GET', '/api/me/history', d => Array.isArray(d) ? `${d.length} 条` : false)
+await t('个人信息', 'GET', '/api/me', d => hasKeys(d, 'name', 'uid', 'stats', 'counts') && d.stats.map(s => s.key).join() === 'history,favs,follows' && d.stats.every(s => s.to) ? `${d.name}，${d.stats.map(s => s.label + '=' + s.value).join(' ')}` : false)
+await t('观看历史', 'GET', '/api/me/history', d => Array.isArray(d.list) && typeof d.total === 'number' ? `${d.list.length}/${d.total} 条` : false)
 const anyVideo = (await call('GET', '/api/home/latest/videos?limit=1')).json?.data?.[0]
 await t('记录观看', 'POST', '/api/me/history', d => d.added === true ? `视频 #${d.videoId} 记录成功` : false, { videoId: anyVideo.id, progressSec: 30 })
-await t('记录后历史', 'GET', '/api/me/history', d => isArr(d, 1) ? `${d.length} 条，最新「${d[0].title}」` : false)
+await t('记录后历史', 'GET', '/api/me/history', d => isArr(d.list, 1) && d.list[0].id === anyVideo.id && d.list[0].progressSec === 30 ? `${d.total} 条，最新「${d.list[0].title}」看到 ${d.list[0].progressSec} 秒` : false)
 await t('观看数已累加', 'GET', '/api/home/latest/videos?limit=1', d => d[0].playCount > 0 ? `播放数 ${d[0].playCount}` : false)
 
 /* ---- 互动（成对调用，验证触发器计数） ---- */
@@ -490,7 +516,7 @@ adminCheck('无地区视频归入「其他」', async () => {
   const inOther = await data('GET', `/api/home/latest/videos?date=0&region=${otherIdx}&limit=50`)
   must(inOther.some(x => x.id === v.id), '「其他」里没有')
   for (let i = 0; i < regions.length; i++) {
-    if (i === otherIdx) continue
+    if (i === otherIdx || regions[i].code === 'all') continue
     must(!(await data('GET', `/api/home/latest/videos?date=0&region=${i}&limit=50`)).some(x => x.id === v.id), '不该出现在 ' + regions[i].label)
   }
   return `#${v.id} 在「其他」，计数 +1`
@@ -782,6 +808,324 @@ adminCheck('创作者主页：帖子与社区列表同结构，翻页、收藏�
   })
 })
 
+/* ---- 「我的」、搜索记录、帖子搜索、短视频排序、最新、专题、压缩与缓存 ---- */
+
+/** 管理员建一个普通账号并登录，返回令牌 */
+async function newUser(uid) {
+  await data('POST', '/api/admin/users', { uid, password: 'pass12345', nickname: uid })
+  const r = await fetch(base + '/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ uid, password: 'pass12345' }) }).then(r => r.json())
+  must(r.code === 0, `${uid} 登录失败 ${r.message}`)
+  return r.data.token
+}
+/** 用指定令牌请求，取 data（token 为 null = 未登录） */
+async function asData(token, method, path, body) {
+  const res = await fetch(base + path, {
+    method,
+    headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...(token ? { authorization: 'Bearer ' + token } : {}) },
+    body: body ? JSON.stringify(body) : undefined
+  })
+  const j = await res.json().catch(() => null)
+  if (!j || j.code !== 0) throw new Error(`${method} ${path} → HTTP ${res.status} ${j?.message || ''}`)
+  return j.data
+}
+/** 原始 HTTP 请求（不自动解压），用来看响应头和压缩后的字节 */
+function raw(path, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(base + path)
+    const req = httpRequest({ hostname: u.hostname, port: u.port, path: u.pathname + u.search, headers }, res => {
+      const chunks = []
+      res.on('data', c => chunks.push(c))
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }))
+    })
+    req.on('error', reject)
+    req.end()
+  })
+}
+const decode = r => {
+  const enc = r.headers['content-encoding']
+  return (enc === 'br' ? brotliDecompressSync(r.body) : enc === 'gzip' ? gunzipSync(r.body) : r.body).toString('utf8')
+}
+
+adminCheck('我的：计数实时统计，收藏 / 关注列表和计数一致', async () => {
+  const tok = await newUser('mefavs')
+  const me0 = await asData(tok, 'GET', '/api/me')
+  must(me0.stats.map(s => `${s.key}:${s.value}:${s.to}`).join() === 'history:0:/history,favs:0:/favorites,follows:0:/follows', '初始 ' + json(me0.stats))
+  const [va, vb, vc] = (await data('GET', '/api/category/ai/videos?limit=3')).map(v => v.id)
+  for (const v of [va, vb, vc]) await asData(tok, 'POST', `/api/videos/${v}/fav`, { on: true })
+  const post = (await data('GET', '/api/community/posts?tab=0&limit=1'))[0]
+  await asData(tok, 'POST', `/api/community/posts/${post.id}/fav`, { on: true })
+  await asData(tok, 'POST', '/api/topics/2/fav', { on: true })
+  const [c1, c2] = (await data('GET', '/api/admin/creators?pageSize=100&status=1')).list
+  for (const c of [c1, c2]) await asData(tok, 'POST', `/api/creators/${c.id}/follow`, { on: true })
+  // 下架一条收藏过的视频、停用一个关注的创作者：不再计数，也不出现在列表里
+  await data('PATCH', `/api/admin/videos/${vc}`, { status: 2 })
+  await data('POST', '/api/admin/creators/batch', { ids: [c2.id], action: 'disable' })
+  try {
+    const me = await asData(tok, 'GET', '/api/me')
+    must(json(me.counts) === json({ history: 0, favVideos: 2, favPosts: 1, favTopics: 1, follows: 1 }), 'counts ' + json(me.counts))
+    must(me.stats.find(s => s.key === 'favs').value === 4 && me.stats.find(s => s.key === 'follows').value === 1, 'stats ' + json(me.stats))
+    const fv = await asData(tok, 'GET', '/api/me/favs?type=video')
+    must(fv.total === 2 && fv.list.length === 2 && fv.list.every(v => v.faved === true && v.favedAt > 0 && [va, vb].includes(v.id)), 'video ' + json(fv.list.map(v => v.id)))
+    const page2 = await asData(tok, 'GET', '/api/me/favs?type=video&limit=1&offset=1')
+    must(page2.total === 2 && page2.list.length === 1 && page2.list[0].id === fv.list[1].id, '分页 ' + json(page2.list.map(v => v.id)))
+    const fp = await asData(tok, 'GET', '/api/me/favs?type=post')
+    must(fp.total === 1 && fp.list[0].id === post.id && fp.list[0].faved === true && fp.list[0].favedAt > 0, 'post ' + json(fp.list.map(p => p.id)))
+    must(Object.keys(fp.list[0]).filter(k => k !== 'favedAt').sort().join() === Object.keys(post).sort().join(), '帖子字段和社区列表不同 ' + Object.keys(fp.list[0]).join())
+    const ft = await asData(tok, 'GET', '/api/me/favs?type=topic')
+    must(ft.total === 1 && ft.list[0].id === 2 && ft.list[0].name && ft.list[0].cover && typeof ft.list[0].count === 'number', 'topic ' + json(ft.list[0]))
+    const fl = await asData(tok, 'GET', '/api/me/follows')
+    must(fl.total === 1 && fl.list[0].id === c1.id && fl.list[0].following === true && typeof fl.list[0].followers === 'number' && fl.list[0].avatar && fl.list[0].followedAt > 0, 'follows ' + json(fl.list.map(c => c.id)))
+    must((await asData(tok, 'GET', '/api/me/favs?type=nope')).total === 2, '未知 type 应按视频')
+    return '收藏 视频 2 / 帖子 1 / 专题 1、关注 1（下架的视频、停用的创作者不算），列表 total 与计数一致'
+  } finally {
+    await data('PATCH', `/api/admin/videos/${vc}`, { status: 1 })
+    await data('POST', '/api/admin/creators/batch', { ids: [c2.id], action: 'enable' })
+  }
+})
+
+adminCheck('观看历史：分页、进度、删一条、清空；播放页带上次进度', async () => {
+  const tok = await newUser('mehistory')
+  const [v1, v2, v3] = (await data('GET', '/api/category/cn/videos?limit=3')).map(v => v.id)
+  const report = (id, progressSec, progressOnly = false) => asData(tok, 'POST', '/api/me/history', { videoId: id, progressSec, progressOnly })
+  await report(v1, 0)
+  await report(v1, 37, true)
+  await report(v2, 0)
+  await report(v3, 0)
+  // 同一秒写进去的，改成相隔 10 秒，顺序才确定
+  const w = new DatabaseSync(TEST_DB)
+  const uid = w.prepare('SELECT id FROM users WHERE uid = ?').get('mehistory').id
+  const now = Math.floor(Date.now() / 1000)
+  ;[v1, v2, v3].forEach((id, i) => w.prepare('UPDATE watch_history SET watched_at = ? WHERE user_id = ? AND video_id = ?').run(now - 30 + i * 10, uid, id))
+  w.close()
+  const p1 = await asData(tok, 'GET', '/api/me/history?limit=2')
+  must(p1.total === 3 && p1.list.map(v => v.id).join() === [v3, v2].join(), '第一页 ' + json(p1.list.map(v => v.id)))
+  const p2 = await asData(tok, 'GET', '/api/me/history?limit=2&offset=2')
+  must(p2.list.length === 1 && p2.list[0].id === v1 && p2.list[0].progressSec === 37 && p2.list[0].watchedAt > 0 && p2.list[0].len > 0, '第二页 ' + json(p2.list.map(v => [v.id, v.progressSec])))
+  const d = await asData(tok, 'GET', `/api/videos/${v1}`)
+  must(d.progressSec === 37 && d.watchedAt > 0, '详情进度 ' + json({ p: d.progressSec, w: d.watchedAt }))
+  const anon = (await anonCall('GET', `/api/videos/${v1}`)).json.data
+  must(anon.progressSec === 0 && anon.watchedAt === null, '未登录 ' + json({ p: anon.progressSec, w: anon.watchedAt }))
+  // 再打开同一个视频：开始播放那次上报（进度 0、计播放数）不覆盖上次看到的位置
+  await report(v1, 0)
+  must((await asData(tok, 'GET', `/api/videos/${v1}`)).progressSec === 37, '开始播放的上报把进度清零了')
+  // 进度上报明确传 0（比如看完了从头再来）才清零
+  await report(v1, 0, true)
+  must((await asData(tok, 'GET', `/api/videos/${v1}`)).progressSec === 0, 'progressOnly 传 0 应清零')
+  const del = await asData(tok, 'DELETE', `/api/me/history/${v2}`)
+  must(del.removed === 1 && del.total === 2, '删一条 ' + json(del))
+  must((await asData(tok, 'DELETE', `/api/me/history/${v2}`)).removed === 0, '重复删除应为 0')
+  must((await asData(tok, 'GET', '/api/me')).counts.history === 2, '删一条后「我的」计数没变')
+  const clr = await asData(tok, 'DELETE', '/api/me/history')
+  must(clr.removed === 2 && clr.total === 0, '清空 ' + json(clr))
+  const after = await asData(tok, 'GET', '/api/me/history')
+  must(after.total === 0 && after.list.length === 0, '清空后 ' + json(after))
+  return '3 条分 2 页，进度 37 秒带到详情且重开不丢；删一条 / 清空后计数跟着变'
+})
+
+await check('社区关注 / 收藏：未登录是空列表', async () => {
+  const all = (await anonCall('GET', '/api/community/posts?tab=0')).json.data
+  const follow = (await anonCall('GET', '/api/community/posts?tab=2')).json
+  const fav = (await anonCall('GET', '/api/community/posts?tab=3')).json
+  must(all.length > 0 && follow.code === 0 && follow.data.length === 0 && fav.code === 0 && fav.data.length === 0,
+    json({ all: all.length, follow: follow.data?.length, fav: fav.data?.length }))
+  return `最新 ${all.length} 条；关注 / 收藏未登录都是 []`
+})
+
+adminCheck('帖子搜索：标题 / 话题都能搜，只算已发布，结构同社区列表', async () => {
+  const cid = (await data('GET', '/api/admin/creators?pageSize=1&status=1')).list[0].id
+  const pub = await data('POST', '/api/admin/posts', { creatorId: cid, text: '帖子搜索测试：秋日银杏大道', tags: '银杏观赏, 秋天', status: 1 })
+  const draft = await data('POST', '/api/admin/posts', { creatorId: cid, text: '帖子搜索测试：草稿里的银杏', tags: '银杏观赏, 秋天', status: 0 })
+  try {
+    const q = (kw, extra = '') => data('GET', '/api/search/posts?q=' + encodeURIComponent(kw) + extra)
+    const byText = await q('银杏大道')
+    must(byText.total === 1 && byText.list.length === 1 && byText.list[0].id === pub.id, '标题 ' + json(byText.list.map(p => p.id)))
+    const byTag = await q('银杏观赏')
+    must(byTag.total === 1 && byTag.list[0].id === pub.id, '话题（4 字） ' + json(byTag.list.map(p => p.id)))
+    const short = await q('秋天', '&limit=50')
+    must(short.list.some(p => p.id === pub.id) && !short.list.some(p => p.id === draft.id), '话题（2 字） ' + json(short.list.map(p => p.id)))
+    const listItem = (await data('GET', '/api/community/posts?tab=0&limit=50')).find(p => p.id === pub.id)
+    must(listItem && Object.keys(byText.list[0]).sort().join() === Object.keys(listItem).sort().join(), '字段和社区列表不同 ' + Object.keys(byText.list[0]).join())
+    must(byText.list[0].media && byText.list[0].time, '缺 media / time')
+    const paged = await q('帖子搜索测试', '&limit=1')
+    must(paged.total === 1 && paged.list.length === 1, '分页 ' + json({ total: paged.total, n: paged.list.length }))
+    const blank = await call('GET', '/api/search/posts?q=%20')
+    must(blank.status === 400, '空关键词 HTTP ' + blank.status)
+    return '标题 / 4 字话题 / 2 字话题都能搜到，草稿不算，字段与社区列表一致'
+  } finally {
+    await data('POST', '/api/admin/posts/batch', { ids: [pub.id, draft.id], action: 'delete' })
+  }
+})
+
+adminCheck('近期搜索：记关键词（没结果也记）、去重、翻页不记、删一个、清空', async () => {
+  const tok = await newUser('mesearch')
+  const s = path => asData(tok, 'GET', path)
+  const enc = encodeURIComponent
+  await s('/api/search?q=' + enc('治愈日常'))
+  await s('/api/search?q=' + enc('一个肯定搜不到的词'))
+  await s('/api/search/posts?q=' + enc('旅行'))
+  await s('/api/search?q=' + enc('翻页才搜的词') + '&offset=20')
+  let h = (await s('/api/search/history')).list.map(x => x.keyword)
+  must(h.join() === ['旅行', '一个肯定搜不到的词', '治愈日常'].join(), '记录 ' + json(h))
+  await s('/api/search?q=' + enc('治愈日常'))
+  const top = (await s('/api/search/history?limit=2')).list
+  must(top.length === 2 && top[0].keyword === '治愈日常' && top[0].searchedAt > 0, '再搜一次应排到最前且不重复 ' + json(top))
+  must((await s('/api/search/history')).list.length === 3, '去重失败')
+  await anonCall('GET', '/api/search?q=' + enc('未登录搜的词'))
+  must((await anonCall('GET', '/api/search/history')).status === 401, '未登录应 401')
+  // 旧接口（视频卡片）：没结果的搜索不出现，id 是视频 id
+  const old = await s('/api/search/recent?limit=10')
+  const first = (await data('GET', '/api/search?q=' + enc('治愈日常') + '&limit=1')).list[0]
+  must(old.length === 1 && old[0].id === first.id, '旧版近期搜索 ' + json(old.map(v => v.id)))
+  const one = await asData(tok, 'DELETE', '/api/search/history?keyword=' + enc('旅行'))
+  must(one.removed === 1, '删一个 ' + json(one))
+  h = (await s('/api/search/history')).list.map(x => x.keyword)
+  must(h.join() === ['治愈日常', '一个肯定搜不到的词'].join(), '删后 ' + json(h))
+  const all = await asData(tok, 'DELETE', '/api/search/history')
+  must(all.removed === 2 && (await s('/api/search/history')).list.length === 0, '清空 ' + json(all))
+  return '没结果的也记，同一个词只留最新一条，翻页不记；删一个 / 清空'
+})
+
+adminCheck('短视频：点了不喜欢的不再出现，同一创作者的其他视频往后排', async () => {
+  const tok = await newUser('medislike')
+  const first = await shortsPage('seed=dis-a&limit=10', tok)
+  const target = first.list[2]
+  must(target.creator?.id, '第 3 条没有创作者')
+  await asData(tok, 'POST', `/api/videos/${target.id}/dislike`, { on: true })
+  // 同一个 seed（排序已缓存）再取：直接跳过它
+  const again = shortIds(await shortsPage('seed=dis-a&limit=10', tok))
+  must(!again.includes(target.id) && again.length === 9, '缓存的顺序里还有它 ' + json(again))
+  // 新 seed：一整轮都不出现；同一创作者的其他视频和未登录（没有不喜欢）比名次往后
+  const pool = (await data('GET', '/api/admin/stats')).videos.published
+  const roundOf = async token => {
+    const out = []
+    for (let off = 0; off < pool; off += 50) out.push(...shortIds(await shortsPage(`seed=dis-b&limit=${Math.min(50, pool - off)}&offset=${off}`, token)))
+    return out
+  }
+  const mine = await roundOf(tok)
+  const anon = await roundOf(null)
+  must(!mine.includes(target.id) && mine.length === pool - 1, `一整轮 ${mine.length} 条（应为 ${pool - 1}），含不喜欢的：${mine.includes(target.id)}`)
+  const same = (await data('GET', `/api/creators/${target.creator.id}/videos?limit=50`)).list.map(v => v.id).filter(id => id !== target.id)
+  const avg = order => same.reduce((sum, id) => sum + order.indexOf(id), 0) / same.length
+  must(same.length > 0 && avg(mine) > avg(anon), `同一创作者 ${same.length} 条的平均名次 ${avg(anon).toFixed(1)} → ${avg(mine).toFixed(1)}`)
+  return `#${target.id} 不再出现；同一创作者 ${same.length} 条平均名次 ${avg(anon).toFixed(0)} → ${avg(mine).toFixed(0)}`
+})
+
+adminCheck('短视频：有视频文件的、短的排在前面', async () => {
+  const mk = async (title, durationSec, playbackUrl) =>
+    (await data('POST', '/api/admin/videos', { title, status: 1, durationSec, ...(playbackUrl ? { playbackUrl } : {}) })).id
+  const made = { fileShort: [], fileLong: [], bareShort: [], bareLong: [] }
+  for (let i = 0; i < 4; i++) {
+    made.fileShort.push(await mk('排序测试 有文件短片' + i, 60, `/media/videos/rank-s${i}.mp4`))
+    made.fileLong.push(await mk('排序测试 有文件长片' + i, 3600, `/media/videos/rank-l${i}.mp4`))
+    made.bareShort.push(await mk('排序测试 无文件短片' + i, 60))
+    made.bareLong.push(await mk('排序测试 无文件长片' + i, 3600))
+  }
+  try {
+    const pool = (await data('GET', '/api/admin/stats')).videos.published
+    const curated = (await data('GET', '/api/admin/videos?short=1&status=1&pageSize=100')).total
+    const pos = { fileShort: [], fileLong: [], bareShort: [], bareLong: [] }
+    for (const seed of ['rank-1', 'rank-2', 'rank-3']) {
+      const order = []
+      for (let off = 0; off < pool; off += 50) order.push(...shortIds(await shortsPage(`seed=${seed}&limit=${Math.min(50, pool - off)}&offset=${off}`)))
+      for (const k in made) for (const id of made[k]) pos[k].push(order.indexOf(id))
+    }
+    must(Object.values(pos).every(p => p.every(x => x >= 0)), '有视频没出现在一整轮里')
+    const avg = k => pos[k].reduce((a, b) => a + b, 0) / pos[k].length
+    // 有文件的短片：只可能排在精选和其他有文件的后面
+    must(Math.max(...pos.fileShort) < curated + 8, `有文件短片最靠后排在第 ${Math.max(...pos.fileShort) + 1} 条（精选 ${curated} 条）`)
+    must(avg('fileShort') < avg('fileLong') && avg('fileLong') < avg('bareShort') && avg('bareShort') < avg('bareLong'),
+      '平均名次 ' + json(Object.fromEntries(Object.keys(pos).map(k => [k, Math.round(avg(k))]))))
+    return '平均名次 ' + Object.keys(pos).map(k => `${k} ${Math.round(avg(k)) + 1}`).join(' / ') + `（精选 ${curated} 条，池子 ${pool}）`
+  } finally {
+    await data('POST', '/api/admin/videos/batch', { ids: Object.values(made).flat(), action: 'delete' })
+  }
+})
+
+await check('最新：「全部」在最前，地区计数按日期、和日期上的数字对得上', async () => {
+  const f = await data('GET', '/api/home/latest/filters')
+  must(f.regions[0].code === 'all' && f.regions[0].label === '全部', '第一项 ' + json(f.regions[0]))
+  for (let d = 0; d < 7; d++) {
+    const sum = f.regions.slice(1).reduce((s, r) => s + r.counts[d], 0)
+    must(f.regions[0].counts[d] === f.dates[d].count && sum === f.dates[d].count, `第 ${d} 天：全部 ${f.regions[0].counts[d]} / 日期 ${f.dates[d].count} / 各地区之和 ${sum}`)
+  }
+  must(f.regions.every(r => r.count === r.counts[0]), '默认 count 应是今天的')
+  const f2 = await data('GET', '/api/home/latest/filters?date=2')
+  must(f2.regions.every(r => r.count === r.counts[2]), 'date=2 时 count 应是那天的')
+  for (const [i, r] of f.regions.entries()) {
+    const byIdx = await data('GET', `/api/home/latest/videos?date=1&region=${i}&limit=50`)
+    must(byIdx.length === Math.min(50, r.counts[1]), `${r.label} 昨天 ${byIdx.length} 条，数字是 ${r.counts[1]}`)
+    const byCode = await data('GET', `/api/home/latest/videos?date=1&region=${r.code}&limit=50`)
+    must(byCode.map(v => v.id).join() === byIdx.map(v => v.id).join(), `${r.code} 按 code 和按下标结果不同`)
+  }
+  return f.regions.map(r => `${r.label} ${r.counts.join('/')}`).join('；')
+})
+
+adminCheck('专题：播放 / 收藏数由视频汇总（后台填的更大时用后台的），登录时带 faved', async () => {
+  const topic = await data('POST', '/api/admin/topics', { name: '汇总测试专题', status: 1 })
+  const v1 = await data('POST', '/api/admin/videos', { title: '汇总测试 1', status: 1, topicId: topic.id })
+  const v2 = await data('POST', '/api/admin/videos', { title: '汇总测试 2', status: 1, topicId: topic.id })
+  try {
+    const t0 = await data('GET', `/api/topic/${topic.id}`)
+    must(t0.playCount === 0 && t0.plays === '0' && t0.favs === 0 && t0.faved === false, '新专题 ' + json({ p: t0.playCount, f: t0.favs, faved: t0.faved }))
+    for (const [id, n] of [[v1.id, 3], [v2.id, 2]]) for (let i = 0; i < n; i++) await data('POST', '/api/me/history', { videoId: id, progressSec: 1 })
+    await data('POST', `/api/videos/${v1.id}/fav`, { on: true })
+    await data('POST', `/api/topics/${topic.id}/fav`, { on: true })
+    const t1 = await data('GET', `/api/topic/${topic.id}`)
+    must(t1.playCount === 5 && t1.plays === '5' && t1.favs === 2 && t1.faved === true, '汇总 ' + json({ p: t1.playCount, f: t1.favs, faved: t1.faved }))
+    const anon = (await anonCall('GET', `/api/topic/${topic.id}`)).json.data
+    must(anon.faved === false && anon.favs === 2, '未登录 ' + json({ faved: anon.faved, favs: anon.favs }))
+    await data('PATCH', `/api/admin/topics/${topic.id}`, { playsCount: 25000 })
+    const t2 = await data('GET', `/api/topic/${topic.id}`)
+    must(t2.playCount === 25000 && t2.plays === '2.5w', '后台填的 ' + json({ p: t2.playCount, s: t2.plays }))
+    return '播放 3+2=5、收藏 视频 1 + 专题 1 = 2；后台填 25000 时显示 2.5w'
+  } finally {
+    await data('POST', `/api/videos/${v1.id}/fav`, { on: false })
+    await data('POST', `/api/topics/${topic.id}/fav`, { on: false })
+    await data('POST', '/api/admin/videos/batch', { ids: [v1.id, v2.id], action: 'delete' })
+    await data('DELETE', `/api/admin/topics/${topic.id}`)
+  }
+})
+
+await check('压缩：接口 JSON 按 Accept-Encoding 压缩（br 优先，其次 gzip），小响应不压', async () => {
+  const path = '/api/category/cn/videos?limit=20'
+  const plain = await raw(path)
+  const br = await raw(path, { 'accept-encoding': 'gzip, deflate, br' })
+  const gz = await raw(path, { 'accept-encoding': 'gzip' })
+  const noBr = await raw(path, { 'accept-encoding': 'br;q=0, gzip;q=0.8' })
+  must(!plain.headers['content-encoding'] && /accept-encoding/.test(plain.headers.vary || ''), '不接受压缩时不该压 ' + json(plain.headers))
+  must(br.headers['content-encoding'] === 'br' && gz.headers['content-encoding'] === 'gzip' && noBr.headers['content-encoding'] === 'gzip',
+    json([br, gz, noBr].map(r => r.headers['content-encoding'])))
+  must(decode(br) === plain.body.toString() && decode(gz) === plain.body.toString(), '解压后内容不一致')
+  must(br.body.length * 4 < plain.body.length, `br ${br.body.length} / 原始 ${plain.body.length}`)
+  must(br.headers['cache-control'] === 'no-store', '接口应 no-store：' + br.headers['cache-control'])
+  const small = await raw('/api/health', { 'accept-encoding': 'br' })
+  must(!small.headers['content-encoding'], '小响应不该压')
+  return `${plain.body.length} 字节 → br ${br.body.length} / gzip ${gz.body.length}`
+})
+
+async function staticCheck() {
+  const js = await raw('/' + DIST_JS, { 'accept-encoding': 'br' })
+  must(js.status === 200 && js.headers['cache-control'] === 'public, max-age=31536000, immutable', 'assets 缓存头 ' + js.headers['cache-control'])
+  must(js.headers['content-encoding'] === 'br' && decode(js) === DIST_FILES[DIST_JS], 'assets 没压缩或内容不对')
+  const js2 = await raw('/' + DIST_JS, { 'accept-encoding': 'gzip' })
+  must(js2.headers['content-encoding'] === 'gzip' && decode(js2) === DIST_FILES[DIST_JS], 'assets gzip')
+  const index = await raw('/', { 'accept-encoding': 'gzip' })
+  must(index.status === 200 && index.headers['cache-control'] === 'no-cache' && index.headers.etag && decode(index) === DIST_FILES['index.html'], '入口页 ' + json(index.headers))
+  const again = await raw('/index.html', { 'if-none-match': index.headers.etag })
+  must(again.status === 304 && again.body.length === 0, '带 ETag 应 304，实际 ' + again.status)
+  const spa = await raw('/some/page')
+  must(spa.status === 200 && spa.headers['cache-control'] === 'no-cache' && spa.body.toString() === DIST_FILES['index.html'], '前端路由兜底 ' + spa.status)
+  const admin = await raw('/admin.html')
+  must(admin.status === 200 && admin.headers['cache-control'] === 'no-cache', 'admin.html ' + admin.headers['cache-control'])
+  const icon = await raw('/favicon.svg')
+  must(icon.headers['cache-control'] === 'no-cache' && icon.headers.etag, '图标 ' + icon.headers['cache-control'])
+  const gone = await raw('/assets/app-old123.js')
+  must(gone.status === 404, '旧分包应 404，实际 ' + gone.status)
+  return 'assets 一年 immutable + br / gzip；入口页、后台、图标 no-cache + ETag（304）；缺的分包 404'
+}
+if (argBase) results.push({ name: '静态文件：缓存头 / 压缩 / 304 / 缺失分包 404', ok: true, note: '跳过（--base 模式）' })
+else await check('静态文件：缓存头 / 压缩 / 304 / 缺失分包 404', staticCheck)
+
 for (const [name, fn] of adminChecks) {
   if (argBase) results.push({ name, ok: true, note: '跳过（--base 模式不写管理数据）' })
   else await check(name, fn)
@@ -800,6 +1144,11 @@ async function oldDbCheck() {
     await new Promise(r => spawn(process.execPath, [join(here, 'db', 'seed.mjs')], { env: { ...process.env, DB_PATH: OLD_DB }, stdio: 'ignore' }).on('exit', r))
     const w = new DatabaseSync(OLD_DB)
     w.exec('ALTER TABLE posts DROP COLUMN content')
+    // 老版本的 v_users：收藏 / 关注读 user_stats 里没人维护的列
+    w.exec(`DROP VIEW v_users; CREATE VIEW v_users AS SELECT u.id, u.uid, u.nickname AS name, u.bio, u.avatar_url, u.avatar_fallback,
+             COALESCE(s.history_count, 0) AS history_count, COALESCE(s.fav_count, 0) AS fav_count,
+             COALESCE(s.download_count, 0) AS download_count, COALESCE(s.follow_count, 0) AS follow_count
+             FROM users u LEFT JOIN user_stats s ON s.user_id = u.id WHERE u.status = 1`)
     const before = w.prepare('PRAGMA table_info(posts)').all().some(c => c.name === 'content')
     w.close()
     must(!before, '没能删掉 content 列')
@@ -823,7 +1172,14 @@ async function oldDbCheck() {
     r.close()
     must(col && col.notnull === 1 && col.dflt_value === "''", '补上的列 ' + JSON.stringify(col))
     must(/补上 content 列/.test(log), '启动日志里应提示补列')
-    return 'content 列已补上（NOT NULL DEFAULT \'\'），详情 / 阅读数正常'
+    const viewSqlOf = db2 => db2.prepare("SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'v_users'").get()?.sql || ''
+    const rv = new DatabaseSync(OLD_DB, { readOnly: true })
+    const viewSql = viewSqlOf(rv)
+    const u = rv.prepare('SELECT * FROM v_users LIMIT 1').get()
+    rv.close()
+    must(/fav_video_count/.test(viewSql) && u && 'fav_post_count' in u && 'follow_count' in u, 'v_users 没有按新定义重建：' + viewSql.slice(0, 120))
+    must(/已更新 v_users 视图/.test(log), '启动日志里应提示重建 v_users')
+    return 'content 列已补上（NOT NULL DEFAULT \'\'），详情 / 阅读数正常；v_users 改为实时计数'
   } finally {
     if (srv && srv.exitCode === null) {
       const exited = new Promise(r => srv.once('exit', r))
@@ -833,8 +1189,8 @@ async function oldDbCheck() {
     try { rmSync(dir, { recursive: true, force: true }) } catch {}
   }
 }
-if (argBase) results.push({ name: '老库自动补 posts.content 列', ok: true, note: '跳过（--base 模式）' })
-else await check('老库自动补 posts.content 列', oldDbCheck)
+if (argBase) results.push({ name: '老库自动补 posts.content 列 / 重建 v_users', ok: true, note: '跳过（--base 模式）' })
+else await check('老库自动补 posts.content 列 / 重建 v_users', oldDbCheck)
 
 /* ---- 错误处理：这些用例「必须失败」 ---- */
 async function tFail(name, method, path, expectHint, body) {
@@ -854,6 +1210,7 @@ await tFail('不存在的视频被拒绝', 'POST', '/api/me/history', null, { vi
 
 if (child) child.kill()
 try { rmSync(TEST_MEDIA, { recursive: true, force: true }) } catch {}
+try { rmSync(TEST_DIST, { recursive: true, force: true }) } catch {}
 
 const pad = (s, n) => String(s).padEnd(n, ' ')
 console.log('')

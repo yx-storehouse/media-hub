@@ -5,6 +5,7 @@
  * 方法名与前端 src/api/index.js 的函数一一对应，返回值也保持同样结构。
  */
 import { DatabaseSync } from 'node:sqlite'
+import { readFileSync } from 'node:fs'
 import { cover as coverArt } from '../lib/art.mjs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -68,6 +69,18 @@ if (get("SELECT 1 x FROM sqlite_master WHERE type = 'table' AND name = 'posts_ft
     INSERT INTO posts_fts(posts_fts, rowid, text, tags) VALUES ('delete', old.id, old.text, old.tags);
     INSERT INTO posts_fts(rowid, text, tags) VALUES (new.id, new.text, new.tags);
   END`)
+}
+
+/*
+ * 「我的」页计数改成实时统计：老库的 v_users 还读 user_stats 里没人维护的列（收藏 / 关注恒为 0），
+ * 启动时按 views.sql 里的定义重建（定义只写在 views.sql 一处）
+ */
+if (get("SELECT 1 x FROM sqlite_master WHERE type = 'view' AND name = 'v_users' AND sql NOT LIKE '%fav_video_count%'")) {
+  const def = readFileSync(join(here, 'views.sql'), 'utf8').match(/DROP VIEW IF EXISTS v_users;[\s\S]*?WHERE u\.status = 1;/)
+  if (def) {
+    db.exec(def[0])
+    console.log('已更新 v_users 视图（「我的」页计数改为实时统计）')
+  }
 }
 
 /* ---------------- 行 → 前端结构 ---------------- */
@@ -199,31 +212,63 @@ function regionWhere(code) {
   return ['v.region = ?', [code]]
 }
 
-/** 「最新」页的日期与地区筛选（计数实时统计，不写死） */
-export function latestFilters(now = Math.floor(Date.now() / 1000)) {
-  const dates = []
-  for (let i = 0; i < 7; i++) {
-    const start = localDayStart(now, i)
-    const end = localDayStart(now, i - 1)
-    const count = get(`SELECT COUNT(*) c FROM videos WHERE status=1 AND published_at >= ? AND published_at < ?`, start, end).c
-    const d = new Date(start * 1000)
-    dates.push({ label: i === 0 ? '今天' : i === 1 ? '昨天' : `${d.getMonth() + 1}/${d.getDate()}`, count })
+/* 「最新」页的地区第一项是「全部」（默认选中），之后是 regions 表里的地区 */
+const LATEST_DAYS = 7
+const ALL_REGION = { code: 'all', label: '全部' }
+
+/**
+ * 「最新」页的日期与地区筛选（计数实时统计，不写死）。
+ *   dates[d].count          第 d 天（0 = 今天）全部地区的视频数
+ *   regions[i].counts[d]    第 i 个地区第 d 天的视频数；regions[0] 是「全部」，所以 regions[0].counts[d] === dates[d].count
+ *   regions[i].count        = counts[date]（date 是当前选中的日期，默认今天），选中的日期和地区上的数字对得上
+ * 一条 GROUP BY 查完 7 天 × 各地区，不按地区逐个 COUNT。
+ */
+export function latestFilters({ date = 0 } = {}, now = Math.floor(Date.now() / 1000)) {
+  const day = Math.min(Math.max(Math.floor(Number(date)) || 0, 0), LATEST_DAYS - 1)
+  const starts = Array.from({ length: LATEST_DAYS + 1 }, (_, i) => localDayStart(now, i - 1))   // starts[0] = 明天 0 点
+  const regions = [ALL_REGION, ...all('SELECT code, label FROM regions ORDER BY sort_order')]
+    .map(r => ({ code: r.code, label: r.label, counts: new Array(LATEST_DAYS).fill(0) }))
+  const byCode = new Map(regions.slice(1).map(r => [r.code, r]))
+  const other = byCode.get(OTHER_REGION)
+  const bucket = Array.from({ length: LATEST_DAYS }, (_, i) => `WHEN published_at >= ${starts[i + 1]} THEN ${i}`).join(' ')
+  const rows = all(`SELECT CASE ${bucket} END AS d, region, COUNT(*) c FROM videos
+                    WHERE status = 1 AND published_at >= ? AND published_at < ? GROUP BY d, region`, starts[LATEST_DAYS], starts[0])
+  for (const r of rows) {
+    if (r.d == null) continue
+    regions[0].counts[r.d] += r.c
+    // 没填地区、或地区不在 regions 表里的算「其他」（与 regionWhere 一致）
+    const target = (r.region !== OTHER_REGION && byCode.get(r.region)) || other
+    if (target) target.counts[r.d] += r.c
   }
-  const regions = all('SELECT code, label FROM regions ORDER BY sort_order').map(r => {
-    const [where, args] = regionWhere(r.code)
-    return { ...r, count: get(`SELECT COUNT(*) c FROM videos v WHERE v.status = 1 AND ${where}`, ...args).c }
+  const dates = regions[0].counts.map((count, i) => {
+    const d = new Date(starts[i + 1] * 1000)
+    return { label: i === 0 ? '今天' : i === 1 ? '昨天' : `${d.getMonth() + 1}/${d.getDate()}`, count }
   })
-  return { dates, regions }
+  return { dates, regions: regions.map(r => ({ ...r, count: r.counts[day] })) }
 }
 
-/** 「最新」页某天 + 某地区的视频（date：0 = 今天，按服务器本地日期分天） */
+/**
+ * 「最新」里的地区参数 → 地区 code（null = 全部）。
+ * 数字是 latestFilters().regions 的下标（0 = 全部），也可以直接传 code（all / cn / jk / other）；认不出的按全部。
+ */
+function latestRegionCode(region) {
+  const s = String(region ?? '').trim()
+  if (!s || s === ALL_REGION.code) return null
+  if (/^\d+$/.test(s)) {
+    const i = Number(s)
+    return i > 0 ? get('SELECT code FROM regions ORDER BY sort_order LIMIT 1 OFFSET ?', i - 1)?.code ?? null : null
+  }
+  return get('SELECT code FROM regions WHERE code = ?', s)?.code ?? null
+}
+
+/** 「最新」页某天 + 某地区的视频（date：0 = 今天，按服务器本地日期分天；region 见 latestRegionCode） */
 export function latestVideos({ date = 0, region = 0, limit = 20, offset = 0 } = {}, now = Math.floor(Date.now() / 1000)) {
   const start = localDayStart(now, date)
   const end = localDayStart(now, date - 1)
-  const regionCode = get('SELECT code FROM regions ORDER BY sort_order LIMIT 1 OFFSET ?', region)?.code
+  const regionCode = latestRegionCode(region)
   const [where, args] = regionCode ? regionWhere(regionCode) : ['1', []]
   return all(`SELECT * FROM v_videos v WHERE v.published_at >= ? AND v.published_at < ? AND ${where}
-              ORDER BY v.published_at DESC LIMIT ? OFFSET ?`, start, end, ...args, limit, offset).map(toVideo)
+              ORDER BY v.published_at DESC, v.id DESC LIMIT ? OFFSET ?`, start, end, ...args, limit, offset).map(toVideo)
 }
 
 /** 分类页筛选项 + 某分类的视频（sortKey 来自 category_filters.sort_key，已白名单校验） */
@@ -238,30 +283,87 @@ export function categoryVideos(tab, { filter = 0, limit = 20, offset = 0 } = {})
 
 /* ---------------- 搜索 ---------------- */
 
-/** 热门搜索词（换一批 = 换一页） */
-export const hotWords = (page = 0, size = 8) =>
-  all(`SELECT word, is_hot AS hot FROM search_keywords WHERE is_banned = 0
-       ORDER BY weight DESC, sort_order LIMIT ? OFFSET ?`, size, page * size)
+/**
+ * 热门搜索词（换一批 = 往后挪一批）。
+ * 只列搜得到东西的词：已发布的视频或帖子至少命中一条（和搜索用同一套匹配），点进去不会是 0 条结果；
+ * 屏蔽的词不列。词不多（几十个），每个词查一次「有没有」，不缓存，后台改了马上生效。
+ * 每批 size 个，翻到末尾接回开头，所以每批都是满的；能显示的词不到 size 个时全部返回。
+ */
+export function hotWords(page = 0, size = 8) {
+  const words = all(`SELECT word, is_hot AS hot FROM search_keywords WHERE is_banned = 0
+                     ORDER BY weight DESC, sort_order`).filter(w => hasSearchHits(w.word))
+  if (words.length <= size) return words
+  const start = (Math.max(0, Math.floor(Number(page)) || 0) * size) % words.length
+  return Array.from({ length: size }, (_, i) => words[(start + i) % words.length])
+}
 
 /** 热门创作者 */
 export const creators = (limit = 5) =>
   all(`SELECT id, handle, name, avatar_url, avatar_fallback, is_verified AS verified, follower_count
        FROM creators WHERE status = 1 ORDER BY is_official DESC, follower_count DESC LIMIT ?`, limit)
 
-/** 某用户的近期搜索（带视频卡片） */
+/**
+ * 旧版「近期搜索」：每次搜索第一条结果的视频卡片（已弃用，App 改用 searchKeywords 的关键词列表后删除）。
+ * 没有结果的搜索不带视频，这里跳过。
+ */
 export const searchHistory = (userId, { limit = 5, offset = 0 } = {}) =>
-  all(`SELECT * FROM v_search_history WHERE user_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+  all(`SELECT v.* FROM search_history h JOIN v_videos v ON v.id = h.video_id
+       WHERE h.user_id = ? ORDER BY h.created_at DESC, h.id DESC LIMIT ? OFFSET ?`,
     userId, limit, offset).map(toVideo)
 
 export const searchHistoryCount = userId =>
   get('SELECT COUNT(*) c FROM search_history WHERE user_id = ?', userId).c
 
+/* 每人最多留这么多条搜索记录；关键词最长存这么多字 */
+const SEARCH_HISTORY_MAX = 50
+const SEARCH_KEYWORD_MAX = 100
+
+/** 记一次搜索（同一个词只留最新一条）；没有结果的搜索也记，videoId 为 null */
 export function addSearchHistory(userId, keyword, videoId = null) {
+  const kw = [...String(keyword || '').trim()].slice(0, SEARCH_KEYWORD_MAX).join('')
+  if (!kw) return
   const now = Math.floor(Date.now() / 1000)
-  run('DELETE FROM search_history WHERE user_id = ? AND keyword = ?', userId, keyword)
-  run('INSERT INTO search_history(user_id, keyword, video_id, created_at) VALUES(?,?,?,?)', userId, keyword, videoId, now)
-  run(`DELETE FROM search_history WHERE user_id = ? AND id NOT IN
-       (SELECT id FROM search_history WHERE user_id = ? ORDER BY created_at DESC LIMIT 50)`, userId, userId)
+  tx(() => {
+    run('DELETE FROM search_history WHERE user_id = ? AND keyword = ?', userId, kw)
+    run('INSERT INTO search_history(user_id, keyword, video_id, created_at) VALUES(?,?,?,?)', userId, kw, videoId, now)
+    run(`DELETE FROM search_history WHERE user_id = ? AND id NOT IN
+         (SELECT id FROM search_history WHERE user_id = ? ORDER BY created_at DESC, id DESC LIMIT ${SEARCH_HISTORY_MAX})`, userId, userId)
+  })
+}
+
+/** 近期搜索的关键词：新的在前，同一个词只有一条（写入时已去重） */
+export const searchKeywords = (userId, { limit = 10 } = {}) =>
+  all(`SELECT keyword, created_at AS searchedAt FROM search_history WHERE user_id = ?
+       ORDER BY created_at DESC, id DESC LIMIT ?`, userId, limit)
+
+/** 删一个关键词（keyword 为空 = 清空全部），返回删掉的条数 */
+export function removeSearchHistory(userId, keyword = null) {
+  const kw = String(keyword ?? '').trim()
+  return Number(kw
+    ? run('DELETE FROM search_history WHERE user_id = ? AND keyword = ?', userId, kw).changes
+    : run('DELETE FROM search_history WHERE user_id = ?', userId).changes)
+}
+
+/* 搜索的匹配方式：3 个字以上走 FTS5 trigram（短语），1~2 个字退回 LIKE */
+const useFts = kw => [...kw].length >= 3
+const ftsPhrase = kw => '"' + kw.replace(/"/g, '""') + '"'
+
+/** 已发布视频里命中的条数（和 searchVideos 的 total 一致） */
+const videoHits = kw => (useFts(kw)
+  ? get(`SELECT COUNT(*) c FROM videos_fts f JOIN videos v ON v.id = f.rowid
+         WHERE videos_fts MATCH ? AND v.status = 1`, ftsPhrase(kw)).c
+  : get('SELECT COUNT(*) c FROM videos WHERE status = 1 AND (title LIKE ? OR tags LIKE ?)', `%${kw}%`, `%${kw}%`).c)
+
+/** 已发布帖子里命中的条数（和 searchPosts 的 total 一致） */
+const postHits = kw => (useFts(kw)
+  ? get(`SELECT COUNT(*) c FROM posts_fts f JOIN posts p ON p.id = f.rowid AND p.status = 1
+         WHERE posts_fts MATCH ?`, ftsPhrase(kw)).c
+  : get('SELECT COUNT(*) c FROM posts WHERE status = 1 AND (text LIKE ? OR tags LIKE ?)', `%${kw}%`, `%${kw}%`).c)
+
+/** 这个词能不能搜到东西（视频或帖子至少一条） */
+function hasSearchHits(word) {
+  const kw = String(word || '').trim()
+  return !!kw && (videoHits(kw) > 0 || postHits(kw) > 0)
 }
 
 /**
@@ -271,37 +373,49 @@ export function addSearchHistory(userId, keyword, videoId = null) {
 export function searchVideos(q, { limit = 20, offset = 0 } = {}) {
   const kw = String(q || '').trim()
   if (!kw) return { total: 0, list: [] }
-  if ([...kw].length >= 3) {
-    const phrase = '"' + kw.replace(/"/g, '""') + '"'
-    const total = get(`SELECT COUNT(*) c FROM videos_fts f JOIN videos v ON v.id = f.rowid
-                       WHERE videos_fts MATCH ? AND v.status = 1`, phrase).c
+  const total = videoHits(kw)
+  if (useFts(kw)) {
     const list = all(`SELECT v.* FROM videos_fts f JOIN v_videos v ON v.id = f.rowid
-                      WHERE videos_fts MATCH ? ORDER BY f.rank LIMIT ? OFFSET ?`, phrase, limit, offset).map(toVideo)
+                      WHERE videos_fts MATCH ? ORDER BY f.rank LIMIT ? OFFSET ?`, ftsPhrase(kw), limit, offset).map(toVideo)
     return { total, list }
   }
   const like = `%${kw}%`
-  const total = get('SELECT COUNT(*) c FROM videos WHERE status = 1 AND (title LIKE ? OR tags LIKE ?)', like, like).c
   const list = all('SELECT * FROM v_videos WHERE title LIKE ? OR tags LIKE ? ORDER BY published_at DESC LIMIT ? OFFSET ?',
     like, like, limit, offset).map(toVideo)
   return { total, list }
 }
 
-/** 社区搜索（帖子） */
+/**
+ * 社区搜索（帖子）：搜标题（posts.text）和话题标签，只算已发布的。
+ * 3 个字以上走 FTS5 trigram（按相关度，同分新的在前），1~2 个字退回 LIKE（新的在前）。
+ * 返回 { total, list }，每条和社区列表一样带 media。
+ */
 export function searchPosts(q, { limit = 20, offset = 0 } = {}) {
   const kw = String(q || '').trim()
-  if (!kw) return []
-  const rows = [...kw].length >= 3
-    ? all(`SELECT ${POST_COLS} FROM posts_fts f JOIN v_posts p ON p.id = f.rowid ${POST_VIDEO}
-           WHERE posts_fts MATCH ? ORDER BY f.rank LIMIT ? OFFSET ?`,
-        '"' + kw.replace(/"/g, '""') + '"', limit, offset)
-    : all(`SELECT ${POST_COLS} FROM v_posts p ${POST_VIDEO} WHERE p.text LIKE ? OR p.tags LIKE ? LIMIT ? OFFSET ?`,
-        `%${kw}%`, `%${kw}%`, limit, offset)
-  return rows.map(toPost)
+  if (!kw) return { total: 0, list: [] }
+  const total = postHits(kw)
+  let rows
+  if (useFts(kw)) {
+    rows = all(`SELECT ${POST_COLS} FROM posts_fts f JOIN v_posts p ON p.id = f.rowid ${POST_VIDEO}
+                WHERE posts_fts MATCH ? ORDER BY f.rank, p.published_at DESC, p.id DESC LIMIT ? OFFSET ?`, ftsPhrase(kw), limit, offset)
+  } else {
+    const like = `%${kw}%`
+    rows = all(`SELECT ${POST_COLS} FROM v_posts p ${POST_VIDEO} WHERE p.text LIKE ? OR p.tags LIKE ?
+                ORDER BY p.published_at DESC, p.id DESC LIMIT ? OFFSET ?`, like, like, limit, offset)
+  }
+  return { total, list: rows.map(r => ({ ...toPost(r), media: postMedia(r.id) })) }
 }
 
 /* ---------------- 专题 ---------------- */
 
 export const topic = id => get('SELECT * FROM v_topics WHERE id = ?', id)
+
+/** 专题内已上架视频的播放数、收藏数之和（专题页「x次播放 · y收藏」不再停在后台手填的 0） */
+export const topicVideoTotals = id =>
+  get('SELECT COALESCE(SUM(play_count), 0) plays, COALESCE(SUM(fav_count), 0) favs FROM videos WHERE status = 1 AND topic_id = ?', id)
+
+export const isTopicFaved = (userId, topicId) =>
+  !!get('SELECT 1 x FROM topic_favs WHERE user_id = ? AND topic_id = ?', userId, topicId)
 export const topicCovers = id => all('SELECT url, fallback FROM v_topic_covers WHERE topic_id = ? ORDER BY sort_order', id)
 export const topicSorts = () => ['默认', '播放最多', '收藏最多', '最新上架', '最近更新']
 
@@ -319,16 +433,24 @@ export function topicVideos(id, sort = 0, { limit = 20, offset = 0 } = {}) {
  * 这样增删专题不会让别的卡片换图。头图没有占位图时也补上生成图，图片打不开时不至于一片黑。
  */
 export function library() {
-  const topics = all('SELECT id, name, video_count AS count FROM v_topics WHERE kind = 2 ORDER BY sort_order, id')
+  return topicCards(all('SELECT id, name, video_count AS count FROM v_topics WHERE kind = 2 ORDER BY sort_order, id'))
+}
+
+/** 专题卡片 { id, name, count, cover }（片库、我的收藏共用）；行里的其他字段原样带上 */
+function topicCards(topics) {
+  if (!topics.length) return []
+  const ids = topics.map(t => t.id)
   const first = new Map()
-  for (const c of all('SELECT topic_id, url, fallback FROM v_topic_covers WHERE url IS NOT NULL OR fallback IS NOT NULL ORDER BY topic_id, sort_order')) {
+  for (const c of all(`SELECT topic_id, url, fallback FROM v_topic_covers
+                       WHERE topic_id IN (${ids.map(() => '?').join(',')}) AND (url IS NOT NULL OR fallback IS NOT NULL)
+                       ORDER BY topic_id, sort_order`, ...ids)) {
     if (!first.has(c.topic_id)) first.set(c.topic_id, c)
   }
   return topics.map(t => {
     const art = coverArt('cat' + t.id, { kind: t.id % 6 })
     const c = first.get(t.id)
     const cover = c ? { src: c.url || null, fallback: c.fallback || art.fallback } : { src: art.src, fallback: art.fallback }
-    return { id: t.id, name: t.name, count: t.count, cover }
+    return { ...t, cover }
   })
 }
 export const topicHero = id => all('SELECT url, fallback FROM v_topic_covers WHERE topic_id = ? ORDER BY sort_order', id)
@@ -358,6 +480,12 @@ export function videoDetail(id) {
 
 export const isVideoDisliked = (userId, videoId) =>
   !!get('SELECT 1 FROM video_dislikes WHERE user_id = ? AND video_id = ?', userId, videoId)
+
+/** 某用户上次看到哪：{ progressSec, watchedAt }，没看过为 { 0, null }（播放页据此续播，App 重开也在） */
+export function watchProgress(userId, videoId) {
+  const r = get('SELECT progress_sec, watched_at FROM watch_history WHERE user_id = ? AND video_id = ?', userId, videoId)
+  return { progressSec: r ? Math.max(0, Math.floor(r.progress_sec || 0)) : 0, watchedAt: r?.watched_at ?? null }
+}
 
 /**
  * 相似推荐：同专题优先，其次同分类，再按播放量排序。
@@ -393,31 +521,49 @@ export function relatedVideos(id, { batch = 0, limit = 6 } = {}) {
 /*
  * 短视频推荐流（GET /api/shorts?seed=&offset=&limit=&exclude=）。
  *
- * 候选是全部已上架视频；后台「加入短视频」的（short_clips）大幅加权，首屏基本是它们，但不只有它们。
+ * 候选是全部已上架视频；后台「加入短视频」的（short_clips）、有视频文件的、时长短的分档加权：
+ * 有文件的精选在最前，接着是精选 / 有文件的短片，再是有文件的长视频，没有文件的长视频垫底
+ * （没有文件的只能看封面，短视频页给它一个很短的模拟时长）。
  * 每条打分：
  *   热度       log(播放数)，按全池最大值归一
  *   新鲜度     按发布时间，半衰期 14 天
  *   短视频     后台加入短视频的加一大截
+ *   有文件     有播放地址的加一大截
+ *   时长       5 分钟以内加分，10 分钟以内加一点
  *   互动率     (赞 + 藏) / 播放，封顶
  *   随机扰动   hash(seed, id)：同一个 seed 顺序固定（翻页稳定），换一个 seed 顺序就变
  *   − 登录用户近期看过的（3 天内重罚、30 天内轻罚）
  *   − exclude：客户端最近刷到过的 id（未登录也能每次打开都不一样）
+ *   − 登录用户点过「不喜欢」的（罚到最后，而且出页时直接跳过），同一创作者的其他视频小幅降分
  * 排好后再去一遍同质：同一创作者 / 同一专题尽量不挨着（后面几条里分差不大的换上来）。
  *
  * 整个排序按 (用户, seed) 只算一次、放进内存缓存（LRU，5 分钟没人翻就丢），翻页只是切片。
  * 翻过整个候选池后用派生 seed（seed:r1、seed:r2…）再排一轮接着给，前端永远刷不到底；
  * 新一轮的开头会避开上一轮末尾的几条，接缝处不会连着出现同一条。
  */
+/*
+ * 权重。热度 + 新鲜度 + 互动率 + 随机扰动合起来在 0 ~ 3.2 之间，下面几档加权都比它大，所以基本是分档排：
+ *   精选 + 有文件 ≈ 6.5+  >  精选 / 有文件的短片 ≈ 3.5~4+  >  有文件的长视频 3+  >  没文件的短片 1+  >  其余
+ * 看过 / 刷到过的罚分要跟得上这几档，否则刚看过的精选还会排在没看过的前面。
+ */
 const FEED_W = {
   pop: 1,          // 热度
   fresh: 0.6,      // 新鲜度
-  curated: 2,      // 后台加入的短视频
+  curated: 3.5,    // 后台加入的短视频
+  playable: 3,     // 有视频文件（没有的只能看封面）
+  short: 1,        // 5 分钟以内
+  medium: 0.4,     // 10 分钟以内
   engage: 0.4,     // 互动率
   noise: 1.2,      // 随机扰动
-  seen3d: 3,       // 3 天内看过
-  seen30d: 0.8,    // 30 天内看过
-  exclude: 3       // 客户端最近刷到过
+  seen3d: 5,       // 3 天内看过
+  seen30d: 1.2,    // 30 天内看过
+  exclude: 5,      // 客户端最近刷到过
+  disliked: 10,    // 点过「不喜欢」
+  dislikedBy: 0.4, // 同一创作者每有一条被「不喜欢」
+  dislikedByMax: 1.2
 }
+const FEED_SHORT_SEC = 300
+const FEED_MEDIUM_SEC = 600
 const FEED_HALF_LIFE_DAYS = 14
 const FEED_ENGAGE_CAP = 0.2     // 互动率到 20% 就算满分
 const FEED_DIVERSE_GAP = 0.35   // 去同质：只在分差不超过这么多的候选里换
@@ -452,14 +598,22 @@ function noise01(seedHash, id) {
 /** 给整个候选池按 seed 排一次序，返回视频 id（Int32Array）；exclude 是 Set 或 null */
 function rankShortFeed(seed, userId, exclude) {
   const now = Math.floor(Date.now() / 1000)
-  const rows = all('SELECT id, topic_id, creator_id, play_count, like_count, fav_count, published_at FROM videos WHERE status = 1')
+  const rows = all(`SELECT id, topic_id, creator_id, play_count, like_count, fav_count, published_at, duration_sec,
+                           (playback_url IS NOT NULL AND playback_url != '') AS playable
+                    FROM videos WHERE status = 1`)
   const n = rows.length
   if (!n) return new Int32Array(0)
   const curated = new Set(all('SELECT video_id FROM short_clips').map(r => r.video_id))
   const watched = new Map()
+  const disliked = new Set()
+  const dislikedBy = new Map()     // 创作者 id → 被这个用户「不喜欢」的条数
   if (userId) {
     for (const r of all('SELECT video_id, watched_at FROM watch_history WHERE user_id = ? AND watched_at >= ?', userId, now - 30 * DAY_SEC)) {
       watched.set(r.video_id, r.watched_at)
+    }
+    for (const r of all('SELECT d.video_id, v.creator_id FROM video_dislikes d JOIN videos v ON v.id = d.video_id WHERE d.user_id = ?', userId)) {
+      disliked.add(r.video_id)
+      if (r.creator_id != null) dislikedBy.set(r.creator_id, (dislikedBy.get(r.creator_id) || 0) + 1)
     }
   }
   let maxPlay = 0
@@ -477,9 +631,15 @@ function rankShortFeed(seed, userId, exclude) {
       + FEED_W.engage * Math.min(1, Math.max(0, (r.like_count || 0) + (r.fav_count || 0)) / (plays + 20) / FEED_ENGAGE_CAP)
       + FEED_W.noise * noise01(seedHash, r.id)
     if (curated.has(r.id)) s += FEED_W.curated
+    if (r.playable) s += FEED_W.playable
+    const len = r.duration_sec || 0
+    if (len > 0 && len <= FEED_SHORT_SEC) s += FEED_W.short
+    else if (len > 0 && len <= FEED_MEDIUM_SEC) s += FEED_W.medium
     const at = watched.get(r.id)
     if (at != null) s -= now - at <= 3 * DAY_SEC ? FEED_W.seen3d : FEED_W.seen30d
     if (exclude?.has(r.id)) s -= FEED_W.exclude
+    if (disliked.has(r.id)) s -= FEED_W.disliked
+    else if (dislikedBy.has(r.creator_id)) s -= Math.min(FEED_W.dislikedByMax, FEED_W.dislikedBy * dislikedBy.get(r.creator_id))
     score[i] = s
   }
   const order = new Int32Array(n)
@@ -589,6 +749,12 @@ export function shortFeed({ seed, offset = 0, limit = 10, exclude = null, userId
   const uniq = [...new Set(ids)]
   const rows = uniq.length ? all(`SELECT * FROM v_videos WHERE id IN (${uniq.map(() => '?').join(',')})`, ...uniq) : []
   const byId = new Map(rows.map(r => [r.id, r]))
+  // 点过「不喜欢」的直接跳过：排序缓存着的这一轮里它还在原位，刚点完不喜欢往下翻也不会再刷到
+  if (userId && uniq.length) {
+    for (const r of all(`SELECT video_id FROM video_dislikes WHERE user_id = ? AND video_id IN (${uniq.map(() => '?').join(',')})`, userId, ...uniq)) {
+      byId.delete(r.video_id)
+    }
+  }
   const list = ids.map(id => byId.get(id)).filter(Boolean)
     .map(r => ({ ...toVideo(r), src: r.playback_url || null, like: r.like_count, fav: r.fav_count }))
   return { seed, list, hasMore: true }
@@ -636,11 +802,12 @@ export function toPost(r) {
 export function posts(tab = 0, { userId = null, limit = 20, offset = 0 } = {}) {
   let where = '', args = []
   if (tab === 1) where = 'WHERE p.is_hot = 1'                                    // 热门
-  else if (tab === 2 && userId) {                                               // 关注
-    where = 'WHERE p.creator_id IN (SELECT creator_id FROM user_follows WHERE user_id = ?)'
-    args = [userId]
-  } else if (tab === 3 && userId) {                                             // 收藏
-    where = 'WHERE p.id IN (SELECT post_id FROM post_favs WHERE user_id = ?)'
+  else if (tab === 2 || tab === 3) {
+    // 关注 / 收藏是「我的」内容：没登录时是空列表，不能退成全部帖子
+    if (!userId) return []
+    where = tab === 2
+      ? 'WHERE p.creator_id IN (SELECT creator_id FROM user_follows WHERE user_id = ?)'   // 关注
+      : 'WHERE p.id IN (SELECT post_id FROM post_favs WHERE user_id = ?)'                // 收藏
     args = [userId]
   }
   const rows = all(`SELECT ${POST_COLS} FROM v_posts p ${POST_VIDEO} ${where} ORDER BY p.published_at DESC LIMIT ? OFFSET ?`, ...args, limit, offset)
@@ -900,20 +1067,84 @@ export const listUsers = () => all(`SELECT id, uid, nickname, role, status, last
 
 export const countAdmins = () => get("SELECT COUNT(*) c FROM users WHERE role = 'admin' AND status = 1").c
 
-export const watchHistory = (userId, { limit = 20, offset = 0 } = {}) =>
-  all('SELECT * FROM v_watch_history WHERE user_id = ? ORDER BY watched_at DESC LIMIT ? OFFSET ?', userId, limit, offset).map(toVideo)
+/* ---------------- 我的：观看历史 / 收藏 / 关注（只算已上架的内容，总数和 v_users 的计数一致） ---------------- */
+
+/** 观看历史一页：Video + { progressSec, watchedAt }，最近看的在前 → { total, list } */
+export function watchHistory(userId, { limit = 20, offset = 0 } = {}) {
+  const total = get('SELECT COUNT(*) c FROM watch_history h JOIN videos v ON v.id = h.video_id AND v.status = 1 WHERE h.user_id = ?', userId).c
+  const list = all('SELECT * FROM v_watch_history WHERE user_id = ? ORDER BY watched_at DESC, id DESC LIMIT ? OFFSET ?', userId, limit, offset)
+    .map(r => ({ ...toVideo(r), progressSec: Math.max(0, Math.floor(r.progress_sec || 0)), watchedAt: r.watched_at }))
+  return { total, list }
+}
+
+/** 删一条观看记录（videoId 为 null = 清空），返回删掉的条数 */
+export function removeWatchHistory(userId, videoId = null) {
+  return Number(videoId == null
+    ? run('DELETE FROM watch_history WHERE user_id = ?', userId).changes
+    : run('DELETE FROM watch_history WHERE user_id = ? AND video_id = ?', userId, videoId).changes)
+}
+
+/** 我收藏的视频：Video + favedAt，最近收藏的在前 */
+export function favVideos(userId, { limit = 20, offset = 0 } = {}) {
+  const total = get('SELECT COUNT(*) c FROM video_favs f JOIN videos v ON v.id = f.video_id AND v.status = 1 WHERE f.user_id = ?', userId).c
+  const list = all(`SELECT v.*, f.created_at AS faved_at FROM video_favs f JOIN v_videos v ON v.id = f.video_id
+                    WHERE f.user_id = ? ORDER BY f.created_at DESC, f.video_id DESC LIMIT ? OFFSET ?`, userId, limit, offset)
+    .map(r => ({ ...toVideo(r), favedAt: r.faved_at }))
+  return { total, list }
+}
+
+/** 我收藏的帖子：和社区列表同结构（带 media）+ favedAt */
+export function favPosts(userId, { limit = 20, offset = 0 } = {}) {
+  const total = get('SELECT COUNT(*) c FROM post_favs f JOIN posts p ON p.id = f.post_id AND p.status = 1 WHERE f.user_id = ?', userId).c
+  const rows = all(`SELECT ${POST_COLS}, f.created_at AS faved_at FROM post_favs f JOIN v_posts p ON p.id = f.post_id ${POST_VIDEO}
+                    WHERE f.user_id = ? ORDER BY f.created_at DESC, f.post_id DESC LIMIT ? OFFSET ?`, userId, limit, offset)
+  return { total, list: rows.map(r => ({ ...toPost(r), media: postMedia(r.id), favedAt: r.faved_at })) }
+}
+
+/** 我收藏的专题：片库卡片 { id, name, count, cover } + favedAt */
+export function favTopics(userId, { limit = 20, offset = 0 } = {}) {
+  const total = get('SELECT COUNT(*) c FROM topic_favs f JOIN topics t ON t.id = f.topic_id AND t.status = 1 WHERE f.user_id = ?', userId).c
+  const rows = all(`SELECT t.id, t.name, t.video_count AS count, f.created_at AS favedAt FROM topic_favs f JOIN v_topics t ON t.id = f.topic_id
+                    WHERE f.user_id = ? ORDER BY f.created_at DESC, f.topic_id DESC LIMIT ? OFFSET ?`, userId, limit, offset)
+  return { total, list: topicCards(rows) }
+}
+
+/** 我关注的创作者（只算正常状态的），最近关注的在前 */
+export function followedCreators(userId, { limit = 20, offset = 0 } = {}) {
+  const total = get('SELECT COUNT(*) c FROM user_follows f JOIN creators c ON c.id = f.creator_id AND c.status = 1 WHERE f.user_id = ?', userId).c
+  const list = all(`SELECT c.*, f.created_at AS followed_at FROM user_follows f JOIN creators c ON c.id = f.creator_id AND c.status = 1
+                    WHERE f.user_id = ? ORDER BY f.created_at DESC, f.creator_id DESC LIMIT ? OFFSET ?`, userId, limit, offset)
+    .map(c => ({
+      id: c.id,
+      name: c.name,
+      handle: c.handle,
+      avatar: toCover(c.avatar_url, c.avatar_fallback),
+      verified: !!c.is_verified,
+      bio: c.bio || '',
+      followers: c.follower_count,
+      followedAt: c.followed_at,
+      following: true
+    }))
+  return { total, list }
+}
 
 export const videoExists = videoId => !!get('SELECT 1 x FROM videos WHERE id = ?', videoId)
 
-/** countPlay=false 时只更新观看进度，不计播放数（播放页离开时的进度上报用） */
+/**
+ * 记观看。countPlay=false 时只更新观看进度，不计播放数（播放页离开 / 切后台时的进度上报用）。
+ * 开始播放时的那次上报（countPlay 且进度为 0）不覆盖已存的进度：否则重新打开视频、还没来得及上报就被杀掉，
+ * 上次看到的位置就丢了。
+ */
 export function addWatchHistory(userId, videoId, progressSec = 0, { countPlay = true } = {}) {
   const now = Math.floor(Date.now() / 1000)
   if (!videoExists(videoId)) throw new Error(`视频不存在: ${videoId}`)
+  const sec = Math.max(0, Math.floor(Number(progressSec) || 0))
+  const keep = countPlay && sec === 0
   run(`INSERT INTO watch_history(user_id, video_id, progress_sec, watched_at) VALUES(?,?,?,?)
-       ON CONFLICT(user_id, video_id) DO UPDATE SET progress_sec = excluded.progress_sec, watched_at = excluded.watched_at`,
-    userId, videoId, progressSec, now)
+       ON CONFLICT(user_id, video_id) DO UPDATE SET ${keep ? '' : 'progress_sec = excluded.progress_sec, '}watched_at = excluded.watched_at`,
+    userId, videoId, sec, now)
   if (countPlay) run('UPDATE videos SET play_count = play_count + 1 WHERE id = ?', videoId)
-  return { added: true, videoId, progressSec }
+  return { added: true, videoId, progressSec: sec }
 }
 
 export const searchUsers = q => all('SELECT id, uid, nickname AS name FROM v_users WHERE nickname LIKE ? OR uid = ? LIMIT 20', `%${q}%`, q)

@@ -12,6 +12,9 @@ export const HOME_TABS = [
 
 export const DEFAULT_HOME_TAB = 'recommend'
 
+/** 是不是首页的地址（/home/xxx）；history.state.back 可能是 null */
+export const isHomePath = path => typeof path === 'string' && /^\/home(\/|$)/.test(path)
+
 /**
  * Bottom tab bar. `icon` is the outline icon name; the active state uses `${icon}On`.
  * `view` is the page component's name: these pages are kept alive (App.vue). The router warns in

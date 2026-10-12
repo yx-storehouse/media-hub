@@ -285,6 +285,7 @@ function deleteVideo(id) {
 
 /* ---------------- 帖子 ---------------- */
 
+/* 旧的「折叠数」（more_count）不再编辑、导入、导出：App 卡片上的 +N 按真实配图数算；请求里带了也忽略 */
 const POST_SPEC = {
   creatorId: { col: 'creator_id', label: '发布者', required: '请选择发布者', parse: pCreatorRef },
   text: { col: 'text', label: '标题', required: '标题不能为空', parse: pText('标题', 5000, true) },
@@ -292,7 +293,6 @@ const POST_SPEC = {
   mediaKind: { col: 'media_kind', label: '类型', blank: 1, parse: (v, k) => F.toEnum(v, k, '类型', F.POST_KIND_WORDS, ['视频', '图文', '文档']) },
   videoId: { col: 'video_id', label: '关联视频', nullable: true, parse: pVideoRef },
   tags: { col: 'tags', label: '标签', blank: '[]', parse: (v, k) => JSON.stringify(F.toTags(v, k, { hash: false })) },
-  moreCount: { col: 'more_count', label: '折叠数', blank: 0, parse: pInt('折叠数', { min: 0 }) },
   readCount: { col: 'read_count', label: '阅读数', blank: 0, parse: pInt('阅读数', { min: 0 }) },
   isHot: { col: 'is_hot', label: '热门', blank: 0, parse: pBool('热门') },
   status: { col: 'status', label: '状态', parse: pStatus },
@@ -1166,7 +1166,7 @@ export function exportRows(type, q = {}) {
       id: str(r.id), creator: creatorRef(r.creator_handle), text: str(r.text), content: str(r.content), kind: F.postKindLabel(r.media_kind),
       video: r.video_id ? (digits(r.video_public_id) || !r.video_public_id ? String(r.video_id) : r.video_public_id) : '',
       tags: parseTags(r.tags).join(','), mainImage: str(r.main_image), images: (r.images || []).join('\n'),
-      moreCount: str(r.more_count), readCount: str(r.read_count), isHot: F.fmtBool(r.is_hot),
+      readCount: str(r.read_count), isHot: F.fmtBool(r.is_hot),
       status: F.statusLabel(r.status), publishedAt: F.fmtTimestamp(r.published_at)
     }))
   } else if (type === 'topics') {

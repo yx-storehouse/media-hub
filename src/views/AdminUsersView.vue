@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { listUsers, createUser, resetUserPassword, setUserStatus, setUserRole, deleteUser } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 import { toast } from '@/composables/useToast'
+import { useBackDismiss } from '@/composables/useBackDismiss'
 import BackHeader from '@/components/BackHeader.vue'
 import Icon from '@/components/Icon.vue'
 
@@ -22,6 +23,7 @@ const loading = ref(true)
 const failed = ref(false)
 
 const createOpen = ref(false)
+useBackDismiss(createOpen) // 返回键只关「新建账号」弹层
 const form = ref({ uid: '', nickname: '', password: '', role: 'user' })
 const submitting = ref(false)
 

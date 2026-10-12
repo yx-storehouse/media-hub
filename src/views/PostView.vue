@@ -1,5 +1,39 @@
+<script>
+/*
+ * 返回恢复：详情页不常驻（不在 KeepAlive 里），点进作者主页 / 视频 / 话题再按返回时，用离开前存下的
+ * 帖子内容和滚动位置原样放回：不重新加载、不回到顶部，也不再记一次阅读。
+ * 只在「返回到这条历史记录」时恢复（history.state.forward 有值）；重新点进来是全新的一页。
+ */
+const snapshots = new Map()
+const SNAPSHOT_TTL = 10 * 60 * 1000
+const SNAPSHOT_MAX = 8
+
+/* 同一次打开 App 里每篇帖子只记一次阅读：读过的 id 记在 sessionStorage（取不到就只记在内存里） */
+const READ_KEY = 'reel:read-posts'
+const READ_MAX = 500
+let readIds = null
+function readSet() {
+  if (!readIds) {
+    try {
+      readIds = new Set(JSON.parse(sessionStorage.getItem(READ_KEY) || '[]').map(String))
+    } catch {
+      readIds = new Set()
+    }
+  }
+  return readIds
+}
+function setRead(id, on) {
+  const s = readSet()
+  if (on) s.add(String(id))
+  else s.delete(String(id))
+  try {
+    sessionStorage.setItem(READ_KEY, JSON.stringify([...s].slice(-READ_MAX)))
+  } catch { /* 存不了就只在内存里记 */ }
+}
+</script>
+
 <script setup>
-import { ref, shallowRef, computed, watch } from 'vue'
+import { ref, shallowRef, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, onBeforeRouteUpdate, RouterLink } from 'vue-router'
 import { getPost, viewPost, toggleFollow } from '@/api'
 import { useAuthStore } from '@/stores/auth'
@@ -8,12 +42,17 @@ import { useBack } from '@/composables/useBack'
 import { toast } from '@/composables/useToast'
 import { share } from '@/composables/useShare'
 import { formatCount } from '@/utils/format'
+import { linkify } from '@/components/community/linkify'
 import Cover from '@/components/Cover.vue'
 import Icon from '@/components/Icon.vue'
+import ImageViewer from '@/components/ImageViewer.vue'
+import UnfollowSheet from '@/components/creator/UnfollowSheet.vue'
+import { rememberVideo } from '@/components/video/preview'
 
 /*
- * 帖子详情：作者栏（关注）→ 标题、正文、配图、关联视频、话题、发布时间 →「下一篇」，底部是阅读数 / 分享 / 收藏。
+ * 帖子详情：作者栏（关注）→ 标题、关联视频（紧跟标题）、正文、配图、话题、发布时间 →「下一篇」，底部是阅读数 / 分享 / 收藏。
  * 收藏状态和阅读数放在 stores/posts.js，社区列表（常驻）读同一份，返回列表时两边一致。
+ * 配图点开是全屏大图（左右滑、双指 / 双击放大）；正文里的网址、邮箱、电话可以点。
  */
 defineOptions({ name: 'PostView' })
 
@@ -31,40 +70,61 @@ const following = ref(false)
 const scroller = ref(null)
 /* 配图按原始比例显示：加载完读出宽高，之前先用 4:3 占位 */
 const ratios = shallowRef({})
+/* 全屏看大图：{ images, index } */
+const viewer = shallowRef(null)
+/* 取消关注前的确认 */
+const unfollowAsk = ref(false)
 
 const author = computed(() => post.value?.author || null)
 /* 头像 + 名字进作者主页（作者已删除时 id 为空，就只是展示） */
 const authorLink = computed(() => (author.value?.id != null ? { to: `/creator/${encodeURIComponent(author.value.id)}` } : null))
-const stats = computed(() => (post.value ? postStore.stats(post.value) : { faved: false, fav: 0, read: 0 }))
+/* 未登录时一律不显示为已收藏（退出登录后不会留着上一个人的收藏状态） */
+const stats = computed(() => {
+  if (!post.value) return { faved: false, fav: 0, read: 0 }
+  const s = postStore.stats(post.value)
+  return auth.ready && !auth.loggedIn ? { ...s, faved: false } : s
+})
 const tags = computed(() => (post.value?.tags || []).map(t => String(t).replace(/^#/, '')).filter(Boolean))
-/* 正文按空行分段；段内的单个换行原样显示（pre-line） */
-const paragraphs = computed(() => String(post.value?.content || '').split(/\n\s*\n/).map(s => s.trim()).filter(Boolean))
+/* 正文按空行分段（段内的单个换行原样显示，pre-line）；每段切成文字和链接片段 */
+const paragraphs = computed(() => String(post.value?.content || '').split(/\n\s*\n/).map(s => s.trim()).filter(Boolean).map(linkify))
 
 const videoTo = v => `/video/${encodeURIComponent(v.id)}`
 const postTo = id => `/post/${encodeURIComponent(id)}`
-const searchTo = t => ({ path: '/search', query: { q: t } })
+/* 话题搜帖子（搜索页的「帖子」标签） */
+const searchTo = t => ({ path: '/search', query: { q: t, type: 'post' } })
 
 /* ---------- 加载 ---------- */
 
 let loadSeq = 0
+let currentId = route.params.id
+let lastTop = 0
+
 async function load(id) {
   const token = ++loadSeq
+  currentId = id
   // 换一篇：先撤掉上一篇（加载期间显示骨架），不会把旧内容当成新帖子显示
   post.value = null
   failed.value = null
   following.value = false
   ratios.value = {}
+  viewer.value = null
+  lastTop = 0
   if (scroller.value) scroller.value.scrollTop = 0
   try {
     const p = await getPost(id)
     if (token !== loadSeq) return
     following.value = !!p.following
-    // 这次打开也算一次阅读：先在本地 +1，接口返回新的阅读数后以它为准
-    postStore.patch(p.id, { faved: !!p.faved, fav: p.fav ?? 0, read: (p.read ?? 0) + 1 })
+    // 这次会话里第一次打开才算一次阅读：先在本地 +1，接口返回新的阅读数后以它为准
+    const first = !readSet().has(String(p.id))
+    postStore.patch(p.id, { faved: !!p.faved, fav: p.fav ?? 0, read: (p.read ?? 0) + (first ? 1 : 0) })
     post.value = p
-    viewPost(p.id).then(r => {
-      if (typeof r?.read === 'number') postStore.patch(p.id, { read: r.read })
-    })
+    if (first) {
+      setRead(p.id, true)
+      viewPost(p.id).then(r => {
+        if (typeof r?.read === 'number') postStore.patch(p.id, { read: r.read })
+        else setRead(p.id, false) // 没记上（断网等）：下次打开再记
+      })
+    }
   } catch (e) {
     if (token !== loadSeq) return
     const missing = e?.status >= 400 && e?.status < 500 && e?.status !== 401
@@ -74,22 +134,28 @@ async function load(id) {
   }
 }
 
-load(route.params.id)
-onBeforeRouteUpdate(to => {
-  if (to.params.id !== route.params.id) load(to.params.id)
-})
+/* 按当前账号重新取「是否关注 / 是否收藏」（不记阅读）；同时发起的几次合并成一个请求 */
+let stateReq = null
+function refreshState() {
+  const p = post.value
+  if (!p) return Promise.resolve()
+  if (!stateReq) {
+    stateReq = getPost(p.id)
+      .then(d => {
+        if (post.value?.id !== p.id) return
+        if (!followBusy) following.value = !!d.following
+        if (!postStore.isPending(p.id)) postStore.patch(p.id, { faved: !!d.faved, fav: d.fav ?? 0 })
+      })
+      .catch(() => { /* 取不到就保持原样 */ })
+      .finally(() => { stateReq = null })
+  }
+  return stateReq
+}
 
 /* 在本页登录 / 退出后，重新取一次「是否关注 / 是否收藏」（未登录时接口给的都是 false） */
 const session = computed(() => (auth.ready ? auth.user?.id ?? 0 : null))
-watch(session, async (now, before) => {
-  const p = post.value
-  if (before === null || !p) return // 启动时的首次校验不算
-  try {
-    const d = await getPost(p.id)
-    if (post.value?.id !== p.id) return
-    following.value = !!d.following
-    postStore.patch(p.id, { faved: !!d.faved, fav: d.fav ?? 0 })
-  } catch { /* 取不到就保持原样 */ }
+watch(session, (now, before) => {
+  if (before !== null) refreshState() // 启动时的首次校验不算
 })
 
 function onImage(i, e) {
@@ -97,14 +163,16 @@ function onImage(i, e) {
   if (w && h) ratios.value = { ...ratios.value, [i]: `${w} / ${h}` }
 }
 
+const openImage = i => { viewer.value = { images: post.value?.images || [], index: i } }
+
 /* ---------- 关注 / 收藏：乐观更新 → 一次请求（带明确的 on）→ 以返回为准，失败回滚并提示 ---------- */
 
+const failText = e => (e?.code === 'demo' ? e.message : '操作失败，请稍后重试')
+
 let followBusy = false
-async function onFollow() {
+async function setFollow(next) {
   const a = author.value
   if (!a || a.id == null || followBusy) return
-  if (!auth.requireLogin(route.fullPath)) return // 未登录：弹登录框
-  const next = !following.value
   following.value = next
   followBusy = true
   try {
@@ -112,31 +180,109 @@ async function onFollow() {
     const on = typeof res?.active === 'boolean' ? res.active : next
     if (author.value?.id === a.id) following.value = on
     toast(on ? '已关注' : '已取消关注')
-  } catch {
+  } catch (e) {
     if (author.value?.id === a.id) following.value = !next
-    toast('操作失败，请稍后重试')
+    toast(failText(e))
   } finally {
     followBusy = false
   }
 }
 
-async function onFav() {
+/* 登录后补做关注：先按新账号取一次状态，已经关注过就不再重复 */
+async function followAfterLogin() {
+  await refreshState()
+  if (following.value) toast('已关注')
+  else setFollow(true)
+}
+
+function onFollow() {
+  const a = author.value
+  if (!a || a.id == null || followBusy) return
+  if (!auth.requireLogin({ then: followAfterLogin })) return // 未登录：弹登录框，登录后自动关注
+  if (following.value) unfollowAsk.value = true // 取消关注先确认
+  else setFollow(true)
+}
+
+async function setFav(on) {
   const p = post.value
   if (!p || postStore.isPending(p.id)) return
-  if (!auth.requireLogin(route.fullPath)) return
   try {
-    const on = await postStore.setFav(p, !stats.value.faved)
-    toast(on ? '已收藏' : '已取消收藏')
-  } catch {
-    toast('操作失败，请稍后重试')
+    const active = await postStore.setFav(p, on)
+    toast(active ? '已收藏' : '已取消收藏')
+  } catch (e) {
+    toast(failText(e))
   }
 }
+
+/* 登录后补做收藏：同样先对一下状态 */
+async function favAfterLogin() {
+  await refreshState()
+  if (stats.value.faved) toast('已收藏')
+  else setFav(true)
+}
+
+function onFav() {
+  const p = post.value
+  if (!p || postStore.isPending(p.id)) return
+  if (!auth.requireLogin({ then: favAfterLogin })) return
+  setFav(!stats.value.faved)
+}
+
+/* ---------- 返回恢复 ---------- */
+
+/* 这条历史记录的位置：「下一篇」是替换当前记录，位置不变 */
+const historyPos = window.history.state?.position ?? ''
+const snapKey = id => `${historyPos}:${id}`
+
+function saveSnapshot() {
+  if (!post.value || failed.value) return
+  const key = snapKey(currentId)
+  snapshots.delete(key)
+  snapshots.set(key, {
+    at: Date.now(),
+    id: String(currentId),
+    post: post.value,
+    following: following.value,
+    ratios: ratios.value,
+    top: lastTop
+  })
+  while (snapshots.size > SNAPSHOT_MAX) snapshots.delete(snapshots.keys().next().value)
+}
+
+function restoreSnapshot(id) {
+  const key = snapKey(id)
+  const s = window.history.state?.forward ? snapshots.get(key) : null
+  snapshots.delete(key)
+  if (!s || s.id !== String(id) || Date.now() - s.at > SNAPSHOT_TTL) return false
+  currentId = id
+  post.value = s.post
+  following.value = s.following
+  ratios.value = s.ratios
+  lastTop = s.top
+  return true
+}
+
+const onScroll = () => { if (scroller.value) lastTop = scroller.value.scrollTop }
+
+const restored = restoreSnapshot(route.params.id)
+if (!restored) load(route.params.id)
+
+onMounted(() => {
+  if (!restored) return
+  nextTick(() => { if (scroller.value) scroller.value.scrollTop = lastTop })
+  refreshState() // 离开期间可能在别处关注 / 收藏过，静默对一下
+})
+onBeforeUnmount(saveSnapshot)
+
+onBeforeRouteUpdate(to => {
+  if (to.params.id !== route.params.id) load(to.params.id)
+})
 </script>
 
 <template>
   <div class="page post-pg">
     <header class="pd-hd">
-      <button type="button" class="pd-back" aria-label="返回" @click="back"><Icon name="chevL" /></button>
+      <button type="button" class="pd-back hit-44" aria-label="返回" @click="back"><Icon name="chevL" /></button>
       <template v-if="post">
         <component :is="authorLink ? RouterLink : 'div'" class="pd-author" v-bind="authorLink || {}">
           <Cover class="pd-av" v-bind="author?.avatar || {}" eager />
@@ -152,7 +298,15 @@ async function onFav() {
             </div>
           </div>
         </component>
-        <button v-if="author && author.id != null" type="button" class="pd-follow" :class="{ on: following }" @click="onFollow">
+        <button
+          v-if="author && author.id != null"
+          type="button"
+          class="pd-follow"
+          :class="{ on: following }"
+          :aria-pressed="following"
+          :aria-label="following ? `已关注 ${author.name}，点按取消关注` : `关注 ${author.name}`"
+          @click="onFollow"
+        >
           <template v-if="following">已关注</template>
           <template v-else><Icon name="plus" />关注</template>
         </button>
@@ -167,7 +321,7 @@ async function onFav() {
       </template>
     </header>
 
-    <div ref="scroller" class="scroll" :aria-busy="!post && !failed">
+    <div ref="scroller" class="scroll" :aria-busy="!post && !failed" @scroll.passive="onScroll">
       <div v-if="failed" class="empty">
         {{ failed.message }}
         <button v-if="failed.retry" type="button" class="retry" @click="load(route.params.id)">重试</button>
@@ -176,27 +330,49 @@ async function onFav() {
       <template v-else-if="post">
         <article class="pd-body">
           <h1 class="pd-title">{{ post.title }}</h1>
-          <div v-if="paragraphs.length" class="pd-text">
-            <p v-for="(para, i) in paragraphs" :key="i">{{ para }}</p>
-          </div>
 
-          <div v-if="post.images?.length" class="pd-imgs">
-            <Cover
-              v-for="(img, i) in post.images"
-              :key="i"
-              class="pd-img"
-              v-bind="img"
-              :style="{ aspectRatio: ratios[i] || '4 / 3' }"
-              @load="onImage(i, $event)"
-            />
-          </div>
-
-          <RouterLink v-if="post.video" class="pd-video" :to="videoTo(post.video)" :aria-label="`播放视频：${post.video.title || post.title}`">
+          <!-- 视频帖：视频紧跟标题，点了去播放页（不用先翻过正文和所有配图） -->
+          <RouterLink v-if="post.video" class="pd-video" :to="videoTo(post.video)" @click="rememberVideo(post.video)" :aria-label="`播放视频：${post.video.title || post.title}`">
             <Cover class="pd-vcv" v-bind="post.video.cover">
               <span class="pl"><Icon name="play" /></span>
               <span v-if="post.video.dur" class="dur">{{ post.video.dur }}</span>
             </Cover>
           </RouterLink>
+
+          <!-- 正文：网址、邮箱、电话是链接（只切成文字和链接片段，不拼 HTML） -->
+          <div v-if="paragraphs.length" class="pd-text">
+            <p v-for="(para, i) in paragraphs" :key="i">
+              <template v-for="(seg, k) in para" :key="k">
+                <a
+                  v-if="seg.href"
+                  class="pd-link"
+                  :href="seg.href"
+                  :target="seg.external ? '_blank' : undefined"
+                  :rel="seg.external ? 'noopener noreferrer' : undefined"
+                >{{ seg.text }}</a>
+                <template v-else>{{ seg.text }}</template>
+              </template>
+            </p>
+          </div>
+
+          <!-- 配图：点开全屏看大图 -->
+          <div v-if="post.images?.length" class="pd-imgs">
+            <button
+              v-for="(img, i) in post.images"
+              :key="i"
+              type="button"
+              class="pd-img-b"
+              :aria-label="`查看大图：第 ${i + 1} 张，共 ${post.images.length} 张`"
+              @click="openImage(i)"
+            >
+              <Cover
+                class="pd-img"
+                v-bind="img"
+                :style="{ aspectRatio: ratios[i] || '4 / 3' }"
+                @load="onImage(i, $event)"
+              />
+            </button>
+          </div>
 
           <div v-if="tags.length" class="pd-tags">
             <RouterLink v-for="t in tags" :key="t" class="pd-tag" :to="searchTo(t)">#{{ t }}</RouterLink>
@@ -235,13 +411,16 @@ async function onFav() {
         <Icon name="bookmark" /><span>收藏 {{ formatCount(stats.fav) }}</span>
       </button>
     </footer>
+
+    <ImageViewer v-if="viewer" :images="viewer.images" :index="viewer.index" @close="viewer = null" />
+    <UnfollowSheet v-model:open="unfollowAsk" :name="author?.name || ''" @confirm="setFollow(false)" />
   </div>
 </template>
 
 <style scoped>
 /* ---------- 作者栏（在滚动区外面，始终可见） ---------- */
 .pd-hd { display: flex; flex: none; align-items: center; gap: 10px; height: 66px; padding: 0 16px 0 4px; border-bottom: 1px solid var(--line); }
-.pd-back { display: grid; flex: none; place-items: center; width: 36px; height: 44px; }
+.pd-back { position: relative; display: grid; flex: none; place-items: center; width: 36px; height: 44px; }
 .pd-back svg { width: 24px; height: 24px; stroke-width: 2.5; }
 .pd-author { display: flex; flex: 1; align-items: center; gap: 10px; min-width: 0; align-self: stretch; }
 .pd-av { flex: none; width: 46px; height: 46px; border-radius: 50%; filter: var(--media); }
@@ -274,8 +453,11 @@ async function onFav() {
 .pd-title { font-size: 20px; font-weight: 700; line-height: 1.45; overflow-wrap: break-word; word-break: break-word; }
 .pd-text { margin-top: 10px; color: var(--t3); font-size: 16px; line-height: 1.75; white-space: pre-line; overflow-wrap: break-word; word-break: break-word; }
 .pd-text p + p { margin-top: 12px; }
+.pd-video + .pd-text { margin-top: 14px; }
+.pd-link { color: var(--accent); text-decoration: underline; text-decoration-color: rgba(255, 255, 255, .4); text-underline-offset: 3px; word-break: break-all; }
 
 .pd-imgs { display: flex; flex-direction: column; gap: 14px; margin-top: 16px; }
+.pd-img-b { display: block; width: 100%; border-radius: 12px; cursor: zoom-in; }
 .pd-img { width: 100%; border-radius: 12px; filter: var(--media); }
 
 .pd-video { display: block; margin-top: 14px; border-radius: 12px; }

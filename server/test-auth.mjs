@@ -88,10 +88,16 @@ await t('未登录：/api/me 返回 null 而不是报错', async () => {
   return 'null'
 })
 
-await t('未登录：观看历史为空数组', async () => {
-  const r = await req('GET', '/api/me/history')
-  must(r.status === 200 && Array.isArray(r.json.data) && r.json.data.length === 0, JSON.stringify(r.json.data))
-  return '[]'
+await t('未登录：观看历史 / 收藏 / 关注 / 搜索记录 401', async () => {
+  for (const path of ['/api/me/history', '/api/me/favs', '/api/me/follows', '/api/search/history']) {
+    const r = await req('GET', path)
+    must(r.status === 401, `${path} 期望 401，实际 ${r.status}`)
+  }
+  for (const path of ['/api/me/history', '/api/me/history/1', '/api/search/history']) {
+    const r = await req('DELETE', path)
+    must(r.status === 401, `DELETE ${path} 期望 401，实际 ${r.status}`)
+  }
+  return '4 个列表、3 个删除都要登录'
 })
 
 await t('未登录：管理员接口被拒 401', async () => {
@@ -223,14 +229,14 @@ await t('已登录：观看历史会记录', async () => {
   const id = (await req('GET', '/api/home/latest/videos?limit=1')).json.data[0].id
   const r = await req('POST', '/api/me/history', { token: userToken, body: { videoId: id, progressSec: 12 } })
   must(r.status === 200 && r.json.data.added === true, JSON.stringify(r.json))
-  const list = (await req('GET', '/api/me/history', { token: userToken })).json.data
-  must(list.length >= 1 && list[0].id === id, JSON.stringify(list.map(v => v.id)))
-  return `历史 ${list.length} 条`
+  const { total, list } = (await req('GET', '/api/me/history', { token: userToken })).json.data
+  must(total >= 1 && list[0].id === id && list[0].progressSec === 12, JSON.stringify(list.map(v => [v.id, v.progressSec])))
+  return `历史 ${total} 条`
 })
 
 await t('已登录：个人中心返回统计', async () => {
   const r = await req('GET', '/api/me', { token: userToken })
-  must(r.status === 200 && r.json.data.stats.length === 4, JSON.stringify(r.json))
+  must(r.status === 200 && r.json.data.stats.length === 3, JSON.stringify(r.json))
   const history = r.json.data.stats.find(s => s.label === '观看历史').value
   must(history >= 1, `观看历史统计为 ${history}`)
   return r.json.data.stats.map(s => `${s.label}=${s.value}`).join(' ')

@@ -362,7 +362,6 @@ export const SCHEMAS = {
       f('tags', '标签', 'tags', ['tags', 'tag', '话题', '关键词'], { example: 'AI,剧情', help: '多个用逗号或分号隔开，不需要写 #；最多 20 个' }),
       f('mainImage', '主图', 'url', ['mainimage', 'main_image', 'main', '封面', '封面图', '头图', 'cover'], { example: '/media/images/p1.jpg', help: 'http(s):// 地址或 /media/ 开头的站内路径' }),
       f('images', '配图', 'urls', ['images', 'imgs', '图片', '多图', 'thumbs', '缩略图'], { example: '/media/images/p1-1.jpg,/media/images/p1-2.jpg', help: '多个地址用逗号、空格或换行隔开；最多 9 张' }),
-      f('moreCount', '折叠数', 'int', ['more', 'morecount', 'more_count', '更多'], { example: '3', help: '缩略图最后一张上显示的 +N' }),
       f('readCount', '阅读数', 'int', ['read', 'readcount', 'read_count', '阅读', '阅读量', '浏览量'], { example: '1.2w', help: '整数，可写 1,200 或 1.2w' }),
       f('isHot', '热门', 'bool', ['hot', 'ishot', 'is_hot', '是否热门'], { example: '否', help: BOOL_HELP }),
       f('status', '状态', 'enum', ['status', '发布状态'], { example: '已发布', help: STATUS_HELP, options: statusOptions }),

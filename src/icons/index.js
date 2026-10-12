@@ -74,5 +74,7 @@ export const icons = {
   iDownload: s('<path d="M4.5 15v4a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-4M12 3v12M7.6 10.6 12 15l4.4-4.4"/>'),
   iMsg: s('<path d="M21 12a8.5 8.5 0 0 1-12.4 7.5L3 21l1.6-5.2A8.5 8.5 0 1 1 21 12z"/>'),
   iHelp: s('<circle cx="12" cy="12" r="9"/><path d="M9.4 9.4a2.7 2.7 0 1 1 3.6 2.5c-.7.3-1 .8-1 1.6M12 17h.01"/>'),
-  iInfo: s('<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.6h.01"/>')
+  iInfo: s('<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.6h.01"/>'),
+  /* password field */
+  lock: s('<rect x="4.5" y="10.5" width="15" height="10.5" rx="2.4"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3M12 14.6v2.6"/>')
 }

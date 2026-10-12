@@ -19,8 +19,10 @@ import { toast } from '@/composables/useToast'
 import Icon from '@/components/Icon.vue'
 import VideoCard from '@/components/VideoCard.vue'
 import PostCard from '@/components/community/PostCard.vue'
+import PostSkeleton from '@/components/community/PostSkeleton.vue'
 import CreatorHeader from '@/components/creator/CreatorHeader.vue'
-import { createFeed } from '@/components/creator/feed'
+import UnfollowSheet from '@/components/creator/UnfollowSheet.vue'
+import { createFeed, PAGE } from '@/components/creator/feed'
 
 /*
  * 创作者主页（#/creator/:id?tab=videos|posts）：头图 + 头像 + 关注 + 数据行，下面是吸顶的「视频 / 帖子」标签。
@@ -55,6 +57,8 @@ const sort = ref(0)
 /* 每换一次排序 +1：重建网格，新列表淡入 */
 const sortKey = ref(0)
 const collapsed = ref(false)
+/* 取消关注前的确认 */
+const unfollowAsk = ref(false)
 
 let currentId = null
 const videos = createFeed(page => getCreatorVideos(currentId, sort.value, page))
@@ -116,14 +120,18 @@ function applyHeader(c) {
   followers.value = c.followers ?? 0
 }
 
-/* 头部数据（是否关注、粉丝数）在别处可能变了：静默刷新一次，失败就保持原样 */
-async function refreshHeader() {
+/* 头部数据（是否关注、粉丝数）在别处可能变了：静默刷新一次，失败就保持原样；同时发起的几次合并成一个请求 */
+let headerReq = null
+function refreshHeader() {
   const c = creator.value
-  if (!c) return
-  try {
-    const d = await getCreator(c.id)
-    if (creator.value?.id === c.id && !followBusy) applyHeader(d)
-  } catch { /* 保持原样 */ }
+  if (!c) return Promise.resolve()
+  if (!headerReq) {
+    headerReq = getCreator(c.id)
+      .then(d => { if (creator.value?.id === c.id && !followBusy) applyHeader(d) })
+      .catch(() => { /* 保持原样 */ })
+      .finally(() => { headerReq = null })
+  }
+  return headerReq
 }
 
 /* ---------- 滚动：顶栏变实底、滚到底加载下一页 ---------- */
@@ -195,12 +203,26 @@ function changeSort(i) {
 /* ---------- 关注：乐观更新 → 一次请求（带明确的 on）→ 以返回为准，失败回滚并提示 ---------- */
 
 let followBusy = false
-async function onFollow() {
+function onFollow() {
   const c = creator.value
   if (!c || followBusy) return
-  if (!auth.requireLogin(route.fullPath)) return // 未登录：弹登录框
+  if (!auth.requireLogin({ then: followAfterLogin })) return // 未登录：弹登录框，登录后自动关注
+  if (following.value) unfollowAsk.value = true // 取消关注先确认
+  else setFollow(true)
+}
+
+/* 登录后补做关注：先按新账号取一次头部（是否已关注、粉丝数），已经关注过就不再重复 */
+async function followAfterLogin() {
+  await refreshHeader()
+  if (following.value) toast('已关注')
+  else setFollow(true)
+}
+
+async function setFollow(next) {
+  const c = creator.value
+  if (!c || followBusy) return
   const before = { following: following.value, followers: followers.value }
-  const next = !before.following
+  if (next === before.following) return
   following.value = next
   followers.value = Math.max(0, before.followers + (next ? 1 : -1))
   followBusy = true
@@ -217,16 +239,31 @@ async function onFollow() {
       following.value = before.following
       followers.value = before.followers
     }
-    toast(e?.status === 400 && e.message ? e.message : '操作失败，请稍后重试')
+    toast((e?.status === 400 || e?.code === 'demo') && e.message ? e.message : '操作失败，请稍后重试')
   } finally {
     followBusy = false
   }
 }
 
-/* 在本页登录 / 退出后，重新取一次「是否关注」（未登录时接口给的都是 false） */
+/* 「帖子」里已显示的几页按当前账号重新取一遍、原地替换（收藏状态跟着账号走，顺序和位置不变） */
+async function refetchPosts() {
+  const id = currentId
+  const n = posts.list.length
+  if (!n) return
+  try {
+    const pages = []
+    for (let offset = 0; offset < n; offset += PAGE) pages.push(getCreatorPosts(id, { limit: PAGE, offset }))
+    const byId = new Map((await Promise.all(pages)).flatMap(r => r?.list || []).map(p => [String(p.id), p]))
+    if (currentId === id) posts.list = posts.list.map(p => byId.get(String(p.id)) || p)
+  } catch { /* 取不到就算了：未登录时卡片本来就不显示收藏状态 */ }
+}
+
+/* 在本页登录 / 退出后，重新取一次「是否关注」和帖子的收藏状态（未登录时接口给的都是 false） */
 const session = computed(() => (auth.ready ? auth.user?.id ?? 0 : null))
 watch(session, (now, before) => {
-  if (before !== null) refreshHeader() // 启动时的首次校验不算
+  if (before === null) return // 启动时的首次校验不算
+  refreshHeader()
+  refetchPosts()
 })
 
 /* ---------- 返回恢复 ---------- */
@@ -294,7 +331,7 @@ onBeforeRouteUpdate(to => {
   <div class="page creator">
     <!-- 顶栏：返回键压在头图上；滚过头图后变成实底并显示名字 -->
     <div class="cr-top" :class="{ solid: collapsed || failed }">
-      <button type="button" class="cr-back" aria-label="返回" @click="back"><Icon name="chevL" /></button>
+      <button type="button" class="cr-back hit-44" aria-label="返回" @click="back"><Icon name="chevL" /></button>
       <span class="cr-tt" :aria-hidden="!collapsed">{{ creator?.name }}</span>
     </div>
 
@@ -364,12 +401,7 @@ onBeforeRouteUpdate(to => {
 
         <!-- 帖子：卡片和社区列表同一个组件；作者就是本页的创作者，头像 / 名字不再链接 -->
         <section v-show="tab === 'posts'" id="cr-pane-posts" class="cr-pane" role="tabpanel" aria-labelledby="cr-tab-posts">
-          <div v-if="posts.total === null && !posts.error" class="cr-sk" aria-hidden="true">
-            <div v-for="i in 2" :key="i" class="sk-post">
-              <div class="sk av" />
-              <div class="bd"><div class="sk l1" /><div class="sk l2" /><div class="sk md" /></div>
-            </div>
-          </div>
+          <PostSkeleton v-if="posts.total === null && !posts.error" :count="2" />
           <div v-else-if="posts.total === null" class="empty">
             加载失败，请检查网络
             <button type="button" class="retry" @click="posts.more()">重试</button>
@@ -387,6 +419,8 @@ onBeforeRouteUpdate(to => {
       </template>
       <div class="pad-b" />
     </div>
+
+    <UnfollowSheet v-model:open="unfollowAsk" :name="creator?.name || ''" @confirm="setFollow(false)" />
   </div>
 </template>
 
@@ -410,6 +444,7 @@ onBeforeRouteUpdate(to => {
 .cr-top > * { pointer-events: auto; }
 .cr-top.solid { background: var(--bg); box-shadow: 0 1px 0 var(--line); pointer-events: auto; }
 .cr-back {
+  position: relative;
   display: grid;
   flex: none;
   place-items: center;
@@ -450,12 +485,6 @@ onBeforeRouteUpdate(to => {
 .sk { border-radius: 6px; background: #161616; animation: sk 1.2s ease-in-out infinite; }
 .cv.sk { border-radius: 8px; }
 .sk-tt { width: 70%; height: 12px; margin-top: 8px; }
-.sk-post { display: flex; gap: 11px; padding: 14px; border-bottom: 1px solid var(--line); }
-.sk-post .av { flex: none; width: 44px; height: 44px; border-radius: 50%; }
-.sk-post .bd { flex: 1; min-width: 0; }
-.sk-post .l1 { width: 40%; height: 14px; margin-top: 4px; }
-.sk-post .l2 { width: 86%; height: 14px; margin-top: 12px; }
-.sk-post .md { margin-top: 12px; aspect-ratio: 16 / 9; border-radius: 7px; }
 @keyframes sk { 50% { opacity: .5; } }
 @media (prefers-reduced-motion: reduce) {
   .sk { animation: none; }
