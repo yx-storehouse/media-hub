@@ -15,7 +15,7 @@ node server/index.mjs                        # 启动接口服务，默认 http:
 测试：
 
 ```bash
-node server/test-api.mjs     # 76 项接口测试（含帖子详情、老库补列）
+node server/test-api.mjs     # 89 项接口测试（含帖子详情、创作者主页、短视频推荐流、老库补列）
 node server/test-auth.mjs    # 37 项鉴权测试
 node server/test-admin.mjs   # 95 项管理后台测试（导入 / 导出 / 素材文件 / 首页分区 / 超时…）
 ```
@@ -115,12 +115,15 @@ server/
 | GET | `/api/library` | `getLibrary()` |
 | GET | `/api/videos/:id` | `getVideo()`：播放页详情（含 `src` 播放地址、标签、热榜名次） |
 | GET | `/api/videos/:id/related?batch=&limit=` | `getRelatedVideos()`：相似推荐，`batch` 递增 = 换一批 |
-| GET | `/api/shorts` | `getShorts()` |
+| GET | `/api/shorts?seed=&offset=&limit=&exclude=` | `getShorts()`：短视频推荐流（见下面「短视频推荐流」） |
 | GET | `/api/community/posts?tab=` | `getPosts()` |
 | GET | `/api/community/posts/:id` | `getPost()`：帖子详情（见下面「帖子详情」） |
 | POST | `/api/community/posts/:id/view` | `viewPost()`：阅读数 +1，公开、无请求体 → `{ read }` |
 | POST | `/api/community/posts/:id/fav` | `togglePostFav()` |
-| POST | `/api/creators/:id/follow` | `toggleFollow()`：`{ on: true\|false }` → `{ active }`（要登录） |
+| POST | `/api/creators/:id/follow` | `toggleFollow()`：`{ on: true\|false }` → `{ active, followers }`（要登录；已停用 / 不存在的创作者不能关注） |
+| GET | `/api/creators/:id` | `getCreator()`：创作者主页头部（见下面「创作者主页」） |
+| GET | `/api/creators/:id/videos?sort=&limit=&offset=` | `getCreatorVideos()`：他的视频，`sort` 0 最新 / 1 最热 |
+| GET | `/api/creators/:id/posts?limit=&offset=` | `getCreatorPosts()`：他的帖子，结构同社区列表 |
 | POST | `/api/videos/:id/fav` `/like` `/dislike` | 对应 toggle |
 | POST | `/api/topics/:id/fav` | `toggleTopicFav()` |
 | GET | `/api/live?tab=` | `getLives()` |
@@ -166,6 +169,46 @@ server/
 `POST /api/community/posts/:id/view`：阅读数 +1 并返回 `{ read }`（新的阅读数）。公开、不需要请求体；App 每打开一次详情页调一次。帖子不存在 / 未发布同样回 400。
 
 关注作者用已有的 `POST /api/creators/:id/follow { on }`，收藏用 `POST /api/community/posts/:id/fav { on }`，都要登录。
+
+### 创作者主页
+
+`GET /api/creators/:id`：公开接口；带了登录令牌时按当前用户回填 `following`（未登录为 `false`）。
+
+```js
+{
+  id, name, handle, avatar,   // avatar: Cover
+  verified, official, bio,
+  followers,                  // 粉丝数（creators.follower_count，关注 / 取消关注由触发器维护）
+  videoCount, postCount,      // 只算已发布的视频 / 帖子
+  lastActiveAt, lastActive,   // 最近一条已发布视频 / 帖子的时间（秒）和「1小时前」这类相对时间；什么都没发过时为 null / ''
+  following,
+  banner                      // Cover[]，最多 3 张，新的在前；可能为空
+}
+```
+
+- **头图**：取他最近的作品图——视频封面、帖子主图（没有主图的图文 / 视频帖取第一张配图，文档帖的配图是文档页、不要），草稿 / 下架的不算。
+  视频、帖子两边各先按发布时间取 3 条再合并，作品很多时也不用整表排序。
+- `GET /api/creators/:id/videos?sort=0|1&limit=&offset=` → `{ total, list }`：只含已发布的视频，`sort` 0 = 发布时间倒序（默认，其他值也按它）、1 = 播放数倒序；
+  同值再按发布时间、id 排，翻页不重复不遗漏。列表带当前用户的 `liked` / `faved`。
+- `GET /api/creators/:id/posts?limit=&offset=` → `{ total, list }`：和社区列表（`/api/community/posts`）每条的结构完全一样（含 `media`、`time`、`faved`），按发布时间倒序。
+- 分页：`limit` 1～50（默认 20），`offset` 从 0 起，非法值按默认处理。
+- 创作者不存在、已停用，或 id 不是正整数（如演示数据的账号 `aijc`）：三个接口都回 `400 { code: 1, message: '创作者不存在' }`（不会 500）。
+- 社区列表 / 搜索帖子的每条多了 `creatorId`（发布者 id，创作者被删除时为 `null`），App 的帖子卡片据此把头像和名字链到主页。
+- 关注接口现在多返回一个 `followers`（最新粉丝数），主页关注 / 取消后直接用它刷新；关注已停用或不存在的创作者回 400「创作者不存在」（取消关注总是可以）。
+
+### 短视频推荐流
+
+`GET /api/shorts?seed=&offset=&limit=&exclude=` → `{ seed, list, hasMore }`，公开接口，带了登录令牌时按当前用户。
+
+- 候选是**全部已上架视频**；后台「加入短视频」的（`short_clips`）大幅加权，首屏基本是它们，但不只有它们。
+- 每条的分数 = 热度（log 播放数，按全库最大值归一）+ 新鲜度（发布时间，半衰期 14 天）+ 短视频加权 + 互动率（(赞 + 藏) / 播放，封顶）+ 按 `seed` 的随机扰动，
+  再减去：登录用户 3 天内看过的（重罚）/ 30 天内看过的（轻罚，按 `watch_history`），以及 `exclude` 里的 id（重罚）。排好后再去一遍同质：同一创作者 / 同一专题尽量不挨着（后面几条里分差不大的换上来）。
+- `seed`：同一个 seed 顺序固定（翻页稳定、不重复），不同 seed 顺序不同；不传时服务端随机生成并在结果里返回，翻页时带回来。App 每次打开、再点一次「短视频」Tab 都换一个 seed。
+- `exclude`：逗号分隔的视频 id，最多 100 个，非法的忽略。App 把本机最近刷到过的 id 带上，未登录也能每次打开都不一样。
+- `limit` 1～50（默认 10），`offset` 从 0 起。翻过整个候选池后用派生 seed（`seed:r1`、`seed:r2`…）再排一轮接着给，所以 `hasMore` 恒为 `true`（库里一条已上架视频都没有时是 `false`、`list` 为空）；新一轮的开头会避开上一轮末尾的几条。
+- 每条是 `Video` + `{ src, like, fav, likes, favs }`，`creator` 是 `{ id, name, handle, avatar }`（没有创作者时为 `null`）。这一页里刚被下架 / 删除的视频直接跳过，`list` 可能比 `limit` 短，下一页照样从 `offset + limit` 开始。
+- 性能：整个排序按「用户 + seed + 轮次」只算一次，放在内存里（最多 64 份，5 分钟没人翻就丢），翻页只是切片。排序只读 `videos` 的几个数字列 + 短视频 id + 当前用户 30 天内的观看记录，2 万条视频约 70 ms。
+  缓存期间 `exclude`、观看记录的变化不影响这一份顺序；后台加入短视频后，新打开的 App（新 seed）马上能看到。
 
 ## 接入前端
 
@@ -227,7 +270,7 @@ server: {
 - **评论**：`comments` 表已建好、计数触发器已接，但没有对应的接口和前端页面。
 - **上传**：`video_uploads` 表用于用户投稿审核流程，接口未实现。
 - **弹幕**：`danmaku` 表 + 计数触发器已接，接口未实现。
-- **推荐算法**：现在是 `sort_order` / 时间倒序，`short_clips.weight` 是给推荐权重预留的。
+- **推荐算法**：短视频流已经按热度、新鲜度、短视频加权、互动率、看过的往后排来推荐（见「短视频推荐流」）；首页「推荐」分区仍是后台编排。`short_clips.sort_order` / `weight` 现在不参与排序。
 - **分页游标**：目前用 `limit/offset`，数据量大后建议换成上一页最后一条的 id（keyset 分页）。
 - **迁移工具**：现在靠 `schema.sql` 全量重建（`seed.mjs --reset`）。上线前建议接入迁移工具（如 `node-pg-migrate` 之于 Postgres，SQLite 可用简单的 `migrations/` 目录 + 版本表）。
 

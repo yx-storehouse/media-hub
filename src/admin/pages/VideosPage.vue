@@ -151,8 +151,8 @@ const batchDelete = () => batch.run('delete', undefined, {
   confirm: { title: '批量删除视频', message: `确定删除选中的 ${selected.value.length} 个视频？\n${DELETE_NOTE}`, confirmText: '删除', danger: true },
   done: '已删除'
 })
-/* 前台短视频流按加入顺序排，新加的在最后（前台会翻页加载，能刷到） */
-const SHORT_TIP = '加入后出现在前台「短视频」流的末尾'
+/* 前台短视频流从全部已上架视频里推荐，加入短视频的会大幅加权、优先出现 */
+const SHORT_TIP = '加入后在前台「短视频」流里优先推荐'
 
 /* 改专题 / 分类 / 地区 / 清晰度 / 创作者、加删标签：先弹小对话框选值 */
 const BATCH_VALUE = {
@@ -314,7 +314,7 @@ const catRegion = r => [r.categoryKey ? labelOf('categories', r.categoryKey) : '
       <ABtn size="sm" icon="hash" :disabled="batch.busy" @click="openBatchValue('addTags')">加标签…</ABtn>
       <ABtn size="sm" :disabled="batch.busy" @click="openBatchValue('removeTags')">删标签…</ABtn>
       <span class="sep" aria-hidden="true" />
-      <ABtn size="sm" icon="film" :title="SHORT_TIP" :disabled="batch.busy" @click="batch.run('addShort', undefined, { done: '已加入短视频（排在前台短视频流的末尾）' })">加入短视频</ABtn>
+      <ABtn size="sm" icon="film" :title="SHORT_TIP" :disabled="batch.busy" @click="batch.run('addShort', undefined, { done: '已加入短视频（前台短视频流优先推荐）' })">加入短视频</ABtn>
       <ABtn size="sm" :disabled="batch.busy" @click="batch.run('removeShort', undefined, { done: '已移出短视频' })">移出短视频</ABtn>
       <ABtn size="sm" icon="scan" :disabled="batch.busy" @click="openProbe">提取时长和封面</ABtn>
       <span class="sep" aria-hidden="true" />

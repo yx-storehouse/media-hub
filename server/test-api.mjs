@@ -159,16 +159,149 @@ await check('片库卡片用专题第一张头图', async () => {
   return '与专题页头图一致'
 })
 
-/* ---- 短视频 / 社区 ---- */
-await t('短视频流', 'GET', '/api/shorts', d => isArr(d, 5) && d[0].len > 0 ? `${d.length} 条，首条时长 ${d[0].len}s` : false)
-await check('短视频翻页 + 播放地址', async () => {
-  const all = await data('GET', '/api/shorts?limit=50')
-  const page = await data('GET', '/api/shorts?limit=2&offset=2')
-  must(all.every(v => 'src' in v), '缺少 src 字段')
-  must(page.map(v => v.id).join() === all.slice(2, 4).map(v => v.id).join(), `第二页 ${page.map(v => v.id)}，期望 ${all.slice(2, 4).map(v => v.id)}`)
-  must((await data('GET', `/api/shorts?limit=20&offset=${all.length}`)).length === 0, '翻到末尾应为空')
-  return `共 ${all.length} 条，offset 翻页正确`
+/* ---- 短视频推荐流（SHORTS）：GET /api/shorts?seed=&offset=&limit=&exclude= ---- */
+/* 取一页；带 token 时按那个用户，不带就是未登录 */
+async function shortsPage(qs, token = null) {
+  const res = await fetch(base + '/api/shorts?' + qs, { headers: token ? { authorization: 'Bearer ' + token } : {} })
+  const json = await res.json()
+  if (json.code !== 0) throw new Error(`/api/shorts?${qs} → HTTP ${res.status} ${json.message || ''}`)
+  return json.data
+}
+const shortIds = d => d.list.map(v => v.id)
+await t('短视频流（结构）', 'GET', '/api/shorts', d => typeof d.seed === 'string' && d.seed && d.hasMore === true && isArr(d.list, 10) && d.list.length === 10 &&
+  d.list.every(v => 'src' in v && v.len > 0 && v.likes === v.likeCount && v.favs === v.favCount && v.creator?.id && v.creator.name && v.creator.avatar && 'handle' in v.creator)
+  ? `默认 10 条，seed=${d.seed}，首条「${d.list[0].title}」@${d.list[0].creator.name}` : false)
+await check('短视频：同一 seed 顺序固定，换 seed 顺序不同', async () => {
+  const a1 = shortIds(await shortsPage('seed=same-a&limit=30'))
+  const a2 = shortIds(await shortsPage('seed=same-a&limit=30'))
+  const b = shortIds(await shortsPage('seed=same-b&limit=30'))
+  must(a1.join() === a2.join(), '同一个 seed 两次结果不同')
+  must(a1.join() !== b.join(), '不同 seed 结果一样')
+  must(new Set(a1).size === 30, '一页里有重复')
+  const firsts = new Set()
+  for (const s of ['f1', 'f2', 'f3', 'f4', 'f5', 'f6']) firsts.add((await shortsPage(`seed=${s}&limit=1`)).list[0].id)
+  must(firsts.size >= 2, '6 个 seed 的第一条全一样')
+  return `seed a / b 前 30 条不同；6 个 seed 的第一条有 ${firsts.size} 种`
 })
+await check('短视频：加入短视频的优先（前 10 条明显偏多）', async () => {
+  const curated = new Set((await data('GET', '/api/admin/videos?short=1&status=1&pageSize=100')).list.map(v => v.id))
+  const pool = (await data('GET', '/api/admin/stats')).videos.published
+  must(curated.size >= 3, '测试库里短视频不到 3 条')
+  const counts = []
+  for (const s of ['c1', 'c2', 'c3', 'c4', 'c5']) counts.push(shortIds(await shortsPage(`seed=${s}&limit=10`)).filter(id => curated.has(id)).length)
+  const expect = Math.min(3, curated.size)
+  must(counts.every(n => n >= expect), `前 10 条里的短视频数 ${counts.join('/')}，应都 ≥ ${expect}`)
+  return `${curated.size} / ${pool} 条是短视频，5 个 seed 前 10 条各有 ${counts.join('/')} 条`
+})
+await check('短视频：exclude 的不出现在第一页', async () => {
+  const shown = shortIds(await shortsPage('seed=ex-a&limit=10'))
+  const d = await shortsPage(`seed=ex-b&limit=10&exclude=${shown.join(',')},abc,-3,0`)
+  const hit = shortIds(d).filter(id => shown.includes(id))
+  must(d.list.length === 10 && !hit.length, '第一页里还有 exclude 的：' + hit.join(','))
+  // 对照：换个 seed 不带 exclude（同一 seed 会命中按 用户+seed 缓存的顺序，exclude 只在第一次排序时起作用）
+  const control = shortIds(await shortsPage('seed=ex-c&limit=10'))
+  return `排除 ${shown.length} 条后第一页一条不重；不排除时（另一个 seed）重合 ${control.filter(id => shown.includes(id)).length} 条`
+})
+await check('短视频：连翻 3 页不重复，与一次取 30 条一致', async () => {
+  const pages = []
+  for (const off of [0, 10, 20]) pages.push(...shortIds(await shortsPage(`seed=page-a&limit=10&offset=${off}`)))
+  const whole = shortIds(await shortsPage('seed=page-a&limit=30'))
+  const other = shortIds(await shortsPage('seed=page-b&limit=30'))
+  must(new Set(pages).size === 30, '3 页里有重复')
+  must(pages.join() === whole.join(), '分页结果和一次取 30 条不一致')
+  must(other.join() !== whole.join(), '不同 seed 顺序一样')
+  return '30 条无重复，分页 = 整取'
+})
+await check('短视频：翻过整个视频池还一直有内容', async () => {
+  const pool = (await data('GET', '/api/admin/stats')).videos.published
+  const seam = await shortsPage(`seed=end-a&limit=20&offset=${pool - 10}`)
+  const ids = shortIds(seam)
+  must(ids.length === 20 && seam.hasMore === true, `接缝处 ${ids.length} 条`)
+  must(ids.every((id, i) => i === 0 || id !== ids[i - 1]), '接缝处连着出现同一条')
+  must(new Set(ids.slice(5, 15)).size === 10, '接缝前后 10 条里有重复')
+  const far = await shortsPage(`seed=end-a&limit=10&offset=${pool * 3 + 7}`)
+  must(far.list.length === 10 && far.hasMore === true, '第 4 轮没有内容')
+  const r1 = shortIds(await shortsPage(`seed=end-a&limit=30&offset=${pool}`))
+  const r0 = shortIds(await shortsPage('seed=end-a&limit=30'))
+  must(r1.join() !== r0.join(), '第二轮和第一轮顺序一样')
+  return `池子 ${pool} 条；offset ${pool - 10}~${pool + 9} 跨轮接上、offset ${pool * 3 + 7} 仍有 10 条，第二轮重新洗牌`
+})
+await check('短视频：limit / offset 取值范围', async () => {
+  const n = async qs => (await shortsPage('seed=lim&' + qs)).list.length
+  const r = { big: await n('limit=500'), one: await n('limit=1'), bad: await n('limit=abc'), neg: await n('limit=-3'), def: await n('') }
+  must(r.big === 50 && r.one === 1 && r.bad === 10 && r.neg === 1 && r.def === 10, JSON.stringify(r))
+  const a = shortIds(await shortsPage('seed=lim&limit=5&offset=-8'))
+  const b = shortIds(await shortsPage('seed=lim&limit=5&offset=0'))
+  must(a.join() === b.join(), '负 offset 应按 0')
+  return 'limit 500→50、1→1、abc→10、-3→1、缺省 10；offset 负数按 0'
+})
+/* 下面两项直接改测试库（看过的时间、造 2 万条视频），--base 模式跳过 */
+const feedDbChecks = [
+  ['短视频：登录用户 3 天内看过的往后排（10 天前看过的只轻罚）', async () => {
+    await data('POST', '/api/admin/users', { uid: 'feeduser', password: 'feeduser123', nickname: '推荐测试' })
+    const login = await fetch(base + '/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ uid: 'feeduser', password: 'feeduser123' }) }).then(r => r.json())
+    const tok = login.data.token
+    const top = shortIds(await shortsPage('seed=watch-0&limit=8', tok))
+    for (const id of top) {
+      const r = await fetch(base + '/api/me/history', { method: 'POST', headers: { authorization: 'Bearer ' + tok, 'content-type': 'application/json' }, body: JSON.stringify({ videoId: id, progressSec: 5 }) }).then(r => r.json())
+      must(r.code === 0, '记录观看失败 ' + r.message)
+    }
+    // 其中一条改成 10 天前看的：只轻罚，应排在 3 天内看过的前面
+    const w = new DatabaseSync(TEST_DB)
+    const uid = w.prepare('SELECT id FROM users WHERE uid = ?').get('feeduser').id
+    w.prepare('UPDATE watch_history SET watched_at = ? WHERE user_id = ? AND video_id = ?').run(Math.floor(Date.now() / 1000) - 10 * 86400, uid, top[0])
+    w.close()
+    const anon = shortIds(await shortsPage('seed=watch-1&limit=10'))
+    const order = []
+    for (let off = 0; off < 1000 && !top.every(id => order.includes(id)); off += 50) order.push(...shortIds(await shortsPage(`seed=watch-1&limit=50&offset=${off}`, tok)))
+    const pos = id => order.indexOf(id) + 1
+    const recent = top.slice(1)
+    must(!order.slice(0, 20).some(id => recent.includes(id)), '3 天内看过的出现在前 20 条：' + recent.filter(id => order.slice(0, 20).includes(id)).join(','))
+    must(recent.every(id => pos(id) > pos(top[0])), `10 天前看过的 #${top[0]}（第 ${pos(top[0])} 条）应排在 3 天内看过的（${recent.map(pos).join('/')}）前面`)
+    const anonHit = anon.filter(id => recent.includes(id)).length
+    must(anonHit >= 3, `同一 seed 未登录时前 10 条里只有 ${anonHit} 条是这些视频，用例不成立`)
+    return `看过 8 条：未登录时前 10 条里有 ${anonHit} 条；登录后 3 天内看过的排在第 ${recent.map(pos).join('/')} 条，10 天前看过的在第 ${pos(top[0])} 条`
+  }],
+  ['短视频：2 万条视频时排一次序 < 300ms', async () => {
+    const w = new DatabaseSync(TEST_DB)
+    const c = w.prepare('SELECT MIN(id) lo, COUNT(*) n FROM creators').get()
+    const tp = w.prepare('SELECT MIN(id) lo, COUNT(*) n FROM topics').get()
+    const now = Math.floor(Date.now() / 1000)
+    const t0 = Date.now()
+    w.exec('BEGIN')
+    w.prepare(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 20000)
+               INSERT INTO videos(public_id, title, creator_id, topic_id, kind, duration_sec, tags, play_count, like_count, fav_count, status, published_at, created_at)
+               SELECT 'PERF-' || i, 'perf ' || i, ? + i % ?, ? + i % ?, 1, 30 + i % 600, '[]', (i * 7919) % 100000, (i * 31) % 900, (i * 17) % 400, 1, ? - (i * 97) % 5184000, ?
+               FROM n`).run(c.lo, c.n, tp.lo, tp.n, now, now)
+    w.exec('COMMIT')
+    const insertMs = Date.now() - t0
+    try {
+      const pool = (await data('GET', '/api/admin/stats')).videos.published
+      const times = []
+      let d
+      for (const s of ['perf-1', 'perf-2']) {
+        const t1 = performance.now()
+        d = await shortsPage(`seed=${s}&limit=10`)
+        times.push(Math.round(performance.now() - t1))
+      }
+      const t2 = performance.now()
+      await shortsPage('seed=perf-1&limit=10&offset=10')
+      const pageMs = Math.round(performance.now() - t2)
+      must(d.list.length === 10, '只返回了 ' + d.list.length + ' 条')
+      must(Math.max(...times) < 300, `排序用了 ${times.join(' / ')} ms`)
+      return `${pool} 条候选：新 seed 排序 ${times.join(' / ')} ms，翻页（命中缓存）${pageMs} ms；造数据 ${insertMs} ms`
+    } finally {
+      w.exec("DELETE FROM videos WHERE public_id LIKE 'PERF-%'")
+      w.close()
+    }
+  }]
+]
+for (const [name, fn] of feedDbChecks) {
+  if (argBase) results.push({ name, ok: true, note: '跳过（--base 模式不改数据）' })
+  else await check(name, fn)
+}
+
+/* ---- 社区 ---- */
 await t('社区 tab', 'GET', '/api/community/tabs', d => isArr(d, 4) ? d.join(',') : false)
 await t('社区列表', 'GET', '/api/community/posts?tab=0', d => isArr(d, 4) && d[0].media?.thumbs?.length === 3 ? `${d.length} 条，首条「${d[0].name}」` : false)
 await t('社区帖子类型与认证', 'GET', '/api/community/posts?tab=0', d => {
@@ -490,6 +623,163 @@ adminCheck('帖子详情：草稿 / 下架返回 400，同一时间按 id 排下
   } finally {
     for (const id of made) await data('DELETE', `/api/admin/posts/${id}`).catch(() => {})
   }
+})
+
+/*
+ * ---- 创作者主页（GET /api/creators/:id、/videos、/posts）----
+ * 每个用例自己建创作者 / 视频 / 帖子，结束时删掉（删创作者会连带删他的帖子）。
+ */
+const PROFILE_KEYS = 'id,name,handle,avatar,verified,official,bio,followers,videoCount,postCount,lastActiveAt,lastActive,following,banner'
+/** 建一个只给这个用例用的创作者，fn 结束后连同他的视频、帖子一起删掉 */
+async function withCreator(body, fn) {
+  const c = await data('POST', '/api/admin/creators', body)
+  const videos = []
+  const mkVideo = async v => { const r = await data('POST', '/api/admin/videos', { creatorId: c.id, status: 1, ...v }); videos.push(r.id); return r }
+  const mkPost = p => data('POST', '/api/admin/posts', { creatorId: c.id, mediaKind: 0, ...p })
+  try {
+    return await fn(c, { mkVideo, mkPost })
+  } finally {
+    for (const id of videos) await data('DELETE', `/api/admin/videos/${id}`).catch(() => {})
+    await data('DELETE', `/api/admin/creators/${c.id}`).catch(() => {})
+  }
+}
+const expect400 = async (path, method = 'GET', body) => {
+  const { status, json: j } = await call(method, path, body)
+  must(status === 400 && j?.message === '创作者不存在', `${method} ${path} → HTTP ${status} ${j?.message}`)
+}
+
+adminCheck('创作者主页：结构、计数只算已发布、最后更新、头图顺序和上限', async () => {
+  const T = Math.floor(Date.now() / 1000)
+  return withCreator({ name: '主页测试', handle: 'profile_t1', bio: '一句简介', isVerified: true }, async (c, { mkVideo, mkPost }) => {
+    await mkVideo({ title: '主页视频 A', publishedAt: T - 7200, coverUrl: '/m/va.jpg' })
+    await mkVideo({ title: '主页视频 B', publishedAt: T - 5 * 3600, coverUrl: '/m/vb.jpg' })
+    await mkVideo({ title: '主页视频 C', publishedAt: T - 3 * 86400, coverUrl: '/m/vc.jpg' })
+    await mkVideo({ title: '草稿视频', status: 0, publishedAt: T, coverUrl: '/m/draft.jpg' })
+    await mkVideo({ title: '下架视频', status: 2, publishedAt: T, coverUrl: '/m/off.jpg' })
+    await mkPost({ text: '有主图的帖子', mediaKind: 1, mainImage: '/m/p1.jpg', images: ['/m/p1a.jpg'], publishedAt: T - 1800 })
+    await mkPost({ text: '只有配图的帖子', images: ['/m/p2a.jpg', '/m/p2b.jpg'], publishedAt: T - 5400 })
+    await mkPost({ text: '文档帖（配图是文档页）', mediaKind: 2, images: ['/m/doc.jpg'], publishedAt: T - 600 })
+    await mkPost({ text: '草稿帖子', status: 0, mainImage: '/m/pdraft.jpg', publishedAt: T })
+    const d = await data('GET', `/api/creators/${c.id}`)
+    must(Object.keys(d).join() === PROFILE_KEYS, '字段 ' + Object.keys(d).join())
+    must(d.id === c.id && d.name === '主页测试' && d.handle === 'profile_t1' && d.verified === true && d.official === false && d.bio === '一句简介', '基本字段 ' + json(d).slice(0, 160))
+    must(isCover(d.avatar), '头像应有占位图')
+    must(d.videoCount === 3 && d.postCount === 3, `计数只算已发布：视频 ${d.videoCount} / 帖子 ${d.postCount}`)
+    must(d.lastActiveAt === T - 600 && d.lastActive === '10分钟前', `最后更新 ${d.lastActiveAt} ${d.lastActive}（草稿不算）`)
+    // 头图：新的在前，最多 3 张；帖子取主图（没有就取第一张配图），文档帖和草稿 / 下架的不要
+    must(d.banner.map(b => b.src).join() === '/m/p1.jpg,/m/p2a.jpg,/m/va.jpg', '头图 ' + d.banner.map(b => b.src).join())
+    must(d.banner.every(isCover) && d.followers === 0 && d.following === false, '头图结构 / 粉丝')
+    return `视频 3 / 帖子 3，最后更新「${d.lastActive}」，头图 ${d.banner.length} 张`
+  })
+})
+
+adminCheck('创作者主页：没有作品时头图为空、不显示最后更新', async () =>
+  withCreator({ name: '空主页', handle: 'profile_t2' }, async c => {
+    const d = await data('GET', `/api/creators/${c.id}`)
+    must(d.videoCount === 0 && d.postCount === 0 && d.banner.length === 0 && d.lastActiveAt === null && d.lastActive === '', json(d).slice(0, 200))
+    const v = await data('GET', `/api/creators/${c.id}/videos`)
+    const p = await data('GET', `/api/creators/${c.id}/posts`)
+    must(v.total === 0 && v.list.length === 0 && p.total === 0 && p.list.length === 0, '空列表')
+    return 'banner []，lastActive \'\''
+  }))
+
+adminCheck('创作者主页：关注后 following / 粉丝数变化，未登录 following 为 false', async () =>
+  withCreator({ name: '关注测试', handle: 'profile_t3' }, async c => {
+    const d0 = await data('GET', `/api/creators/${c.id}`)
+    must(d0.following === false && d0.followers === 0, '起始 ' + json({ following: d0.following, followers: d0.followers }))
+    const r1 = await data('POST', `/api/creators/${c.id}/follow`, { on: true })
+    must(r1.active === true && r1.followers === 1, '关注返回 ' + json(r1))
+    const d1 = await data('GET', `/api/creators/${c.id}`)
+    must(d1.following === true && d1.followers === 1, '关注后 ' + json({ following: d1.following, followers: d1.followers }))
+    const anon = await anonCall('GET', `/api/creators/${c.id}`)
+    must(anon.status === 200 && anon.json.data.following === false && anon.json.data.followers === 1, '未登录 ' + json(anon.json?.data && { following: anon.json.data.following, followers: anon.json.data.followers }))
+    must((await data('POST', `/api/creators/${c.id}/follow`, { on: true })).followers === 1, '重复关注粉丝数不变')
+    const r2 = await data('POST', `/api/creators/${c.id}/follow`, { on: false })
+    must(r2.active === false && r2.followers === 0, '取消关注返回 ' + json(r2))
+    const d2 = await data('GET', `/api/creators/${c.id}`)
+    must(d2.following === false && d2.followers === 0, '取消后 ' + json({ following: d2.following, followers: d2.followers }))
+    return '0 → 1 → 0，未登录 following=false'
+  }))
+
+adminCheck('创作者主页：不存在 / 已停用返回 400', async () =>
+  withCreator({ name: '停用测试', handle: 'profile_t4' }, async (c, { mkVideo, mkPost }) => {
+    await mkVideo({ title: '停用作者的视频' })
+    await mkPost({ text: '停用作者的帖子' })
+    await data('POST', `/api/creators/${c.id}/follow`, { on: true })
+    await data('PATCH', `/api/admin/creators/${c.id}`, { status: 0 })
+    for (const sub of ['', '/videos', '/posts']) await expect400(`/api/creators/${c.id}${sub}`)
+    // 已停用的不能再关注，但可以取消关注
+    await data('POST', `/api/creators/${c.id}/follow`, { on: false })
+    await expect400(`/api/creators/${c.id}/follow`, 'POST', { on: true })
+    for (const path of ['/api/creators/99999999', '/api/creators/0', '/api/creators/abc', '/api/creators/99999999999999999999', '/api/creators/1.5',
+      '/api/creators/99999999/videos', '/api/creators/abc/posts']) await expect400(path)
+    await expect400('/api/creators/99999999/follow', 'POST', { on: true })
+    await data('PATCH', `/api/admin/creators/${c.id}`, { status: 1 })
+    must((await data('GET', `/api/creators/${c.id}`)).videoCount === 1, '重新启用后能打开')
+    return '停用 / 不存在 / 非法 id 都是 400「创作者不存在」，不会 500'
+  }))
+
+adminCheck('创作者主页：视频 最新 / 最热 + 翻页 + 赞收藏状态', async () => {
+  const T = Math.floor(Date.now() / 1000)
+  return withCreator({ name: '视频测试', handle: 'profile_t5' }, async (c, { mkVideo }) => {
+    // 7 条已发布（发布时间各不相同）+ 1 条草稿；播放数用观看记录累加，故意和发布顺序不同，并有一组并列
+    const plays = [3, 0, 6, 1, 5, 3, 4]
+    const vs = []
+    for (let i = 0; i < plays.length; i++) vs.push(await mkVideo({ title: `排序视频 ${i}`, publishedAt: T - 3600 * (i + 1) }))
+    await mkVideo({ title: '排序草稿', status: 0, publishedAt: T })
+    for (let i = 0; i < vs.length; i++) for (let k = 0; k < plays[i]; k++) await data('POST', '/api/me/history', { videoId: vs[i].id, progressSec: 1 })
+    const ids = list => list.map(v => v.id).join()
+    const latest = await data('GET', `/api/creators/${c.id}/videos?sort=0&limit=50`)
+    must(latest.total === 7 && ids(latest.list) === ids(vs), '最新 ' + ids(latest.list))
+    const hot = await data('GET', `/api/creators/${c.id}/videos?sort=1&limit=50`)
+    // 播放数倒序，并列（3 次的第 0、5 条）按发布时间新的在前
+    const expHot = [2, 4, 6, 0, 5, 3, 1].map(i => vs[i].id).join()
+    must(ids(hot.list) === expHot && hot.list.every((v, i, a) => !i || a[i - 1].playCount >= v.playCount), '最热 ' + ids(hot.list) + ' 期望 ' + expHot)
+    for (const sort of [0, 1]) {
+      const pages = []
+      for (let off = 0; off < 7; off += 3) pages.push(...(await data('GET', `/api/creators/${c.id}/videos?sort=${sort}&limit=3&offset=${off}`)).list)
+      must(ids(pages) === ids(sort ? hot.list : latest.list) && new Set(pages.map(v => v.id)).size === 7, `sort=${sort} 分页 ${ids(pages)}`)
+    }
+    must((await data('GET', `/api/creators/${c.id}/videos?limit=999`)).list.length === 7, 'limit 上限')
+    must((await data('GET', `/api/creators/${c.id}/videos?limit=0&offset=-5`)).list.length === 7, 'limit 0 → 默认 20、offset 负数 → 0')
+    must((await data('GET', `/api/creators/${c.id}/videos?sort=9`)).list[0].id === vs[0].id, '未知 sort 按最新')
+    const v0 = latest.list[0]
+    must(hasKeys(v0, 'id', 'title', 'dur', 'cover', 'creator', 'playCount', 'liked', 'faved') && v0.creator.id === c.id, '视频结构 ' + Object.keys(v0).join())
+    await data('POST', `/api/videos/${vs[0].id}/like`, { on: true })
+    await data('POST', `/api/videos/${vs[0].id}/fav`, { on: true })
+    const mine = (await data('GET', `/api/creators/${c.id}/videos`)).list[0]
+    const anonV = (await anonCall('GET', `/api/creators/${c.id}/videos`)).json.data.list[0]
+    must(mine.liked === true && mine.faved === true && anonV.liked === false && anonV.faved === false, '赞 / 收藏状态 ' + json({ mine: [mine.liked, mine.faved], anon: [anonV.liked, anonV.faved] }))
+    await data('POST', `/api/videos/${vs[0].id}/like`, { on: false })
+    await data('POST', `/api/videos/${vs[0].id}/fav`, { on: false })
+    return `最新 / 最热各 7 条，3 条一页翻页一致，最热首条播放 ${hot.list[0].playCount}`
+  })
+})
+
+adminCheck('创作者主页：帖子与社区列表同结构，翻页、收藏状态', async () => {
+  const T = Math.floor(Date.now() / 1000)
+  return withCreator({ name: '帖子测试', handle: 'profile_t6', isVerified: true }, async (c, { mkPost }) => {
+    const made = []
+    for (let i = 0; i < 4; i++) made.push(await mkPost({ text: `主页帖子 ${i}`, mediaKind: i % 2, mainImage: i ? null : '/m/pm.jpg', images: ['/m/pi.jpg'], tags: ['测试'], publishedAt: T - 3600 * (i + 1) }))
+    await mkPost({ text: '主页草稿帖', status: 0, publishedAt: T })
+    const res = await data('GET', `/api/creators/${c.id}/posts?limit=50`)
+    must(res.total === 4 && res.list.map(p => p.id).join() === made.map(p => p.id).join(), '帖子 ' + res.list.map(p => p.id).join())
+    const community = await data('GET', '/api/community/posts?tab=0&limit=50')
+    for (const p of res.list) {
+      const cp = community.find(x => x.id === p.id)
+      must(cp && json(cp) === json(p), `#${p.id} 与社区列表不一致：\n${json(p).slice(0, 200)}\n${json(cp).slice(0, 200)}`)
+      must(p.creatorId === c.id && p.verified === true && typeof p.time === 'string' && p.media && Array.isArray(p.media.thumbs), `#${p.id} 字段`)
+    }
+    // 社区列表 / 详情的作者 id 一致（卡片头像点进主页用的就是它）
+    must((await data('GET', `/api/community/posts/${made[0].id}`)).author.id === res.list[0].creatorId, '详情 author.id')
+    const pages = [...(await data('GET', `/api/creators/${c.id}/posts?limit=3&offset=0`)).list, ...(await data('GET', `/api/creators/${c.id}/posts?limit=3&offset=3`)).list]
+    must(pages.map(p => p.id).join() === made.map(p => p.id).join(), '分页 ' + pages.map(p => p.id).join())
+    await data('POST', `/api/community/posts/${made[1].id}/fav`, { on: true })
+    const faved = (await data('GET', `/api/creators/${c.id}/posts`)).list.find(p => p.id === made[1].id)
+    const anonP = (await anonCall('GET', `/api/creators/${c.id}/posts`)).json.data.list.find(p => p.id === made[1].id)
+    must(faved.faved === true && faved.fav === 1 && anonP.faved === false, '收藏状态 ' + json({ faved: faved.faved, fav: faved.fav, anon: anonP.faved }))
+    return `4 条（草稿不算），字段与社区列表逐条相同：${Object.keys(res.list[0]).join(',')}`
+  })
 })
 
 for (const [name, fn] of adminChecks) {

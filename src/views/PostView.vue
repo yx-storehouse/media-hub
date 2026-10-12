@@ -1,6 +1,6 @@
 <script setup>
 import { ref, shallowRef, computed, watch } from 'vue'
-import { useRoute, onBeforeRouteUpdate } from 'vue-router'
+import { useRoute, onBeforeRouteUpdate, RouterLink } from 'vue-router'
 import { getPost, viewPost, toggleFollow } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 import { usePostStore } from '@/stores/posts'
@@ -33,6 +33,8 @@ const scroller = ref(null)
 const ratios = shallowRef({})
 
 const author = computed(() => post.value?.author || null)
+/* 头像 + 名字进作者主页（作者已删除时 id 为空，就只是展示） */
+const authorLink = computed(() => (author.value?.id != null ? { to: `/creator/${encodeURIComponent(author.value.id)}` } : null))
 const stats = computed(() => (post.value ? postStore.stats(post.value) : { faved: false, fav: 0, read: 0 }))
 const tags = computed(() => (post.value?.tags || []).map(t => String(t).replace(/^#/, '')).filter(Boolean))
 /* 正文按空行分段；段内的单个换行原样显示（pre-line） */
@@ -136,18 +138,20 @@ async function onFav() {
     <header class="pd-hd">
       <button type="button" class="pd-back" aria-label="返回" @click="back"><Icon name="chevL" /></button>
       <template v-if="post">
-        <Cover class="pd-av" v-bind="author?.avatar || {}" eager />
-        <div class="pd-who">
-          <div class="pd-nm">
-            <span>{{ author?.name || '匿名用户' }}</span>
-            <Icon v-if="author?.verified" name="verified" class="vf" />
+        <component :is="authorLink ? RouterLink : 'div'" class="pd-author" v-bind="authorLink || {}">
+          <Cover class="pd-av" v-bind="author?.avatar || {}" eager />
+          <div class="pd-who">
+            <div class="pd-nm">
+              <span>{{ author?.name || '匿名用户' }}</span>
+              <Icon v-if="author?.verified" name="verified" class="vf" />
+            </div>
+            <!-- 账号太长时只截账号，发布时间始终显示 -->
+            <div class="pd-sub">
+              <span v-if="author?.handle" class="hd">@{{ author.handle }}</span>
+              <span v-if="post.time" class="tm">{{ post.time }}</span>
+            </div>
           </div>
-          <!-- 账号太长时只截账号，发布时间始终显示 -->
-          <div class="pd-sub">
-            <span v-if="author?.handle" class="hd">@{{ author.handle }}</span>
-            <span v-if="post.time" class="tm">{{ post.time }}</span>
-          </div>
-        </div>
+        </component>
         <button v-if="author && author.id != null" type="button" class="pd-follow" :class="{ on: following }" @click="onFollow">
           <template v-if="following">已关注</template>
           <template v-else><Icon name="plus" />关注</template>
@@ -239,6 +243,7 @@ async function onFav() {
 .pd-hd { display: flex; flex: none; align-items: center; gap: 10px; height: 66px; padding: 0 16px 0 4px; border-bottom: 1px solid var(--line); }
 .pd-back { display: grid; flex: none; place-items: center; width: 36px; height: 44px; }
 .pd-back svg { width: 24px; height: 24px; stroke-width: 2.5; }
+.pd-author { display: flex; flex: 1; align-items: center; gap: 10px; min-width: 0; align-self: stretch; }
 .pd-av { flex: none; width: 46px; height: 46px; border-radius: 50%; filter: var(--media); }
 .pd-who { display: flex; flex: 1; flex-direction: column; justify-content: center; gap: 3px; min-width: 0; }
 .pd-nm { display: flex; align-items: center; gap: 5px; min-width: 0; }

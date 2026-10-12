@@ -46,9 +46,19 @@ export const getSomething = (id) =>
 - 所有函数返回 Promise，失败时抛 `ApiError`（`message` 可直接展示给用户）。
 - 后端统一返回 `{ code: 0, data }` / `{ code: 1, message }`，`code !== 0` 会被当成错误抛出。
 - 列表统一支持 `limit` / `offset`，暂不支持游标分页。
-- 互动类接口（点赞、收藏、关注）请求体是 `{ on }`（想要的最终状态），返回 `{ active: boolean }` 表示最新状态。
+- 互动类接口（点赞、收藏、关注）请求体是 `{ on }`（想要的最终状态），返回 `{ active: boolean }` 表示最新状态（关注另外带 `followers` 最新粉丝数，演示数据里可能没有）。
 - 只为计数的写操作（帖子阅读数 `viewPost`）不等结果、失败直接吞掉（返回 `null`），不提示也不退回 mock。
 - 演示数据的 id 不一定是数字（如视频 `rec0:3`），拼进路径时用 `encodeURIComponent`。
+
+## 短视频推荐流
+
+`getShorts({ seed, limit = 10, offset = 0, exclude = [] })` → `GET /api/shorts`，返回 `{ seed, list, hasMore }`：
+
+- 同一个 `seed` 顺序固定，翻页（`offset += limit`）稳定不重复；换一个 seed 就重新洗牌。不传 seed 时服务端随机生成并在结果里带回。
+- 一直翻不到底（`hasMore` 恒为 `true`）：翻过整个视频库后重新洗牌接着给，所以同一个视频之后还会再出现，列表的 key 不能只用视频 id。
+- `exclude`：最近刷到过的视频 id（最多 100 个），它们会排到后面。短视频页把本机最近刷到的 100 条存在 `localStorage`（`reel:short:seen`），打开 / 刷新时带上。
+- 每条是 `Video` + `{ src, likes, favs, creator: { id, name, handle, avatar } }`；`src` 为空时短视频页用封面 + 模拟进度。
+- mock 模式：40 条演示短视频，按 seed 洗牌，同样翻不到底。
 
 ## 帖子详情
 
@@ -67,3 +77,19 @@ export const getSomething = (id) =>
 
 帖子不存在或已下架时回 400「帖子不存在或已下架」（页面显示提示，不给重试）。详情页每次打开调一次
 `viewPost(id)`（`POST …/view` → `{ read }`），关注用 `toggleFollow(creatorId, { on })`（`POST /api/creators/:id/follow`）。
+
+## 创作者主页
+
+`#/creator/:id`（`views/CreatorView.vue`）用三个接口：
+
+```js
+getCreator(id)                 // { id, name, handle, avatar, verified, official, bio, followers, videoCount, postCount,
+                               //   lastActiveAt, lastActive, following, banner: Cover[] }
+getCreatorVideos(id, sort, { limit, offset })   // sort 0 最新 / 1 最热 → { total, list: Video[] }
+getCreatorPosts(id, { limit, offset })          // → { total, list: Post[] }，和 getPosts() 每条结构一样
+```
+
+- 计数只算已发布的内容；`banner` 是最近作品的图（最多 3 张，可能为空，页面用按 id 生成的灰色渐变代替）。
+- 创作者不存在或已停用：接口回 400「创作者不存在」，页面显示提示和「返回」，不给重试；网络问题显示「重试」。
+- 帖子列表的每条有 `creatorId`，帖子卡片（`PostCard`）的头像和名字据此链到主页；创作者主页里的卡片传 `author-link="false"`。
+- 演示数据：社区帖子的作者 id 是账号（如 `aijc`，和帖子详情的 `author.id` 一致），热门创作者是 `c1`…`c8`，纯数字 id 生成一个占位创作者，其他 id 当作不存在。

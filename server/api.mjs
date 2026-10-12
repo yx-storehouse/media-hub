@@ -147,13 +147,16 @@ export const getRelatedVideos = (id, opts = {}, userId = null) =>
 /* ---------------- 短视频 ---------------- */
 
 /**
- * 短视频流。
+ * 短视频推荐流：{ seed, list, hasMore }（打分规则见 db/index.mjs 的 shortFeed）。
+ * opts：{ seed, offset, limit, exclude }；seed 不传时服务端随机生成并返回，前端翻页时带回来。
  * 前端短视频页读的是 likes / favs（旧字段名），列表页读的是 likeCount / favCount，
  * 这里两个都给，避免调用方各写一套兼容逻辑。
  */
-export const getShorts = (opts = {}, userId = null) =>
-  Promise.resolve(q.attachVideoState(q.shorts(opts), userId)
-    .map(v => ({ ...v, likes: v.likeCount, favs: v.favCount })))
+export function getShorts(opts = {}, userId = null) {
+  const feed = q.shortFeed({ ...opts, userId })
+  feed.list = q.attachVideoState(feed.list, userId).map(v => ({ ...v, likes: v.likeCount, favs: v.favCount }))
+  return Promise.resolve(feed)
+}
 
 /* ---------------- 社区 ---------------- */
 
@@ -188,7 +191,57 @@ export const toggleVideoFav = (videoId, userId, on) => Promise.resolve(q.toggleV
 export const toggleVideoLike = (videoId, userId, on) => Promise.resolve(q.toggleVideoLike(requireUser(userId), videoId, on))
 export const toggleVideoDislike = (videoId, userId, on) => Promise.resolve(q.toggleVideoDislike(requireUser(userId), videoId, on))
 export const toggleTopicFav = (topicId, userId, on) => Promise.resolve(q.toggleTopicFav(requireUser(userId), topicId, on))
-export const toggleFollow = (creatorId, userId, on) => Promise.resolve(q.toggleFollow(requireUser(userId), creatorId, on))
+/**
+ * 关注 / 取消关注创作者，返回 { active, followers }（followers = 最新粉丝数，主页据此刷新）。
+ * 已删除 / 停用的创作者不能再关注（取消关注总是可以）；不再因为外键报 500。
+ */
+export function toggleFollow(creatorId, userId, on) {
+  requireUser(userId)
+  if (on !== false && !q.creatorActive(creatorId) && !q.isFollowing(userId, creatorId)) inputError('创作者不存在')
+  const r = q.toggleFollow(userId, creatorId, on)
+  return Promise.resolve({ ...r, followers: q.creatorFollowers(creatorId) ?? 0 })
+}
+
+/* ---------------- 创作者主页 ---------------- */
+
+/** 路径里的创作者 id 只认正整数；其他写法（演示数据的账号、超大数字）一律当作不存在，不会 500 */
+function creatorIdOf(raw) {
+  const id = /^\d{1,16}$/.test(String(raw)) ? Number(raw) : 0
+  return Number.isSafeInteger(id) && id > 0 ? id : null
+}
+function requireCreator(raw) {
+  const id = creatorIdOf(raw)
+  if (!id || !q.creatorActive(id)) inputError('创作者不存在')
+  return id
+}
+/** 列表分页：limit 1-50（默认 20），offset 不小于 0 */
+const pageOf = ({ limit, offset } = {}) => ({
+  limit: Math.min(Math.max(Math.floor(Number(limit)) || 20, 1), 50),
+  offset: Math.max(Math.floor(Number(offset)) || 0, 0)
+})
+
+/** 主页头部（公开）；登录时回填 following。不存在或已停用：400「创作者不存在」 */
+export function getCreator(rawId, userId = null) {
+  const id = creatorIdOf(rawId)
+  const c = id ? q.creatorProfile(id, userId) : null
+  if (!c) inputError('创作者不存在')
+  return Promise.resolve(c)
+}
+
+/** 主页「视频」：sort 0 最新 / 1 最热，只含已发布的；列表带当前用户的赞 / 收藏状态 */
+export function getCreatorVideos(rawId, sort = 0, opts = {}, userId = null) {
+  const id = requireCreator(rawId)
+  const { total, list } = q.creatorVideos(id, Number(sort) === 1 ? 1 : 0, pageOf(opts))
+  return Promise.resolve({ total, list: q.attachVideoState(list, userId) })
+}
+
+/** 主页「帖子」：结构与社区列表完全一致（含 media、time、faved） */
+export function getCreatorPosts(rawId, opts = {}, userId = null) {
+  const id = requireCreator(rawId)
+  const { total, list } = q.creatorPosts(id, pageOf(opts))
+  for (const p of list) p.time = q.relativeTime(p.publishedAt)
+  return Promise.resolve({ total, list: q.attachPostState(list, userId) })
+}
 
 /* ---------------- 直播 / 同城 ---------------- */
 

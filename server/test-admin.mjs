@@ -534,9 +534,9 @@ await t('视频批量：加 / 删标签', async () => {
 await t('视频批量：加入 / 移出短视频', async () => {
   const add = await post('/api/admin/videos/batch', { ids: batchIds, action: 'addShort' })
   must(add.affected === 3, 'addShort ' + add.affected)
-  const shorts = await get('/api/shorts?limit=50')
-  must(batchIds.every(id => shorts.some(s => s.id === id)), 'App 短视频流里没有')
-  must(shorts.at(-1).id === batchIds[2], '应排在最后')
+  // 短视频流从全部视频里推荐，加入短视频的优先：新加的 3 条（还没有播放数）也应在前 50 条里
+  const shorts = (await get('/api/shorts?limit=50')).list
+  must(batchIds.every(id => shorts.some(s => s.id === id)), 'App 短视频流前 50 条里没有')
   const rm = await post('/api/admin/videos/batch', { ids: batchIds, action: 'removeShort' })
   must(rm.affected === 3 && (await get('/api/admin/videos?short=1')).total === 5, 'removeShort')
   return 'ok'

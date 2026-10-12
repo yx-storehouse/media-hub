@@ -15,7 +15,7 @@
  * 形状说明（HTTP 与 mock 两种实现都遵守）：
  *   Cover  { src: string|null, fallback?: string }   <Cover v-bind="cover">
  *   Video  { id, code, title, dur, len, cover, likes, liked, faved, ... }
- *   Post   { id, name, handle, verified, time, avatar, text, tags, kind: 'image'|'video'|'doc', dur, more, videoId, media: { main, thumbs } }
+ *   Post   { id, creatorId, name, handle, verified, time, avatar, text, tags, kind: 'image'|'video'|'doc', dur, more, videoId, media: { main, thumbs } }
  *   PostDetail { id, title, content, kind, author: { id, name, handle, verified, avatar }, following, tags, images: Cover[],
  *                video: { id, title, cover, dur, len } | null, read, fav, faved, publishedAt, time, next: { id, title, thumb } | null }
  * 页面里的列表都用 shallowRef 存放（整体替换，不做原地修改）。
@@ -121,11 +121,17 @@ export const getRelatedVideos = (id, { batch = 0, limit = 6 } = {}) =>
 /* ---------------- 短视频 ---------------- */
 
 /**
- * 短视频流，按后台排好的顺序分页（offset 递增 = 往下翻）。
- * 每条是 Video + { src, likes, favs }：src 有值时播放真实文件，为空时用封面 + 模拟进度。
+ * 短视频推荐流 → { seed, list, hasMore }。
+ * seed：同一个 seed 顺序固定（翻页稳定），换一个就重新洗牌；不传时服务端随机生成并在结果里带回。
+ * offset 递增 = 往下翻，翻过整个视频池也一直有内容（hasMore 恒为 true）。
+ * exclude：最近刷到过的视频 id（最多 100 个），这些会排到后面，每次打开都不一样。
+ * 每条是 Video + { src, likes, favs, creator }：src 有值时播放真实文件，为空时用封面 + 模拟进度。
  */
-export const getShorts = ({ limit = 10, offset = 0 } = {}) =>
-  call('/api/shorts', { query: { limit, offset }, mock: () => mockApi().then(m => m.getShorts({ limit, offset })) })
+export const getShorts = ({ seed, limit = 10, offset = 0, exclude = [] } = {}) =>
+  call('/api/shorts', {
+    query: { seed, limit, offset, exclude: exclude.slice(0, 100).join(',') },
+    mock: () => mockApi().then(m => m.getShorts({ seed, limit, offset, exclude }))
+  })
 
 /* ---------------- 社区 ---------------- */
 
@@ -162,9 +168,34 @@ export const toggleVideoDislike = (videoId, { on }) =>
   call(`/api/videos/${videoId}/dislike`, { method: 'POST', body: { on }, mock: () => mockApi().then(m => m.toggleVideoDislike(videoId, on)) })
 export const toggleTopicFav = (topicId, { on }) =>
   call(`/api/topics/${topicId}/fav`, { method: 'POST', body: { on }, mock: () => mockApi().then(m => m.toggleTopicFav(topicId, on)) })
-/** 关注 / 取消关注创作者，返回 { active } */
+/** 关注 / 取消关注创作者，返回 { active, followers }（followers 是最新粉丝数，演示数据可能没有） */
 export const toggleFollow = (creatorId, { on }) =>
   call(`/api/creators/${encodeURIComponent(creatorId)}/follow`, { method: 'POST', body: { on }, mock: () => mockApi().then(m => m.toggleFollow(creatorId, on)) })
+
+/* ---------------- 创作者主页（#/creator/:id） ---------------- */
+
+/**
+ * 主页头部：{ id, name, handle, avatar, verified, official, bio, followers, videoCount, postCount,
+ *            lastActiveAt, lastActive, following, banner: Cover[] }
+ * 视频数 / 帖子数只算已发布的；banner 是最近作品的图（最多 3 张，可能为空）。
+ * 创作者不存在或已停用时接口回 400「创作者不存在」。
+ */
+export const getCreator = id =>
+  call(`/api/creators/${encodeURIComponent(id)}`, { mock: () => mockApi().then(m => m.getCreator(id)) })
+
+/** 主页「视频」：sort 0 最新 / 1 最热，返回 { total, list: Video[] } */
+export const getCreatorVideos = (id, sort = 0, opts = {}) =>
+  call(`/api/creators/${encodeURIComponent(id)}/videos`, {
+    query: { sort, limit: opts.limit ?? 20, offset: opts.offset ?? 0 },
+    mock: () => mockApi().then(m => m.getCreatorVideos(id, sort, opts))
+  })
+
+/** 主页「帖子」：返回 { total, list: Post[] }，Post 与社区列表同结构 */
+export const getCreatorPosts = (id, opts = {}) =>
+  call(`/api/creators/${encodeURIComponent(id)}/posts`, {
+    query: { limit: opts.limit ?? 20, offset: opts.offset ?? 0 },
+    mock: () => mockApi().then(m => m.getCreatorPosts(id, opts))
+  })
 
 /* ---------------- 直播 / 同城 ---------------- */
 

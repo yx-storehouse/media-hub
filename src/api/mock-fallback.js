@@ -108,9 +108,11 @@ export const getHotWords = (page = 0) => ok(Array.from({ length: 8 }, (_, i) => 
   return { word, hot: !!hot }
 }))
 
-export const getCreators = () => ok(D.CREATORS.slice(0, 5).map(name => ({
-  id: null, name, handle: name, verified: false, avatar: avatar(name)
-})))
+/* 热门创作者的 id 是 c1、c2…（演示数据没有创作者表），点进去是 getCreator 生成的主页 */
+const MOCK_CREATORS = D.CREATORS.map((name, i) => ({
+  id: 'c' + (i + 1), name, handle: 'creator' + (i + 1), verified: i % 3 === 0, avatar: avatar(name)
+}))
+export const getCreators = () => ok(MOCK_CREATORS.slice(0, 5).map(c => ({ ...c })))
 
 const RECENT = makeVideos(9, 'recent')
 export const getRecentSearches = (page = 0) =>
@@ -165,8 +167,23 @@ export const getVideo = id => {
 
 export const getRelatedVideos = (id, batch = 0, limit = 6) => ok(makeVideos(limit, `rel_${id}_${batch}`).map(withDetail))
 
-/* 演示数据只有一页；src 为空 = 没有素材文件，短视频页用封面 + 模拟进度 */
-export const getShorts = ({ offset = 0 } = {}) => ok(offset > 0 ? [] : D.SHORTS.map((s, i) => ({
+/*
+ * 短视频推荐流的演示版：5 条精选（D.SHORTS）+ 35 条生成的，按 seed 洗牌（精选的大多排在前面），
+ * exclude 里的排到后面；翻过整个池子用派生 seed（seed:r1…）再洗一轮，永远翻不到底。
+ * src 为空 = 没有素材文件，短视频页用封面 + 模拟进度；作者用热门创作者（c1、c2…），点头像进 getCreator 的主页。
+ */
+const SHORT_POOL = [
+  ...D.SHORTS.map(s => ({ ...s, curated: true })),
+  ...Array.from({ length: 35 }, (_, k) => {
+    const r = rng('shortx' + k)
+    const tags = []
+    while (tags.length < 2 + Math.floor(r() * 3)) {
+      const t = '#' + TAG_POOL[Math.floor(r() * TAG_POOL.length)]
+      if (!tags.includes(t)) tags.push(t)
+    }
+    return { tags, title: D.TITLES[Math.floor(r() * D.TITLES.length)], like: 20 + Math.floor(r() * 600), fav: 10 + Math.floor(r() * 400), len: 15 + Math.floor(r() * 75), curated: false }
+  })
+].map((s, i) => ({
   id: i,
   tags: s.tags,
   title: s.title,
@@ -174,11 +191,38 @@ export const getShorts = ({ offset = 0 } = {}) => ok(offset > 0 ? [] : D.SHORTS.
   likes: s.like,
   liked: false,
   fav: s.fav,
+  favs: s.fav,
   faved: false,
   len: s.len,
   src: null,
+  curated: s.curated,
+  creator: (({ id, name, handle, avatar }) => ({ id, name, handle, avatar }))(MOCK_CREATORS[i % MOCK_CREATORS.length]),
   cover: cover('short' + i, { vignette: false, w: 720, h: 1280 })
-})))
+}))
+
+/** 第 round 轮的顺序：精选加 1，随机 0~1.6，exclude（只在第 0 轮）减 3 */
+function shortRound(seed, round, exclude) {
+  const r = rng(`${seed}:r${round}`)
+  const ex = round === 0 ? new Set(exclude.map(String)) : null
+  return SHORT_POOL
+    .map(s => ({ s, k: (s.curated ? 1 : 0) + r() * 1.6 - (ex?.has(String(s.id)) ? 3 : 0) }))
+    .sort((a, b) => b.k - a.k)
+    .map(x => x.s)
+}
+
+export const getShorts = ({ seed, limit = 10, offset = 0, exclude = [] } = {}) => {
+  seed = seed || Math.random().toString(36).slice(2, 10)
+  limit = Math.min(Math.max(1, Math.floor(limit) || 10), 50)
+  offset = Math.max(0, Math.floor(offset) || 0)
+  const n = SHORT_POOL.length, rounds = new Map(), list = []
+  for (let p = offset; p < offset + limit; p++) {
+    const round = Math.floor(p / n)
+    if (!rounds.has(round)) rounds.set(round, shortRound(seed, round, exclude))
+    const { curated, ...item } = rounds.get(round)[p % n]
+    list.push({ ...item, creator: { ...item.creator } })
+  }
+  return ok({ seed, list, hasMore: true })
+}
 
 /* ---------------- 社区 ---------------- */
 
@@ -195,6 +239,8 @@ const postAvatar = a => {
 const POSTS = D.POSTS.map((p, i) => ({
   ...p,
   id: i + 1,
+  // 演示数据的作者用账号当 id（与帖子详情的 author.id 一致），点头像进 getCreator 的主页
+  creatorId: p.handle,
   time: p.time,
   faved: false,
   videoId: p.kind === 'video' ? `post${i}v:0` : null,
@@ -256,7 +302,81 @@ export const viewPost = id => {
 export const toggleFollow = (id, on) => {
   if (on) followed.add(String(id))
   else followed.delete(String(id))
-  return ok({ active: !!on })
+  const c = mockCreator(id)
+  return ok(c ? { active: !!on, followers: mockFollowers(c) } : { active: !!on })
+}
+
+/* ---------------- 创作者主页 ---------------- */
+
+/*
+ * 演示数据没有创作者表：社区帖子的作者用账号当 id，热门创作者用 c1…c8；
+ * 纯数字的 id（接口连不上时从真实数据点进来的）按 id 生成一个占位创作者，页面照样是满的；
+ * 其余 id 当作不存在。数量、粉丝数都由 id 决定，刷新不变。
+ */
+const MOCK_BIOS = ['记录日常，分享喜欢的内容', '每周更新，欢迎关注', '']
+function mockCreator(id) {
+  const s = String(id)
+  const p = POSTS.find(x => x.handle === s)
+  const base = p ? { id: s, name: p.name, handle: p.handle, verified: p.verified, avatar: p.avatar }
+    : MOCK_CREATORS.find(x => x.id === s)
+      || (/^\d+$/.test(s) ? { id: s, name: '创作者' + s, handle: 'user' + s, verified: false, avatar: avatar('创', 'cr' + s) } : null)
+  if (!base) return null
+  const r = rng('creator:' + s)
+  const posts = POSTS.filter(x => x.handle === s)
+  return {
+    ...base,
+    bio: MOCK_BIOS[Math.floor(r() * MOCK_BIOS.length)],
+    baseFollowers: 120 + Math.floor(r() * 30000),
+    videoCount: Math.floor(r() * 37),
+    posts,
+    ageSec: posts.length ? 0 : 3600 + Math.floor(r() * 5 * 86400)
+  }
+}
+const mockFollowers = c => c.baseFollowers + (followed.has(c.id) ? 1 : 0)
+const noCreator = () => Promise.reject(new ApiError('创作者不存在', { status: 400, code: 1 }))
+const slice = (list, { limit = 20, offset = 0 } = {}) => list.slice(Math.max(0, offset), Math.max(0, offset) + limit)
+
+/** 同一创作者的视频列表；最热 = 按播放数倒序（播放数与播放页一致） */
+function mockCreatorVideos(c, sort) {
+  const list = makeVideos(c.videoCount, 'cr' + c.id).map(withDetail)
+  return sort === 1 ? list.slice().sort((a, b) => b.playCount - a.playCount) : list
+}
+
+export const getCreator = id => {
+  const c = mockCreator(id)
+  if (!c) return noCreator()
+  const now = Math.floor(Date.now() / 1000)
+  const has = c.videoCount + c.posts.length > 0
+  const lastActiveAt = has ? now - (c.posts.length ? 1800 : c.ageSec) : null
+  const covers = mockCreatorVideos(c, 0).slice(0, 3).map(v => v.cover)
+  return ok({
+    id: c.id,
+    name: c.name,
+    handle: c.handle,
+    avatar: c.avatar,
+    verified: c.verified,
+    official: false,
+    bio: c.bio,
+    followers: mockFollowers(c),
+    videoCount: c.videoCount,
+    postCount: c.posts.length,
+    lastActiveAt,
+    lastActive: !has ? '' : c.posts.length ? c.posts[0].time : c.ageSec < 86400 ? Math.floor(c.ageSec / 3600) + '小时前' : Math.floor(c.ageSec / 86400) + '天前',
+    following: followed.has(c.id),
+    banner: [...c.posts.map(p => p.media.main || p.media.thumbs[0]).filter(Boolean), ...covers].slice(0, 3)
+  })
+}
+
+export const getCreatorVideos = (id, sort = 0, opts = {}) => {
+  const c = mockCreator(id)
+  if (!c) return noCreator()
+  return ok({ total: c.videoCount, list: slice(mockCreatorVideos(c, Number(sort) === 1 ? 1 : 0), opts) })
+}
+
+export const getCreatorPosts = (id, opts = {}) => {
+  const c = mockCreator(id)
+  if (!c) return noCreator()
+  return ok({ total: c.posts.length, list: slice(c.posts, opts) })
 }
 export const togglePostFav = (id, on) => {
   const p = POSTS[postIndex(id)]
@@ -322,5 +442,6 @@ export default {
   getCategoryFilters, getCategoryVideos, getHotWords, getCreators, getRecentSearches, searchVideos,
   getTopic, getTopicVideos, getLibrary, getVideo, getRelatedVideos, getShorts, getCommunityTabs, getPosts,
   getPost, viewPost, toggleFollow, togglePostFav, toggleVideoFav, toggleVideoLike, toggleVideoDislike, toggleTopicFav,
+  getCreator, getCreatorVideos, getCreatorPosts,
   getLiveTabs, getLives, getNearbyFilters, getNearby, getProfile, getHistory
 }

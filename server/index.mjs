@@ -20,13 +20,16 @@
  *   GET  /api/library                   片库分类
  *   GET  /api/videos/:id                视频详情（播放页）
  *   GET  /api/videos/:id/related        相似推荐（?batch=0&limit=6，batch 递增 = 换一批）
- *   GET  /api/shorts                    短视频流
+ *   GET  /api/shorts                    短视频推荐流（?seed=&offset=&limit=&exclude=，翻不到底）
  *   GET  /api/community/tabs            社区 tab
  *   GET  /api/community/posts           社区帖子（?tab=0）
  *   GET  /api/community/posts/:id       帖子详情（标题、正文、图片、关联视频、下一篇；登录时带关注 / 收藏状态）
  *   POST /api/community/posts/:id/view  阅读数 +1（公开，无请求体）→ { read }
  *   POST /api/community/posts/:id/fav   收藏 / 取消收藏
- *   POST /api/creators/:id/follow       关注 / 取消关注创作者（body: { on }）
+ *   POST /api/creators/:id/follow       关注 / 取消关注创作者（body: { on }）→ { active, followers }
+ *   GET  /api/creators/:id              创作者主页头部（登录时带 following）
+ *   GET  /api/creators/:id/videos       创作者的视频（?sort=0 最新 | 1 最热&limit=&offset=）→ { total, list }
+ *   GET  /api/creators/:id/posts        创作者的帖子（?limit=&offset=，结构同社区列表）→ { total, list }
  *   GET  /api/live/tabs                 直播 tab
  *   GET  /api/live                      直播列表（?tab=0）
  *   GET  /api/nearby/filters            同城筛选项
@@ -109,13 +112,18 @@ const routes = [
   ['GET', /^\/api\/library$/, () => api.getLibrary()],
   ['GET', /^\/api\/videos\/(\d+)$/, (m, q, b, c) => api.getVideo(+m[1], c.userId)],
   ['GET', /^\/api\/videos\/(\d+)\/related$/, (m, q, b, c) => api.getRelatedVideos(+m[1], { batch: Math.max(0, +(q.batch || 0)), limit: Math.min(Math.max(1, +(q.limit || 6)), 20) }, c.userId)],
-  ['GET', /^\/api\/shorts$/, (m, q, b, c) => api.getShorts({ limit: +(q.limit || 20), offset: +(q.offset || 0) }, c.userId)],
+  ['GET', /^\/api\/shorts$/, (m, q, b, c) => api.getShorts({ seed: q.seed, offset: q.offset, limit: q.limit, exclude: q.exclude }, c.userId)],
 
   ['GET', /^\/api\/community\/tabs$/, () => api.getCommunityTabs()],
   ['GET', /^\/api\/community\/posts$/, (m, q, b, c) => api.getPosts(+(q.tab || 0), { limit: +(q.limit || 20), offset: +(q.offset || 0) }, c.userId)],
   ['GET', /^\/api\/community\/posts\/(\d+)$/, (m, q, b, c) => api.getPost(+m[1], c.userId)],
   // 阅读数 +1：公开，不需要登录、不需要请求体（详情页每打开一次调一次）
   ['POST', /^\/api\/community\/posts\/(\d+)\/view$/, m => api.viewPost(+m[1])],
+
+  // 创作者主页：公开；id 不是正整数也交给接口层，统一回 400「创作者不存在」
+  ['GET', /^\/api\/creators\/([^/]+)$/, (m, q, b, c) => api.getCreator(m[1], c.userId)],
+  ['GET', /^\/api\/creators\/([^/]+)\/videos$/, (m, q, b, c) => api.getCreatorVideos(m[1], q.sort, { limit: q.limit, offset: q.offset }, c.userId)],
+  ['GET', /^\/api\/creators\/([^/]+)\/posts$/, (m, q, b, c) => api.getCreatorPosts(m[1], { limit: q.limit, offset: q.offset }, c.userId)],
 
   ['GET', /^\/api\/live\/tabs$/, () => api.getLiveTabs()],
   ['GET', /^\/api\/live$/, (m, q) => api.getLives({ tab: +(q.tab || 0), limit: +(q.limit || 20), offset: +(q.offset || 0) })],

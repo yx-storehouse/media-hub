@@ -390,16 +390,208 @@ export function relatedVideos(id, { batch = 0, limit = 6 } = {}) {
 
 /* ---------------- 短视频 ---------------- */
 
-/**
- * 短视频流，按 sort_order 排（管理后台新加的排在最后），前端滑到末尾时用 offset 翻页。
- * src：有素材文件（playback_url）时前端直接播放，没有就用封面 + 模拟进度。
+/*
+ * 短视频推荐流（GET /api/shorts?seed=&offset=&limit=&exclude=）。
+ *
+ * 候选是全部已上架视频；后台「加入短视频」的（short_clips）大幅加权，首屏基本是它们，但不只有它们。
+ * 每条打分：
+ *   热度       log(播放数)，按全池最大值归一
+ *   新鲜度     按发布时间，半衰期 14 天
+ *   短视频     后台加入短视频的加一大截
+ *   互动率     (赞 + 藏) / 播放，封顶
+ *   随机扰动   hash(seed, id)：同一个 seed 顺序固定（翻页稳定），换一个 seed 顺序就变
+ *   − 登录用户近期看过的（3 天内重罚、30 天内轻罚）
+ *   − exclude：客户端最近刷到过的 id（未登录也能每次打开都不一样）
+ * 排好后再去一遍同质：同一创作者 / 同一专题尽量不挨着（后面几条里分差不大的换上来）。
+ *
+ * 整个排序按 (用户, seed) 只算一次、放进内存缓存（LRU，5 分钟没人翻就丢），翻页只是切片。
+ * 翻过整个候选池后用派生 seed（seed:r1、seed:r2…）再排一轮接着给，前端永远刷不到底；
+ * 新一轮的开头会避开上一轮末尾的几条，接缝处不会连着出现同一条。
  */
-export function shorts({ limit = 20, offset = 0 } = {}) {
-  limit = Math.min(Math.max(1, Number(limit) || 20), 100)
-  offset = Math.max(0, Number(offset) || 0)
-  return all(`SELECT s.sort_order, v.* FROM short_clips s JOIN v_videos v ON v.id = s.video_id
-              ORDER BY s.sort_order, s.video_id LIMIT ? OFFSET ?`, limit, offset)
+const FEED_W = {
+  pop: 1,          // 热度
+  fresh: 0.6,      // 新鲜度
+  curated: 2,      // 后台加入的短视频
+  engage: 0.4,     // 互动率
+  noise: 1.2,      // 随机扰动
+  seen3d: 3,       // 3 天内看过
+  seen30d: 0.8,    // 30 天内看过
+  exclude: 3       // 客户端最近刷到过
+}
+const FEED_HALF_LIFE_DAYS = 14
+const FEED_ENGAGE_CAP = 0.2     // 互动率到 20% 就算满分
+const FEED_DIVERSE_GAP = 0.35   // 去同质：只在分差不超过这么多的候选里换
+const FEED_DIVERSE_LOOK = 8     // 去同质：最多往后看几条
+const FEED_SEAM = 10            // 新一轮开头避开上一轮末尾的条数
+const FEED_TTL_MS = 5 * 60_000
+const FEED_CACHE_MAX = 64
+const FEED_EXCLUDE_MAX = 100
+const DAY_SEC = 86400
+
+/** FNV-1a：字符串 → 32 位整数 */
+function hash32(s) {
+  let h = 0x811c9dc5
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i)
+    h = Math.imul(h, 0x01000193)
+  }
+  return h >>> 0
+}
+
+/** (seed, id) → [0, 1) 的固定随机数（murmur3 fmix32） */
+function noise01(seedHash, id) {
+  let h = (seedHash ^ Math.imul(id | 0, 0x9e3779b1)) >>> 0
+  h ^= h >>> 16
+  h = Math.imul(h, 0x85ebca6b)
+  h ^= h >>> 13
+  h = Math.imul(h, 0xc2b2ae35)
+  h ^= h >>> 16
+  return (h >>> 0) / 4294967296
+}
+
+/** 给整个候选池按 seed 排一次序，返回视频 id（Int32Array）；exclude 是 Set 或 null */
+function rankShortFeed(seed, userId, exclude) {
+  const now = Math.floor(Date.now() / 1000)
+  const rows = all('SELECT id, topic_id, creator_id, play_count, like_count, fav_count, published_at FROM videos WHERE status = 1')
+  const n = rows.length
+  if (!n) return new Int32Array(0)
+  const curated = new Set(all('SELECT video_id FROM short_clips').map(r => r.video_id))
+  const watched = new Map()
+  if (userId) {
+    for (const r of all('SELECT video_id, watched_at FROM watch_history WHERE user_id = ? AND watched_at >= ?', userId, now - 30 * DAY_SEC)) {
+      watched.set(r.video_id, r.watched_at)
+    }
+  }
+  let maxPlay = 0
+  for (const r of rows) if (r.play_count > maxPlay) maxPlay = r.play_count
+  const logMax = Math.log1p(maxPlay) || 1
+  const seedHash = hash32(String(seed))
+
+  const score = new Float64Array(n)
+  for (let i = 0; i < n; i++) {
+    const r = rows[i]
+    const plays = Math.max(0, r.play_count || 0)
+    const ageDays = Math.max(0, now - (r.published_at || 0)) / DAY_SEC
+    let s = FEED_W.pop * Math.log1p(plays) / logMax
+      + FEED_W.fresh * Math.pow(0.5, ageDays / FEED_HALF_LIFE_DAYS)
+      + FEED_W.engage * Math.min(1, Math.max(0, (r.like_count || 0) + (r.fav_count || 0)) / (plays + 20) / FEED_ENGAGE_CAP)
+      + FEED_W.noise * noise01(seedHash, r.id)
+    if (curated.has(r.id)) s += FEED_W.curated
+    const at = watched.get(r.id)
+    if (at != null) s -= now - at <= 3 * DAY_SEC ? FEED_W.seen3d : FEED_W.seen30d
+    if (exclude?.has(r.id)) s -= FEED_W.exclude
+    score[i] = s
+  }
+  const order = new Int32Array(n)
+  for (let i = 0; i < n; i++) order[i] = i
+  order.sort((a, b) => score[b] - score[a] || rows[a].id - rows[b].id)
+
+  // 去同质：排在最前的候选和上一条同创作者 / 同专题时，往后几条里找分差不大、又不撞的顶上
+  const clash = (a, b) => (rows[a].creator_id != null && rows[a].creator_id === rows[b].creator_id) ||
+    (rows[a].topic_id != null && rows[a].topic_id === rows[b].topic_id)
+  const out = new Int32Array(n)
+  const used = new Uint8Array(n)
+  let head = 0, prev = -1
+  for (let k = 0; k < n; k++) {
+    while (used[head]) head++
+    let pick = head
+    if (prev >= 0 && clash(order[head], prev)) {
+      const top = score[order[head]]
+      for (let j = head + 1, looked = 0; j < n && looked < FEED_DIVERSE_LOOK; j++) {
+        if (used[j]) continue
+        looked++
+        if (top - score[order[j]] > FEED_DIVERSE_GAP) break
+        if (!clash(order[j], prev)) { pick = j; break }
+      }
+    }
+    used[pick] = 1
+    prev = order[pick]
+    out[k] = rows[prev].id
+  }
+  return out
+}
+
+/* 排好的顺序：key = 用户|轮次|seed → { ids, at }；Map 的插入顺序就是 LRU 顺序 */
+const feedCache = new Map()
+
+function feedCached(key) {
+  const hit = feedCache.get(key)
+  if (!hit) return null
+  if (Date.now() - hit.at > FEED_TTL_MS) {
+    feedCache.delete(key)
+    return null
+  }
+  // 命中：挪到最后并顺延过期时间，还在往下翻的会话不会中途换顺序
+  feedCache.delete(key)
+  hit.at = Date.now()
+  feedCache.set(key, hit)
+  return hit.ids
+}
+
+/** 第 round 轮（0 起）的完整顺序；exclude 只影响第 0 轮 */
+function feedRound(seed, userId, round, exclude) {
+  const key = `${userId || 0}|${round}|${seed}`
+  const cached = feedCached(key)
+  if (cached) return cached
+  let ids
+  if (round === 0) {
+    ids = rankShortFeed(seed, userId, exclude)
+  } else {
+    ids = rankShortFeed(`${seed}:r${round}`, userId, null)
+    // 接缝：上一轮末尾的 k 条挪出这一轮的前 k 条。调整只动开头 2k 条（k ≤ 总数 / 4），
+    // 不影响末尾，所以上一轮用缓存的成品还是重新排的原始顺序，末尾都一样，结果是确定的
+    const k = Math.min(FEED_SEAM, Math.floor(ids.length / 4))
+    if (k > 0) {
+      const prev = round === 1
+        ? feedRound(seed, userId, 0, exclude)
+        : feedCached(`${userId || 0}|${round - 1}|${seed}`) || rankShortFeed(`${seed}:r${round - 1}`, userId, null)
+      const tail = new Set(prev.subarray(Math.max(0, prev.length - k)))
+      const headIds = Array.from(ids.subarray(0, 2 * k))
+      ids.set([...headIds.filter(id => !tail.has(id)), ...headIds.filter(id => tail.has(id))], 0)
+    }
+  }
+  feedCache.set(key, { ids, at: Date.now() })
+  while (feedCache.size > FEED_CACHE_MAX) feedCache.delete(feedCache.keys().next().value)
+  return ids
+}
+
+/** exclude 参数：逗号分隔（或数组）的视频 id，最多 100 个，非法的忽略 */
+function parseExclude(v) {
+  const out = new Set()
+  for (const x of Array.isArray(v) ? v : String(v ?? '').split(',')) {
+    if (out.size >= FEED_EXCLUDE_MAX) break
+    const id = Number(x)
+    if (Number.isSafeInteger(id) && id > 0) out.add(id)
+  }
+  return out
+}
+
+/**
+ * 短视频推荐流的一页：{ seed, list, hasMore }。
+ * seed 不传就随机生成一个并返回（前端翻页时带回来）；limit 1~50（默认 10）；offset 超过候选池照样有内容。
+ * 每条是 Video + { src, like, fav }：src 有素材文件时前端直接播放，没有就用封面 + 模拟进度。
+ * 这一页里已下架 / 删除的视频直接跳过（列表可能比 limit 短），前端按 offset + limit 翻下一页。
+ */
+export function shortFeed({ seed, offset = 0, limit = 10, exclude = null, userId = null } = {}) {
+  seed = typeof seed === 'string' && seed.trim() ? seed.trim().slice(0, 64) : Math.random().toString(36).slice(2, 10)
+  limit = Math.min(Math.max(1, Math.floor(Number(limit)) || 10), 50)
+  offset = Math.min(Math.max(0, Math.floor(Number(offset)) || 0), 1e7)
+  const ex = parseExclude(exclude)
+  const first = feedRound(seed, userId, 0, ex)
+  const n = first.length
+  if (!n) return { seed, list: [], hasMore: false }
+  const ids = []
+  for (let p = offset; p < offset + limit; p++) {
+    const round = Math.floor(p / n)
+    const ranking = round === 0 ? first : feedRound(seed, userId, round, ex)
+    if (p - round * n < ranking.length) ids.push(ranking[p - round * n])
+  }
+  const uniq = [...new Set(ids)]
+  const rows = uniq.length ? all(`SELECT * FROM v_videos WHERE id IN (${uniq.map(() => '?').join(',')})`, ...uniq) : []
+  const byId = new Map(rows.map(r => [r.id, r]))
+  const list = ids.map(id => byId.get(id)).filter(Boolean)
     .map(r => ({ ...toVideo(r), src: r.playback_url || null, like: r.like_count, fav: r.fav_count }))
+  return { seed, list, hasMore: true }
 }
 
 /* ---------------- 社区 ---------------- */
@@ -419,6 +611,8 @@ export function toPost(r) {
   const live = r.video_id != null && r.video_live !== 0
   return {
     id: r.id,
+    // 发布者 id：卡片上的头像 / 名字点进创作者主页（创作者已删除时为 null）
+    creatorId: r.creator_id ?? null,
     name: r.author_name,
     handle: r.author_handle,
     verified: !!r.author_verified,
@@ -565,6 +759,80 @@ function toggleRow(table, idColumn, userId, targetId, on) {
   if (next) run(`INSERT INTO ${table}(user_id, ${idColumn}, created_at) VALUES(?,?,?)`, userId, targetId, now)
   else run(`DELETE FROM ${table} WHERE user_id = ? AND ${idColumn} = ?`, userId, targetId)
   return { active: next }
+}
+
+/* ---------------- 创作者主页 ---------------- */
+
+/** 正常状态（没停用、没删除）的创作者 */
+export const creatorActive = id => !!get('SELECT 1 x FROM creators WHERE id = ? AND status = 1', id)
+export const creatorFollowers = id => get('SELECT follower_count FROM creators WHERE id = ?', id)?.follower_count ?? null
+export const isFollowing = (userId, creatorId) => !!get('SELECT 1 x FROM user_follows WHERE user_id = ? AND creator_id = ?', userId, creatorId)
+
+/**
+ * 创作者主页头部；不存在或已停用返回 null。
+ * 视频数 / 帖子数 / 最后更新时间只算已发布的内容（走 idx_videos_creator / idx_posts_creator）。
+ */
+export function creatorProfile(id, userId = null) {
+  const c = get('SELECT * FROM creators WHERE id = ? AND status = 1', id)
+  if (!c) return null
+  const v = get('SELECT COUNT(*) n, MAX(published_at) t FROM videos WHERE creator_id = ? AND status = 1', id)
+  const p = get('SELECT COUNT(*) n, MAX(published_at) t FROM posts WHERE creator_id = ? AND status = 1', id)
+  const lastActiveAt = Math.max(v.t ?? 0, p.t ?? 0) || null
+  return {
+    id: c.id,
+    name: c.name,
+    handle: c.handle,
+    avatar: toCover(c.avatar_url, c.avatar_fallback),
+    verified: !!c.is_verified,
+    official: !!c.is_official,
+    bio: c.bio || '',
+    followers: c.follower_count,
+    videoCount: v.n,
+    postCount: p.n,
+    lastActiveAt,
+    lastActive: relativeTime(lastActiveAt),
+    following: !!userId && isFollowing(userId, id),
+    banner: creatorBanner(id)
+  }
+}
+
+/*
+ * 主页头图：最近的作品图，新的在前，最多 3 张。
+ * 视频取封面；帖子取主图，没有主图的图文 / 视频帖取第一张配图（文档帖的配图是文档页，不要）。
+ * 两边各先按发布时间取 3 条再合并，创作者作品很多时也不用整表排序。
+ */
+const BANNER_SIZE = 3
+function creatorBanner(id) {
+  return all(`SELECT src, fallback FROM (
+                SELECT * FROM (SELECT cover_url AS src, cover_fallback AS fallback, published_at AS t, 0 AS k, id AS i FROM videos
+                               WHERE creator_id = ? AND status = 1 AND (cover_url IS NOT NULL OR cover_fallback IS NOT NULL)
+                               ORDER BY published_at DESC, id DESC LIMIT ${BANNER_SIZE})
+                UNION ALL
+                SELECT * FROM (SELECT m.url AS src, m.fallback AS fallback, p.published_at AS t, 1 AS k, p.id AS i FROM posts p
+                               JOIN post_media m ON m.id = (SELECT id FROM post_media
+                                                            WHERE post_id = p.id AND (url IS NOT NULL OR fallback IS NOT NULL)
+                                                              AND (role = 0 OR p.media_kind != 2)
+                                                            ORDER BY role, sort_order, id LIMIT 1)
+                               WHERE p.creator_id = ? AND p.status = 1
+                               ORDER BY p.published_at DESC, p.id DESC LIMIT ${BANNER_SIZE})
+              ) ORDER BY t DESC, k, i DESC LIMIT ${BANNER_SIZE}`, id, id).map(r => toCover(r.src, r.fallback))
+}
+
+/** 主页「视频」：sort 0 最新（发布时间）/ 1 最热（播放量）；同值再按 id 定序，翻页不重复也不遗漏 */
+const CREATOR_VIDEO_ORDER = ['published_at DESC, id DESC', 'play_count DESC, published_at DESC, id DESC']
+export function creatorVideos(id, sort = 0, { limit = 20, offset = 0 } = {}) {
+  const total = get('SELECT COUNT(*) c FROM videos WHERE creator_id = ? AND status = 1', id).c
+  const list = all(`SELECT * FROM v_videos WHERE creator_id = ? ORDER BY ${CREATOR_VIDEO_ORDER[sort] || CREATOR_VIDEO_ORDER[0]} LIMIT ? OFFSET ?`,
+    id, limit, offset).map(toVideo)
+  return { total, list }
+}
+
+/** 主页「帖子」：和社区列表同一结构，按发布时间倒序 */
+export function creatorPosts(id, { limit = 20, offset = 0 } = {}) {
+  const total = get('SELECT COUNT(*) c FROM posts WHERE creator_id = ? AND status = 1', id).c
+  const rows = all(`SELECT ${POST_COLS} FROM v_posts p ${POST_VIDEO} WHERE p.creator_id = ?
+                    ORDER BY p.published_at DESC, p.id DESC LIMIT ? OFFSET ?`, id, limit, offset)
+  return { total, list: rows.map(r => ({ ...toPost(r), media: postMedia(r.id) })) }
 }
 
 /* ---------------- 直播 / 同城 ---------------- */

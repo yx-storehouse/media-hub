@@ -138,6 +138,9 @@ async function batchDelete() {
 
 /* ⑤ 导出 */
 const exporter = useExport('creators', params)
+
+/* 在前台查看：移动端的创作者主页（已停用的创作者前台打不开，按钮置灰） */
+const appLink = id => `./index.html#/creator/${id}`
 </script>
 
 <template>
@@ -285,6 +288,17 @@ const exporter = useExport('creators', params)
         <div class="links">
           <ABtn size="sm" icon="video" :to="{ path: '/videos', query: { creatorId: editor.row.id } }">查看视频</ABtn>
           <ABtn size="sm" icon="post" :to="{ path: '/posts', query: { creatorId: editor.row.id } }">查看帖子</ABtn>
+          <ABtn
+            size="sm"
+            icon="external"
+            :href="appLink(editor.row.id)"
+            target="_blank"
+            rel="noopener"
+            :disabled="editor.row.status !== 1"
+            :title="editor.row.status !== 1 ? '已停用的创作者在前台不显示' : '打开移动端的创作者主页'"
+          >
+            在前台查看
+          </ABtn>
         </div>
       </template>
 

@@ -151,7 +151,7 @@ const appUrl = computed(() => `./index.html#/video/${props.editor.id}`)
       <FormField label="发布时间" field="publishedAt" :error="errors.publishedAt" :hint="editor.isNew ? '留空 = 保存的时间' : '影响「最新」排序'">
         <DateTimeInput v-model="form.publishedAt" :clearable="editor.isNew" />
       </FormField>
-      <FormField class="full" inline label="加入短视频" field="isShort" :error="errors.isShort" hint="加入后出现在前台「短视频」流的末尾">
+      <FormField class="full" inline label="加入短视频" field="isShort" :error="errors.isShort" hint="加入后在前台「短视频」流里优先推荐">
         <SwitchInput v-model="form.isShort" />
       </FormField>
     </div>

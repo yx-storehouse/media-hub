@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAppStore } from '@/stores/app'
 import { MAIN_TABS } from '@/config/nav'
+import { emitTabRetap } from '@/composables/useTabRetap'
 import Icon from './Icon.vue'
 
 const route = useRoute()
@@ -16,10 +17,11 @@ const target = t => (t.id === 'home' ? `/home/${store.lastHomeTab}` : t.path)
  * Switching bottom tabs replaces the history entry like a native tab bar, so back leaves the
  * section instead of cycling through tabs. If the previous entry already is the target, step
  * back to it rather than stacking a duplicate.
+ * Tapping the tab that is already open is a "retap" (the short feed refreshes on it).
  */
 function go(t) {
   const to = target(t)
-  if (to === route.fullPath) return
+  if (to === route.fullPath) return emitTabRetap(t.id)
   if (window.history.state && window.history.state.back === to) router.back()
   else router.replace(to)
 }

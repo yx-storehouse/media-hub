@@ -10,10 +10,12 @@ import Icon from '@/components/Icon.vue'
 
 const props = defineProps({
   /**
-   * Post from getPosts(): { id, name, handle, verified, time, avatar, text, tags, kind, dur, more, read, fav, videoId, media: { main, thumbs } }
+   * Post from getPosts(): { id, creatorId, name, handle, verified, time, avatar, text, tags, kind, dur, more, read, fav, videoId, media: { main, thumbs } }
    * kind：'image' 图文 / 'video' 视频 / 'doc' 文档
    */
-  post: { type: Object, required: true }
+  post: { type: Object, required: true },
+  /** 头像 / 名字链到作者主页；创作者主页里的卡片作者就是本人，传 false 关掉 */
+  authorLink: { type: Boolean, default: true }
 })
 
 const router = useRouter()
@@ -23,11 +25,13 @@ const postStore = usePostStore()
 /* 只有视频帖的主图带播放按钮和时长；其余类型的主图就是一张图 */
 const isVideo = computed(() => props.post.kind === 'video')
 const detailTo = computed(() => `/post/${encodeURIComponent(props.post.id)}`)
+/* 作者主页；作者已删除（creatorId 为空）时头像 / 名字和卡片其他地方一样进详情 */
+const authorTo = computed(() => (props.authorLink && props.post.creatorId != null ? `/creator/${encodeURIComponent(props.post.creatorId)}` : null))
 
 /* 收藏状态 / 收藏数 / 阅读数：详情页里改过的值也在 store 里，返回列表时一致 */
 const stats = computed(() => postStore.stats(props.post))
 
-/* 点卡片任意位置（文字、话题、图片）进详情；分享 / 收藏按钮和标题链接自己处理点击 */
+/* 点卡片任意位置（文字、话题、图片）进详情；分享 / 收藏按钮、标题链接、头像 / 名字（作者主页）自己处理点击 */
 function open(e) {
   if (e.target.closest('button, a')) return
   router.push(detailTo.value)
@@ -50,11 +54,19 @@ async function toggleFav() {
 
 <template>
   <article v-fade-in class="post" @click="open">
-    <Cover class="av" v-bind="post.avatar" />
+    <!-- 头像和名字进作者主页（读屏只读名字那个链接，头像链接不重复朗读） -->
+    <RouterLink v-if="authorTo" class="av-l" :to="authorTo" tabindex="-1" aria-hidden="true"><Cover class="av" v-bind="post.avatar" /></RouterLink>
+    <Cover v-else class="av" v-bind="post.avatar" />
     <div class="bd">
       <div class="meta">
-        <span class="nm">{{ post.name }}</span>
-        <Icon v-if="post.verified" name="verified" class="vf" />
+        <RouterLink v-if="authorTo" class="nm-l" :to="authorTo" :aria-label="`${post.name} 的主页`">
+          <span class="nm">{{ post.name }}</span>
+          <Icon v-if="post.verified" name="verified" class="vf" />
+        </RouterLink>
+        <template v-else>
+          <span class="nm">{{ post.name }}</span>
+          <Icon v-if="post.verified" name="verified" class="vf" />
+        </template>
         <span class="hd2">@{{ post.handle }} · {{ post.time }}</span>
         <Icon name="chevR" class="go" />
       </div>
@@ -89,6 +101,9 @@ async function toggleFav() {
 <style scoped>
 .post { display: flex; gap: 11px; padding: 12px 14px 19px; border-bottom: 1px solid var(--line); cursor: pointer; }
 .av { flex: none; width: 44px; height: 44px; border-radius: 50%; filter: var(--media); }
+.av-l { flex: none; align-self: flex-start; border-radius: 50%; }
+.nm-l { display: flex; flex: none; align-items: center; gap: 5px; min-width: 0; max-width: 62%; }
+.nm-l .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .bd { flex: 1; min-width: 0; }
 
 .meta { display: flex; align-items: center; gap: 5px; height: 24px; white-space: nowrap; }

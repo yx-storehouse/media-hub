@@ -107,6 +107,12 @@ function onEnter(e) {
   search()
 }
 
+/* 热门创作者：有 id 就进主页；拿不到 id 的（旧数据）还是按名字搜索 */
+function openCreator(c) {
+  if (c.id != null) router.push(`/creator/${encodeURIComponent(c.id)}`)
+  else searchFor(c.name)
+}
+
 function clear() {
   text.value = ''
   showSuggestions()
@@ -184,7 +190,7 @@ onMounted(() => {
           <button class="pill r" @click="toast('创作者列表即将上线')">查看全部<Icon name="chevR" /></button>
         </div>
         <div class="stars">
-          <div v-for="c in creators" :key="c.name" v-press class="st" @click="searchFor(c.name)">
+          <div v-for="c in creators" :key="c.id ?? c.name" v-press class="st" :aria-label="c.id != null ? `${c.name} 的主页` : undefined" @click="openCreator(c)">
             <Cover class="av" v-bind="c.avatar" />
             <div class="nm">{{ c.name }}</div>
           </div>

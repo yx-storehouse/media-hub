@@ -4,6 +4,7 @@ import { getShorts, toggleVideoLike, toggleVideoFav } from '@/api'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { toast } from '@/composables/useToast'
+import { useTabRetap } from '@/composables/useTabRetap'
 import Icon from '@/components/Icon.vue'
 import BottomSheet from '@/components/BottomSheet.vue'
 import ShortItem from '@/components/short/ShortItem.vue'
@@ -16,16 +17,28 @@ const TICK_MS = 100
 /** 每页条数；滑到离末尾还剩 PRELOAD_AHEAD 条时加载下一页 */
 const PAGE_SIZE = 10
 const PRELOAD_AHEAD = 3
+/** 只渲染当前这条前后各 RENDER_AROUND 条，其余只留一个等高的空位：流可以一直刷下去 */
+const RENDER_AROUND = 2
+/** 长按两侧边缘快进的倍速（与 ShortItem 一致，模拟进度按它推进） */
+const BOOST_RATE = 2
+/** 最近刷到过的视频 id（最新的在前，最多 SEEN_MAX 个）：打开 / 刷新时交给推荐，让它们排到后面 */
+const SEEN_KEY = 'reel:short:seen'
+const SEEN_MAX = 100
 
 const store = useAppStore()
 const auth = useAuthStore()
 const feedEl = useTemplateRef('feed')
 
+/** 每条额外带一个流内唯一的 feedKey：推荐翻过一整轮后同一个视频还会再出现 */
 const clips = shallowRef([])
 /** playback per clip, same order as `clips`: { t: seconds, playing, len: seconds（真实视频读到文件时长后替换） } */
 const players = ref([])
-/** clip on screen; only used to decide which real videos preload (the playback logic uses `current`) */
+/** clip on screen; decides which clips are rendered and which real videos preload (the playback logic uses `current`) */
 const active = ref(0)
+/** 第一页还没回来 / 第一页失败 / 再点一次「短视频」Tab 正在刷新 */
+const loading = ref(true)
+const failed = ref(false)
+const refreshing = ref(false)
 
 const feedTab = ref(0)
 const settingsOpen = ref(false)
@@ -34,60 +47,155 @@ const rate = computed(() => parseFloat(store.playback.speed) || 1)
 /* playback bookkeeping that the template never reads */
 let current = 0 // index of the clip that fills the screen; only this one advances
 let advancingTo = -1 // clip the feed is smooth-scrolling to after the current one ended (-1: none)
+let boosted = -1 // clip held at 2x by a long press on the screen edge (-1: none)
 let visible = false // page is the active KeepAlive child
 let timer = 0
 let io = null
 
-/* 翻页：nextOffset 是下一页从接口的第几条开始（去重后的 clips 可能比它少） */
+/*
+ * 推荐流：seed 决定顺序（同一个 seed 翻页稳定，换 seed 就重新洗牌），exclude 是打开 / 刷新时
+ * 读到的「最近刷到过」，翻页时原样带上（服务端缓存过期重排时结果一致）。
+ * generation 每次重新加载 +1：旧 seed 的请求晚回来时直接丢掉。
+ */
+let seed = ''
+let exclude = []
 let nextOffset = 0
-let reachedEnd = false
+let hasMore = true
 let loadingMore = null
+let generation = 0
+let keySeq = 0
 
 const newPlayer = clip => ({ t: 0, playing: false, len: clip.len || 0 })
+const newSeed = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
 
+/* ---------- 最近刷到过（localStorage，读写失败就当没有） ---------- */
+
+let seen = null
+function readSeen() {
+  try {
+    const list = JSON.parse(localStorage.getItem(SEEN_KEY) || '[]')
+    return Array.isArray(list) ? list.filter(id => Number.isSafeInteger(id)).slice(0, SEEN_MAX) : []
+  } catch {
+    return []
+  }
+}
+function markSeen(id) {
+  if (!Number.isSafeInteger(id)) return
+  seen ??= readSeen()
+  if (seen[0] === id) return
+  seen = [id, ...seen.filter(x => x !== id)].slice(0, SEEN_MAX)
+  try { localStorage.setItem(SEEN_KEY, JSON.stringify(seen)) } catch { /* 隐私模式等：不记也能用 */ }
+}
+
+/** 新一页接到 base 后面：和前一条是同一个视频的跳过（一轮翻完的接缝处），每条给一个 feedKey */
+function withKeys(list, base) {
+  const out = []
+  let prev = base.at(-1)?.id
+  for (const c of list) {
+    if (c.id === prev) continue
+    out.push({ ...c, feedKey: ++keySeq })
+    prev = c.id
+  }
+  return out
+}
+
+/**
+ * 换一个 seed 重新拉第一页：打开页面、再点一次「短视频」Tab、失败后重试。
+ * 成功才替换列表（刷新失败时原来的还在），返回是否成功。
+ */
 async function load() {
-  const list = await getShorts({ limit: PAGE_SIZE, offset: 0 })
+  const gen = ++generation
+  const s = newSeed()
+  const ex = readSeen()
+  let page
+  try {
+    page = await getShorts({ seed: s, limit: PAGE_SIZE, offset: 0, exclude: ex })
+  } catch {
+    if (gen === generation && !clips.value.length) failed.value = true
+    return false
+  } finally {
+    if (gen === generation) loading.value = false
+  }
+  if (gen !== generation) return false
+  seed = page.seed || s
+  exclude = ex
+  nextOffset = PAGE_SIZE
+  hasMore = page.hasMore !== false
+  loadingMore = null
+  failed.value = false
+  const list = withKeys(page.list || [], [])
   clips.value = list
   players.value = list.map(newPlayer)
-  nextOffset = list.length
-  reachedEnd = list.length < PAGE_SIZE
   current = 0
   active.value = 0
+  advancingTo = -1
+  boosted = -1
   await nextTick()
-  if (visible) observe()
+  if (visible) {
+    scrollToClip(0)
+    observe()
+  }
+  return true
+}
+
+function retry() {
+  failed.value = false
+  loading.value = true
+  load()
 }
 
 /** 加载下一页并接到末尾；同一时间只有一个请求，失败了等下次靠近末尾再试 */
 function loadMore() {
-  if (reachedEnd || !clips.value.length) return Promise.resolve()
-  loadingMore ??= (async () => {
-    try {
-      const list = await getShorts({ limit: PAGE_SIZE, offset: nextOffset })
-      nextOffset += list.length
-      reachedEnd = list.length < PAGE_SIZE
-      // 翻页期间后台调整了顺序可能导致重复，按 id 去掉
-      const seen = new Set(clips.value.map(c => c.id))
-      const fresh = list.filter(c => !seen.has(c.id))
-      if (!fresh.length) return
+  if (!hasMore || !clips.value.length) return Promise.resolve()
+  if (loadingMore) return loadingMore
+  const gen = generation
+  const p = (async () => {
+    // 这一页的视频刚好都被下架了就接着翻，最多连翻 3 页
+    for (let tries = 0; tries < 3; tries++) {
+      const page = await getShorts({ seed, limit: PAGE_SIZE, offset: nextOffset, exclude })
+      if (gen !== generation) return
+      nextOffset += PAGE_SIZE
+      hasMore = page.hasMore !== false
+      const fresh = withKeys(page.list || [], clips.value)
+      if (!fresh.length) {
+        if (!hasMore) return
+        continue
+      }
       clips.value = [...clips.value, ...fresh]
       players.value.push(...fresh.map(newPlayer))
       await nextTick()
       if (visible) observe(false)
-    } catch { /* 网络问题：下次滑到附近再试 */ } finally {
-      loadingMore = null
+      return
     }
   })()
-  return loadingMore
+    .catch(() => { /* 网络问题：下次滑到附近再试 */ })
+    .finally(() => { if (loadingMore === p) loadingMore = null })
+  loadingMore = p
+  return p
 }
+
+/** 再点一次「短视频」Tab：换一批推荐、回到第一条（和抖音一样） */
+async function refresh() {
+  if (!visible || refreshing.value) return
+  if (!clips.value.length) return retry()
+  refreshing.value = true
+  const ok = await load()
+  refreshing.value = false
+  if (!ok && visible) toast('刷新失败，请稍后重试')
+}
+useTabRetap('short', refresh)
 
 /* ---------- 互动：状态在这里维护，子组件只负责显示 ---------- */
 
 /** 正在请求中的互动，避免连点导致计数错乱 */
 const pending = reactive(new Set())
 
-/** clips 是 shallowRef：改内部属性不会触发更新，所以整体替换那一条 */
-function patchClip(i, obj) {
-  clips.value = clips.value.map((c, j) => (j === i ? { ...c, ...obj } : c))
+/**
+ * clips 是 shallowRef：改内部属性不会触发更新，所以整体替换那一条。
+ * 按 feedKey 找：请求回来之前列表可能已经刷新过，那时这条已经不在了，什么也不做。
+ */
+function patchClip(key, obj) {
+  clips.value = clips.value.map(c => (c.feedKey === key ? { ...c, ...obj } : c))
 }
 
 /**
@@ -96,7 +204,8 @@ function patchClip(i, obj) {
  */
 async function interact(i, kind) {
   const clip = clips.value[i]
-  if (!clip || pending.has(`${i}:${kind}`)) return
+  const key = clip?.feedKey
+  if (!clip || pending.has(`${key}:${kind}`)) return
   if (!auth.requireLogin(location.hash.slice(1))) return   // 未登录：弹登录框
   const isLike = kind === 'like'
   const onField = isLike ? 'liked' : 'faved'
@@ -104,16 +213,16 @@ async function interact(i, kind) {
   const next = !clip[onField]
   const before = clip[countField] ?? 0
 
-  pending.add(`${i}:${kind}`)
-  patchClip(i, { [onField]: next, [countField]: before + (next ? 1 : -1) })
+  pending.add(`${key}:${kind}`)
+  patchClip(key, { [onField]: next, [countField]: before + (next ? 1 : -1) })
   try {
     if (isLike) await toggleVideoLike(clip.id, { on: next })
     else await toggleVideoFav(clip.id, { on: next })
   } catch {
-    patchClip(i, { [onField]: !next, [countField]: before })   // 回滚
+    patchClip(key, { [onField]: !next, [countField]: before })   // 回滚
     toast('操作失败，请稍后重试')
   } finally {
-    pending.delete(`${i}:${kind}`)
+    pending.delete(`${key}:${kind}`)
   }
 }
 
@@ -126,7 +235,7 @@ function onDislike(i) {
   if (!clip) return
   if (clip.liked) onLike(i)
   store.toggle(`dislike:short:${clip.id}`)
-  patchClip(i, {})   // 触发一次更新，让图标状态刷新
+  patchClip(clip.feedKey, {})   // 触发一次更新，让图标状态刷新
 }
 
 /* ---------- playback ---------- */
@@ -163,7 +272,7 @@ const onState = (i, playing) => { players.value[i].playing = playing }
 /* 文件打不开：这条退回封面 + 模拟进度 */
 function onFailed(i) {
   const clip = clips.value[i]
-  patchClip(i, { src: null })
+  patchClip(clip.feedKey, { src: null })
   players.value[i].len = clip.len || 0
   if (i === current) {
     toast('视频加载失败，已切换为预览')
@@ -171,11 +280,14 @@ function onFailed(i) {
   }
 }
 
+/* 长按边缘快进：真实视频由 ShortItem 改 playbackRate，模拟的这里按 2 倍推进；松手恢复 */
+const onBoost = (i, on) => { boosted = on ? i : boosted === i ? -1 : boosted }
+
 function tick() {
   const p = players.value[current]
   const clip = clips.value[current]
   if (!p || !p.playing || clip?.src) return
-  p.t = Math.min(p.len, p.t + (TICK_MS / 1000) * rate.value)
+  p.t = Math.min(p.len, p.t + (TICK_MS / 1000) * (boosted === current ? BOOST_RATE : rate.value))
   if (p.t >= p.len) finish(current)
 }
 
@@ -218,6 +330,7 @@ function observe(reset = true) {
       active.value = current
       advancingTo = -1
       play(current)
+      markSeen(clips.value[current]?.id)
       if (current >= clips.value.length - PRELOAD_AHEAD) loadMore()
     }
   }, { root: feed, threshold: 0.6 })
@@ -229,6 +342,7 @@ function observe(reset = true) {
 
 function stop() {
   visible = false
+  boosted = -1
   clearInterval(timer)
   timer = 0
   io?.disconnect()
@@ -304,34 +418,43 @@ function setSpeed(speed) {
       </div>
     </div>
 
+    <div v-show="refreshing" class="sv-refresh" role="status"><Icon name="refresh" />正在刷新</div>
+
     <div ref="feed" class="scroll sv-feed">
-      <ShortItem
-        v-for="(clip, i) in clips"
-        :key="clip.id"
-        :data-index="i"
-        :clip="clip"
-        :liked="!!clip.liked"
-        :faved="!!clip.faved"
-        :likes="clip.likes ?? clip.like ?? 0"
-        :favs="clip.favs ?? clip.fav ?? 0"
-        :time="players[i].t"
-        :len="players[i].len"
-        :playing="players[i].playing"
-        :eager="i === 0"
-        :near="Math.abs(i - active) <= 1"
-        @toggle="toggle(i)"
-        @seek="t => seek(i, t)"
-        @time="t => onTime(i, t)"
-        @duration="d => onDuration(i, d)"
-        @state="on => onState(i, on)"
-        @ended="finish(i)"
-        @failed="onFailed(i)"
-        @unmute="setMuted(false)"
-        @like="onLike(i)"
-        @dislike="onDislike(i)"
-        @fav="onFav(i)"
-        @settings="settingsOpen = true"
-      />
+      <!-- 每条一个整屏的格子；只有当前这条附近的才真正渲染，其余是空格子（滚动位置不受影响） -->
+      <div v-for="(clip, i) in clips" :key="clip.feedKey" class="sv-slot" :data-index="i">
+        <ShortItem
+          v-if="Math.abs(i - active) <= RENDER_AROUND"
+          :clip="clip"
+          :liked="!!clip.liked"
+          :faved="!!clip.faved"
+          :likes="clip.likes ?? clip.like ?? 0"
+          :favs="clip.favs ?? clip.fav ?? 0"
+          :time="players[i].t"
+          :len="players[i].len"
+          :playing="players[i].playing"
+          :eager="Math.abs(i - active) <= 1"
+          :near="Math.abs(i - active) <= 1"
+          @toggle="toggle(i)"
+          @seek="t => seek(i, t)"
+          @boost="on => onBoost(i, on)"
+          @time="t => onTime(i, t)"
+          @duration="d => onDuration(i, d)"
+          @state="on => onState(i, on)"
+          @ended="finish(i)"
+          @failed="onFailed(i)"
+          @unmute="setMuted(false)"
+          @like="onLike(i)"
+          @dislike="onDislike(i)"
+          @fav="onFav(i)"
+          @settings="settingsOpen = true"
+        />
+      </div>
+      <div v-if="failed" class="empty sv-empty">
+        加载失败，请稍后重试
+        <button class="retry" type="button" @click="retry">重试</button>
+      </div>
+      <div v-else-if="!loading && !clips.length" class="empty sv-empty">还没有视频</div>
     </div>
 
     <BottomSheet v-model:open="settingsOpen" title="播放设置">
@@ -384,6 +507,38 @@ function setSpeed(speed) {
   position: relative;
   scroll-snap-type: y mandatory;
   background: #000;
+}
+.sv-slot {
+  height: 100%;
+  scroll-snap-align: start;
+  scroll-snap-stop: always;
+}
+.sv-empty { position: absolute; left: 0; right: 0; top: 30%; padding: 0; }
+
+/* 再点一次「短视频」Tab：顶部的刷新提示 */
+.sv-refresh {
+  position: absolute;
+  left: 50%;
+  top: calc(var(--safe-t) + 62px);
+  z-index: 7;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 14px 0 11px;
+  border-radius: 15px;
+  background: rgba(22, 22, 22, .72);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+.sv-refresh svg { width: 15px; height: 15px; stroke-width: 2.4; animation: rot .8s linear infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .sv-refresh svg { animation: none; }
 }
 
 /* overlay above the feed: only its controls take taps */

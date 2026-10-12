@@ -157,11 +157,15 @@ await t('诊断：确认 userToken 仍然有效', async () => {
   return `user1=${me.json.data.uid}`
 })
 
+/* 短视频推荐流按 seed 排序：固定一个 seed，同一用户每次拿到的顺序一样（第二页 = 同一顺序的第 3、4 条） */
+const SHORTS = '/api/shorts?seed=auth-test&limit=50'
+const SHORTS_P2 = '/api/shorts?seed=auth-test&limit=2&offset=2'
+
 await t('已登录：可以点赞并写入数据库', async () => {
-  const before = (await req('GET', '/api/shorts', { token: userToken })).json.data[0]
+  const before = (await req('GET', SHORTS, { token: userToken })).json.data.list[0]
   const r = await req('POST', `/api/videos/${before.id}/like`, { token: userToken })
   must(r.status === 200 && r.json.data.active === true, JSON.stringify(r.json))
-  const after = (await req('GET', '/api/shorts', { token: userToken })).json.data.find(s => s.id === before.id)
+  const after = (await req('GET', SHORTS, { token: userToken })).json.data.list.find(s => s.id === before.id)
   must(after.likeCount === before.likeCount + 1, `计数没变：${before.likeCount} -> ${after.likeCount}`)
   must(after.liked === true, '列表里没带上 liked 状态')
   return `${before.likeCount} -> ${after.likeCount}`
@@ -169,30 +173,30 @@ await t('已登录：可以点赞并写入数据库', async () => {
 
 await t('已登录：取消点赞后计数复原', async () => {
   // 自己建立前置状态（用第二条视频，避免和别的用例互相影响）
-  const id = (await req('GET', '/api/shorts', { token: userToken })).json.data[1].id
-  const base = (await req('GET', '/api/shorts', { token: userToken })).json.data.find(s => s.id === id)
+  const id = (await req('GET', SHORTS, { token: userToken })).json.data.list[1].id
+  const base = (await req('GET', SHORTS, { token: userToken })).json.data.list.find(s => s.id === id)
   must(base.liked === false, '前置状态：这条视频应该是未点赞')
   await req('POST', `/api/videos/${id}/like`, { token: userToken })
-  const liked = (await req('GET', '/api/shorts', { token: userToken })).json.data.find(s => s.id === id)
+  const liked = (await req('GET', SHORTS, { token: userToken })).json.data.list.find(s => s.id === id)
   if (liked.liked !== true) {
-    const all = (await req('GET', '/api/shorts', { token: userToken })).json.data.map(s => `${s.id}:${s.liked}`).join(' ')
+    const all = (await req('GET', SHORTS, { token: userToken })).json.data.list.map(s => `${s.id}:${s.liked}`).join(' ')
     const act = await req('POST', `/api/videos/${id}/like`, { token: userToken })
     throw new Error(`liked 状态没变（id=${id}）；当前所有: ${all}；再点一次返回 ${JSON.stringify(act.json)}`)
   }
 must(liked.likeCount === base.likeCount + 1, `计数没变：${base.likeCount} -> ${liked.likeCount}`)
 
   await req('POST', `/api/videos/${id}/like`, { token: userToken })
-  const after = (await req('GET', '/api/shorts', { token: userToken })).json.data.find(s => s.id === id)
+  const after = (await req('GET', SHORTS, { token: userToken })).json.data.list.find(s => s.id === id)
   must(after.likeCount === base.likeCount, `${liked.likeCount} -> ${after.likeCount}，期望回到 ${base.likeCount}`)
   must(after.liked === false, '状态没有回到未点赞')
   return `${base.likeCount} -> ${liked.likeCount} -> ${after.likeCount}`
 })
 
 await t('状态隔离：两个用户的点赞互不影响', async () => {
-  const id = (await req('GET', '/api/shorts', { token: userToken })).json.data[1].id
+  const id = (await req('GET', SHORTS, { token: userToken })).json.data.list[1].id
   await req('POST', `/api/videos/${id}/like`, { token: userToken })
-  const asAdmin = (await req('GET', '/api/shorts', { token: adminToken })).json.data.find(s => s.id === id)
-  const asUser = (await req('GET', '/api/shorts', { token: userToken })).json.data.find(s => s.id === id)
+  const asAdmin = (await req('GET', SHORTS, { token: adminToken })).json.data.list.find(s => s.id === id)
+  const asUser = (await req('GET', SHORTS, { token: userToken })).json.data.list.find(s => s.id === id)
   must(asUser.liked === true, 'user1 应该是已点赞')
   must(asAdmin.liked === false, 'admin 不应该被影响')
   await req('POST', `/api/videos/${id}/like`, { token: userToken })
@@ -201,15 +205,15 @@ await t('状态隔离：两个用户的点赞互不影响', async () => {
 
 await t('已登录：短视频翻页后点赞状态照样回填', async () => {
   // 前端短视频流按 offset 翻页，后面几页也要带上当前用户的 liked
-  const all = (await req('GET', '/api/shorts?limit=50', { token: userToken })).json.data
+  const all = (await req('GET', SHORTS, { token: userToken })).json.data.list
   must(all.length >= 4, `短视频只有 ${all.length} 条`)
   const target = all[3]
   must(target.liked === false, '前置状态：这条视频应该是未点赞')
   await req('POST', `/api/videos/${target.id}/like`, { token: userToken, body: { on: true } })
-  const page = (await req('GET', '/api/shorts?limit=2&offset=2', { token: userToken })).json.data
+  const page = (await req('GET', SHORTS_P2, { token: userToken })).json.data.list
   const hit = page.find(s => s.id === target.id)
   must(hit && hit.liked === true, '第二页里没有带上 liked：' + JSON.stringify(page.map(s => `${s.id}:${s.liked}`)))
-  const anon = (await req('GET', '/api/shorts?limit=2&offset=2')).json.data.find(s => s.id === target.id)
+  const anon = (await req('GET', SHORTS)).json.data.list.find(s => s.id === target.id)
   must(anon && anon.liked === false, '未登录时不应带上别人的 liked')
   await req('POST', `/api/videos/${target.id}/like`, { token: userToken, body: { on: false } })
   return `#${target.id} 在第二页 liked=true`

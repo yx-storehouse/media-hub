@@ -38,6 +38,8 @@ export const icons = {
     body: '<path d="M16 5.2A10.8 10.8 0 1 0 26.8 16" stroke-width="1.9"/><path d="M16 1.2l4.6 4-4.6 4" stroke-width="1.9"/><text x="16" y="20.6" text-anchor="middle" font-size="9.6" font-weight="700" fill="currentColor" stroke="none" font-family="-apple-system,Arial,sans-serif">10</text>'
   },
   /* video player */
+  // 长按快进的提示（双箭头）
+  ffwd: s('<path d="m4.5 6 6 6-6 6M12.5 6l6 6-6 6"/>'),
   pause: f('<rect x="6" y="4.6" width="4.2" height="14.8" rx="1.2" fill="currentColor"/><rect x="13.8" y="4.6" width="4.2" height="14.8" rx="1.2" fill="currentColor"/>'),
   cog: s('<circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.6 1.6 0 0 0-1-1.5 1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.6 1.6 0 0 0 1.5-1 1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z"/>'),
   loop: s('<path d="M17 2.5 20.5 6 17 9.5"/><path d="M3.5 11.5V10a4 4 0 0 1 4-4h13"/><path d="M7 21.5 3.5 18 7 14.5"/><path d="M20.5 12.5V14a4 4 0 0 1-4 4h-13"/>'),
