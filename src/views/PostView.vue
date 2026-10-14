@@ -47,7 +47,12 @@ import Cover from '@/components/Cover.vue'
 import Icon from '@/components/Icon.vue'
 import ImageViewer from '@/components/ImageViewer.vue'
 import UnfollowSheet from '@/components/creator/UnfollowSheet.vue'
+import FollowBtn from '@/components/creator/FollowBtn.vue'
+import ActBurst from '@/components/video/ActBurst.vue'
+import RollNum from '@/components/video/RollNum.vue'
 import { rememberVideo } from '@/components/video/preview'
+import { haptic } from '@/utils/motion'
+import { cameBack, pop, vRise } from '@/components/home/motion'
 
 /*
  * 帖子详情：作者栏（关注）→ 标题、关联视频（紧跟标题）、正文、配图、话题、发布时间 →「下一篇」，底部是阅读数 / 分享 / 收藏。
@@ -61,6 +66,8 @@ const auth = useAuthStore()
 const postStore = usePostStore()
 /* 直接打开（没有上一页）时返回社区 */
 const back = useBack('/community')
+/* 按返回回到这一篇：恢复出来的内容不播入场 */
+cameBack()
 
 /** PostDetail（见 src/api/index.js） */
 const post = shallowRef(null)
@@ -164,6 +171,9 @@ function onImage(i, e) {
 }
 
 const openImage = i => { viewer.value = { images: post.value?.images || [], index: i } }
+/* 大图从点的那张配图放大出来、关掉时缩回去 */
+const imgBtns = []
+const imageEl = i => imgBtns[i] || null
 
 /* ---------- 关注 / 收藏：乐观更新 → 一次请求（带明确的 on）→ 以返回为准，失败回滚并提示 ---------- */
 
@@ -200,7 +210,10 @@ function onFollow() {
   if (!a || a.id == null || followBusy) return
   if (!auth.requireLogin({ then: followAfterLogin })) return // 未登录：弹登录框，登录后自动关注
   if (following.value) unfollowAsk.value = true // 取消关注先确认
-  else setFollow(true)
+  else {
+    haptic()
+    setFollow(true)
+  }
 }
 
 async function setFav(on) {
@@ -221,11 +234,20 @@ async function favAfterLogin() {
   else setFav(true)
 }
 
+/* 点了收藏：胶囊变色，图标立刻弹一下（点亮时回弹 + 冒一圈小点 + 轻震，取消时轻轻一缩），数字翻过去 */
+const favIcon = ref(null)
+const favBurst = ref(0)
 function onFav() {
   const p = post.value
   if (!p || postStore.isPending(p.id)) return
   if (!auth.requireLogin({ then: favAfterLogin })) return
-  setFav(!stats.value.faved)
+  const next = !stats.value.faved
+  pop(favIcon.value?.$el, next)
+  if (next) {
+    favBurst.value++
+    haptic()
+  }
+  setFav(next)
 }
 
 /* ---------- 返回恢复 ---------- */
@@ -284,7 +306,7 @@ onBeforeRouteUpdate(to => {
     <header class="pd-hd">
       <button type="button" class="pd-back hit-44" aria-label="返回" @click="back"><Icon name="chevL" /></button>
       <template v-if="post">
-        <component :is="authorLink ? RouterLink : 'div'" class="pd-author" v-bind="authorLink || {}">
+        <component :is="authorLink ? RouterLink : 'div'" v-rise.self="{ y: 0 }" class="pd-author" v-bind="authorLink || {}">
           <Cover class="pd-av" v-bind="author?.avatar || {}" eager />
           <div class="pd-who">
             <div class="pd-nm">
@@ -298,18 +320,14 @@ onBeforeRouteUpdate(to => {
             </div>
           </div>
         </component>
-        <button
+        <FollowBtn
           v-if="author && author.id != null"
-          type="button"
+          v-rise.self="{ y: 0 }"
           class="pd-follow"
-          :class="{ on: following }"
-          :aria-pressed="following"
+          :on="following"
           :aria-label="following ? `已关注 ${author.name}，点按取消关注` : `关注 ${author.name}`"
           @click="onFollow"
-        >
-          <template v-if="following">已关注</template>
-          <template v-else><Icon name="plus" />关注</template>
-        </button>
+        />
       </template>
       <!-- 加载中：作者栏骨架 -->
       <template v-else-if="!failed">
@@ -322,97 +340,104 @@ onBeforeRouteUpdate(to => {
     </header>
 
     <div ref="scroller" class="scroll" :aria-busy="!post && !failed" @scroll.passive="onScroll">
-      <div v-if="failed" class="empty">
-        {{ failed.message }}
-        <button v-if="failed.retry" type="button" class="retry" @click="load(route.params.id)">重试</button>
-      </div>
-
-      <template v-else-if="post">
-        <article class="pd-body">
-          <h1 class="pd-title">{{ post.title }}</h1>
-
-          <!-- 视频帖：视频紧跟标题，点了去播放页（不用先翻过正文和所有配图） -->
-          <RouterLink v-if="post.video" class="pd-video" :to="videoTo(post.video)" @click="rememberVideo(post.video)" :aria-label="`播放视频：${post.video.title || post.title}`">
-            <Cover class="pd-vcv" v-bind="post.video.cover">
-              <span class="pl"><Icon name="play" /></span>
-              <span v-if="post.video.dur" class="dur">{{ post.video.dur }}</span>
-            </Cover>
-          </RouterLink>
-
-          <!-- 正文：网址、邮箱、电话是链接（只切成文字和链接片段，不拼 HTML） -->
-          <div v-if="paragraphs.length" class="pd-text">
-            <p v-for="(para, i) in paragraphs" :key="i">
-              <template v-for="(seg, k) in para" :key="k">
-                <a
-                  v-if="seg.href"
-                  class="pd-link"
-                  :href="seg.href"
-                  :target="seg.external ? '_blank' : undefined"
-                  :rel="seg.external ? 'noopener noreferrer' : undefined"
-                >{{ seg.text }}</a>
-                <template v-else>{{ seg.text }}</template>
-              </template>
-            </p>
+      <!-- 骨架原地淡出，正文浮现；「下一篇」时旧的一篇淡出、骨架接上 -->
+      <div class="m-swap">
+        <Transition name="m-skel">
+          <div v-if="failed" class="empty">
+            {{ failed.message }}
+            <button v-if="failed.retry" type="button" class="retry" @click="load(route.params.id)">重试</button>
           </div>
 
-          <!-- 配图：点开全屏看大图 -->
-          <div v-if="post.images?.length" class="pd-imgs">
-            <button
-              v-for="(img, i) in post.images"
-              :key="i"
-              type="button"
-              class="pd-img-b"
-              :aria-label="`查看大图：第 ${i + 1} 张，共 ${post.images.length} 张`"
-              @click="openImage(i)"
-            >
-              <Cover
-                class="pd-img"
-                v-bind="img"
-                :style="{ aspectRatio: ratios[i] || '4 / 3' }"
-                @load="onImage(i, $event)"
-              />
-            </button>
+          <div v-else-if="post" :key="`post${post.id}`" v-rise.self>
+            <article class="pd-body">
+              <h1 class="pd-title">{{ post.title }}</h1>
+
+              <!-- 视频帖：视频紧跟标题，点了去播放页（不用先翻过正文和所有配图） -->
+              <RouterLink v-if="post.video" class="pd-video m-hold" :to="videoTo(post.video)" @click="rememberVideo(post.video)" :aria-label="`播放视频：${post.video.title || post.title}`">
+                <Cover class="pd-vcv" v-bind="post.video.cover">
+                  <span class="pl"><Icon name="play" /></span>
+                  <span v-if="post.video.dur" class="dur">{{ post.video.dur }}</span>
+                </Cover>
+              </RouterLink>
+
+              <!-- 正文：网址、邮箱、电话是链接（只切成文字和链接片段，不拼 HTML） -->
+              <div v-if="paragraphs.length" class="pd-text">
+                <p v-for="(para, i) in paragraphs" :key="i">
+                  <template v-for="(seg, k) in para" :key="k">
+                    <a
+                      v-if="seg.href"
+                      class="pd-link"
+                      :href="seg.href"
+                      :target="seg.external ? '_blank' : undefined"
+                      :rel="seg.external ? 'noopener noreferrer' : undefined"
+                    >{{ seg.text }}</a>
+                    <template v-else>{{ seg.text }}</template>
+                  </template>
+                </p>
+              </div>
+
+              <!-- 配图：点开全屏看大图 -->
+              <div v-if="post.images?.length" class="pd-imgs">
+                <button
+                  v-for="(img, i) in post.images"
+                  :key="i"
+                  :ref="el => { imgBtns[i] = el }"
+                  type="button"
+                  class="pd-img-b m-hold"
+                  :aria-label="`查看大图：第 ${i + 1} 张，共 ${post.images.length} 张`"
+                  @click="openImage(i)"
+                >
+                  <Cover
+                    class="pd-img"
+                    v-bind="img"
+                    :style="{ aspectRatio: ratios[i] || '4 / 3' }"
+                    @load="onImage(i, $event)"
+                  />
+                </button>
+              </div>
+
+              <div v-if="tags.length" class="pd-tags">
+                <RouterLink v-for="t in tags" :key="t" class="pd-tag" :to="searchTo(t)">#{{ t }}</RouterLink>
+              </div>
+              <div v-if="post.time" class="pd-time">{{ post.time }}</div>
+            </article>
+
+            <hr class="pd-div">
+            <!-- 下一篇替换当前记录：连着往下看几篇，返回键仍然直接回到进来之前的页面 -->
+            <RouterLink v-if="post.next" class="pd-next m-press" :to="postTo(post.next.id)" replace>
+              <div class="nx">
+                <span class="lb">下一篇</span>
+                <span class="tt2">{{ post.next.title }}</span>
+              </div>
+              <Cover v-if="post.next.thumb" class="th" v-bind="post.next.thumb" />
+            </RouterLink>
+            <div v-else class="pd-end">已经是最后一篇了</div>
+            <div class="pad-b" />
           </div>
 
-          <div v-if="tags.length" class="pd-tags">
-            <RouterLink v-for="t in tags" :key="t" class="pd-tag" :to="searchTo(t)">#{{ t }}</RouterLink>
+          <div v-else class="pd-body" aria-hidden="true">
+            <!-- 加载中：正文骨架 -->
+            <div class="sk sk-t" />
+            <div class="sk sk-t" style="width: 62%" />
+            <div class="sk sk-p" />
+            <div class="sk sk-p" />
+            <div class="sk sk-p" style="width: 80%" />
+            <div class="sk sk-img" />
           </div>
-          <div v-if="post.time" class="pd-time">{{ post.time }}</div>
-        </article>
-
-        <hr class="pd-div">
-        <!-- 下一篇替换当前记录：连着往下看几篇，返回键仍然直接回到进来之前的页面 -->
-        <RouterLink v-if="post.next" class="pd-next" :to="postTo(post.next.id)" replace>
-          <div class="nx">
-            <span class="lb">下一篇</span>
-            <span class="tt2">{{ post.next.title }}</span>
-          </div>
-          <Cover v-if="post.next.thumb" class="th" v-bind="post.next.thumb" />
-        </RouterLink>
-        <div v-else class="pd-end">已经是最后一篇了</div>
-        <div class="pad-b" />
-      </template>
-
-      <!-- 加载中：正文骨架 -->
-      <div v-else class="pd-body" aria-hidden="true">
-        <div class="sk sk-t" />
-        <div class="sk sk-t" style="width: 62%" />
-        <div class="sk sk-p" />
-        <div class="sk sk-p" />
-        <div class="sk sk-p" style="width: 80%" />
-        <div class="sk sk-img" />
+        </Transition>
       </div>
     </div>
 
     <footer v-if="post" class="pd-bar">
       <span class="pd-read">阅读 {{ formatCount(stats.read) }}</span>
-      <button type="button" class="pd-share" aria-label="分享" @click="share({ title: post.title })"><Icon name="shareUp" /></button>
-      <button type="button" class="pd-fav" :class="{ on: stats.faved }" :aria-pressed="stats.faved" @click="onFav">
-        <Icon name="bookmark" /><span>收藏 {{ formatCount(stats.fav) }}</span>
+      <button type="button" class="pd-share m-press-sm" aria-label="分享" @click="share({ title: post.title })"><Icon name="shareUp" /></button>
+      <button type="button" class="pd-fav m-press" :class="{ on: stats.faved }" :aria-pressed="stats.faved" @click="onFav">
+        <span class="ico"><Icon ref="favIcon" name="bookmark" /><ActBurst v-if="favBurst" :key="favBurst" @done="favBurst = 0" /></span>
+        <span>收藏 <RollNum :value="formatCount(stats.fav)" :n="stats.fav" /></span>
       </button>
     </footer>
 
-    <ImageViewer v-if="viewer" :images="viewer.images" :index="viewer.index" @close="viewer = null" />
+    <ImageViewer v-if="viewer" :images="viewer.images" :index="viewer.index" :origin="imageEl" @close="viewer = null" />
     <UnfollowSheet v-model:open="unfollowAsk" :name="author?.name || ''" @confirm="setFollow(false)" />
   </div>
 </template>
@@ -432,21 +457,18 @@ onBeforeRouteUpdate(to => {
 .pd-sub .hd { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .pd-sub .tm { flex: none; }
 .pd-sub .hd + .tm::before { content: '·'; padding: 0 4px; }
+/* 关注按钮（FollowBtn）：两种文字叠在一格里，宽度不跳 */
 .pd-follow {
-  display: flex;
   flex: none;
-  align-items: center;
-  gap: 3px;
   height: 32px;
-  padding: 0 15px 0 12px;
+  padding: 0 14px;
   border-radius: 16px;
   background: var(--accent);
   color: var(--on-accent);
   font-size: 14px;
   font-weight: 700;
 }
-.pd-follow svg { width: 14px; height: 14px; stroke-width: 3; }
-.pd-follow.on { padding: 0 14px; background: var(--chip); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .1); color: var(--t2); font-weight: 500; }
+.pd-follow.on { background: var(--chip); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .1); color: var(--t2); }
 
 /* ---------- 正文 ---------- */
 .pd-body { padding: 14px 16px 0; }
@@ -458,10 +480,12 @@ onBeforeRouteUpdate(to => {
 
 .pd-imgs { display: flex; flex-direction: column; gap: 14px; margin-top: 16px; }
 .pd-img-b { display: block; width: 100%; border-radius: 12px; cursor: zoom-in; }
-.pd-img { width: 100%; border-radius: 12px; filter: var(--media); }
+.pd-img { width: 100%; border-radius: 12px; filter: var(--media); transition: opacity var(--dur-2) var(--ease-out); }
+.pd-img-b.m-pressed .pd-img { opacity: .85; transition-duration: var(--dur-1); }
 
 .pd-video { display: block; margin-top: 14px; border-radius: 12px; }
-.pd-vcv { aspect-ratio: 16 / 9; border-radius: 12px; filter: var(--media); }
+.pd-vcv { aspect-ratio: 16 / 9; border-radius: 12px; filter: var(--media); transition: opacity var(--dur-2) var(--ease-out); }
+.pd-video.m-pressed .pd-vcv { opacity: .85; transition-duration: var(--dur-1); }
 .pd-vcv .pl {
   position: absolute;
   left: 50%;
@@ -481,7 +505,8 @@ onBeforeRouteUpdate(to => {
 .pd-vcv .dur { right: 10px; bottom: 10px; height: 22px; padding: 0 7px; font-size: 12px; line-height: 22px; }
 
 .pd-tags { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 16px; }
-.pd-tag { color: var(--accent); font-size: 15px; font-weight: 500; line-height: 26px; }
+.pd-tag { color: var(--accent); font-size: 15px; font-weight: 500; line-height: 26px; transition: opacity var(--dur-1) var(--ease-out); }
+.pd-tag:active { opacity: .6; }
 .pd-time { margin-top: 10px; color: var(--t2); font-size: 13px; line-height: 18px; }
 
 .pd-div { height: 1px; margin: 18px 0 16px; border: 0; background: var(--line); }
@@ -496,8 +521,10 @@ onBeforeRouteUpdate(to => {
   border-radius: 14px;
   background: var(--panel);
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .06);
+  transition: background-color var(--dur-2) var(--ease-out);
 }
-.pd-next:active { background: #171717; }
+/* 按下去立刻缩一点（全局 m-press）、底色变亮 */
+.pd-next.m-pressed { background: #171717; transition-duration: var(--dur-1); }
 .pd-next .nx { flex: 1; min-width: 0; }
 .pd-next .lb { display: block; color: var(--accent); font-size: 13px; font-weight: 700; line-height: 18px; }
 .pd-next .tt2 {
@@ -526,9 +553,9 @@ onBeforeRouteUpdate(to => {
   background: var(--bg);
 }
 .pd-read { margin-right: auto; overflow: hidden; color: var(--t2); font-size: 14px; white-space: nowrap; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
-.pd-share { display: grid; flex: none; place-items: center; width: 44px; height: 44px; border-radius: 50%; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .16); }
+.pd-share { display: grid; flex: none; place-items: center; width: 44px; height: 44px; border-radius: 50%; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .16); transition: background-color var(--dur-2) var(--ease-out); }
 .pd-share svg { width: 19px; height: 19px; stroke-width: 1.9; }
-.pd-share:active { background: var(--chip); }
+.pd-share.m-pressed { background: var(--chip); transition-duration: var(--dur-1); }
 .pd-fav {
   display: flex;
   flex: none;
@@ -543,10 +570,13 @@ onBeforeRouteUpdate(to => {
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+  transition: background-color var(--dur-2) var(--ease-out), color var(--dur-2) var(--ease-out);
 }
-.pd-fav svg { width: 18px; height: 18px; stroke-width: 2.2; }
+/* 收藏后胶囊填满、图标弹一下（按压缩放是全局 m-press） */
+.pd-fav .ico { position: relative; display: block; }
+.pd-fav svg { width: 18px; height: 18px; stroke-width: 2.2; fill: currentColor; fill-opacity: 0; transition: fill-opacity var(--dur-1) var(--ease-out); }
 .pd-fav.on { background: var(--accent); color: var(--on-accent); }
-.pd-fav.on svg { fill: currentColor; }
+.pd-fav.on svg { fill-opacity: 1; }
 
 /* ---------- 骨架 ---------- */
 .sk { border-radius: 6px; background: #161616; animation: sk 1.2s ease-in-out infinite; }

@@ -15,6 +15,7 @@ import { formatClock } from '@/utils/format'
 import Icon from '@/components/Icon.vue'
 import Cover from '@/components/Cover.vue'
 import BottomSheet from '@/components/BottomSheet.vue'
+import RollNum from './RollNum.vue'
 
 /*
  * 播放页的播放器。
@@ -86,13 +87,18 @@ const loop = computed(() => store.playback.loop)
 /** 倍速不是 1.0x 时显示在设置按钮旁边，免得忘了自己调过 */
 const rateLabel = computed(() => (store.playback.speed !== '1.0x' ? store.playback.speed : ''))
 const qualityLabel = computed(() => QUALITY[props.video.quality] || '')
-const progress = computed(() => (duration.value ? `${(current.value / duration.value) * 100}%` : '0%'))
+/** 进度百分比（0–100）：已播部分和圆点都用 transform 移动，播放中不触发重新排版 */
+const pct = computed(() => (duration.value ? Math.min(100, (current.value / duration.value) * 100) : 0))
+/** 正在拖进度条：线变粗、圆点变大 */
+const seeking = ref(false)
 const canPip = typeof document !== 'undefined' && (!!document.pictureInPictureEnabled ||
   (typeof HTMLVideoElement !== 'undefined' && 'webkitSetPresentationMode' in HTMLVideoElement.prototype))
 
 /* 伪全屏和弹层一样跟随返回键：按返回先退出伪全屏 */
 useBackDismiss(pseudoFs)
 
+/* iOS Safari 只有挂了 touchstart 监听的区域才会出现 :active 按压效果 */
+const noop = () => {}
 /* ---------- 播放 / 暂停 ---------- */
 
 let started = false
@@ -172,6 +178,33 @@ function stopCountdown() {
   cdTimer = 0
   countdown.value = 0
 }
+
+/*
+ * 倒计时的圆环：每过一秒往前走一格（1 秒匀速过渡），和数字同步；
+ * 倒计时停住时（切后台、开着设置面板）圆环也停在这一秒的末尾，回来接着走。
+ * 刚开始时先画出空环，下一帧再走第一格，否则第一格没有过渡。
+ */
+const ringStep = ref(0)
+let ringRaf = 0
+watch(countdown, n => {
+  cancelAnimationFrame(ringRaf)
+  if (!n) {
+    ringStep.value = 0
+    return
+  }
+  const step = AUTO_NEXT_SEC - n + 1
+  if (n < AUTO_NEXT_SEC) {
+    ringStep.value = step
+    return
+  }
+  ringStep.value = 0
+  ringRaf = requestAnimationFrame(() => {
+    ringRaf = requestAnimationFrame(() => { if (countdown.value === n) ringStep.value = step })
+  })
+})
+/** 圆环周长（r = 16），用来算描边的偏移 */
+const RING_C = 2 * Math.PI * 16
+const ringOffset = computed(() => RING_C * (1 - ringStep.value / AUTO_NEXT_SEC))
 function cancelCountdown() {
   cdCancelled = true
   stopCountdown()
@@ -209,7 +242,7 @@ function onMeta(e) {
 }
 let lastTick = 0
 function onTime(e) {
-  if (dragging) return
+  if (seeking.value) return
   current.value = e.target.currentTime
   if (playing.value && Math.abs(current.value - lastTick) >= TICK_SEC) {
     lastTick = current.value
@@ -280,24 +313,23 @@ function onFocusIn(e) {
 
 /* ---------- 进度条：拖动 + 键盘（可点区域比看到的线高，见 .seek::before） ---------- */
 
-let dragging = false
 function ratioAt(e) {
   const r = seekEl.value.getBoundingClientRect()
   return Math.max(0, Math.min(1, (e.clientX - r.left) / r.width))
 }
 function startSeek(e) {
   if (!duration.value) return
-  dragging = true
+  seeking.value = true
   seekEl.value.setPointerCapture(e.pointerId)
   current.value = ratioAt(e) * duration.value
   clearTimeout(hideTimer)
 }
 function moveSeek(e) {
-  if (dragging) current.value = ratioAt(e) * duration.value
+  if (seeking.value) current.value = ratioAt(e) * duration.value
 }
 function endSeek(e) {
-  if (!dragging) return
-  dragging = false
+  if (!seeking.value) return
+  seeking.value = false
   seekTo(ratioAt(e) * duration.value)
   showUi()
 }
@@ -327,11 +359,24 @@ function openSettings() {
 function setSpeed(s) {
   store.playback.speed = s
   toast(`已切换为 ${s} 倍速`)
+  flashChip(`${s} 倍速`)
   sheetOpen.value = false
 }
 function toggleLoop() {
   store.playback.loop = !store.playback.loop
   toast(store.playback.loop ? '已开启循环播放' : '已关闭循环播放')
+  flashChip(store.playback.loop ? '循环播放 开' : '循环播放 关')
+}
+
+/* 全屏时提示条（toast）在全屏元素外面看不见：在画面上方弹一个小标签，说一下改成了什么 */
+const chip = ref(null)
+let chipTimer = 0
+const CHIP_MS = 1200
+function flashChip(text) {
+  if (!isFs.value) return
+  chip.value = { text, key: (chip.value?.key || 0) + 1 }
+  clearTimeout(chipTimer)
+  chipTimer = setTimeout(() => { chip.value = null }, CHIP_MS)
 }
 function toggleAutoNext() {
   store.playback.autoNext = !store.playback.autoNext
@@ -452,8 +497,10 @@ onMounted(() => {
 onBeforeUnmount(() => {
   report('leave')
   stopCountdown()
+  cancelAnimationFrame(ringRaf)
   clearTimeout(hideTimer)
   clearTimeout(tipTimer)
+  clearTimeout(chipTimer)
   document.removeEventListener('fullscreenchange', onFullscreenChange)
   document.removeEventListener('webkitfullscreenchange', onFullscreenChange)
   document.removeEventListener('visibilitychange', onVisibility)
@@ -479,9 +526,10 @@ onBeforeUnmount(() => {
   <div
     ref="box"
     class="player"
-    :class="{ 'ui-on': uiVisible || !playing, fs: isFs, pseudo: pseudoFs, nosrc: !hasSource, ended }"
+    :class="{ 'ui-on': uiVisible || !playing, fs: isFs, pseudo: pseudoFs, nosrc: !hasSource, ended, seeking }"
     @click="onSurfaceTap"
     @focusin="onFocusIn"
+    @touchstart.passive="noop"
   >
     <video
       v-if="hasSource"
@@ -522,10 +570,17 @@ onBeforeUnmount(() => {
     </div>
 
     <template v-else>
-      <button v-show="!playing && !ended" type="button" class="big-play" :aria-label="failed ? '重新加载' : '播放'" @click.stop="play">
-        <Icon :name="failed ? 'refresh' : 'play'" :class="{ retry: failed }" />
-      </button>
+      <!-- 暂停时播放键从略大轻轻落到位；开始播放时放大淡出 -->
+      <Transition name="bp">
+        <button v-show="!playing && !ended" type="button" class="big-play" :aria-label="failed ? '重新加载' : '播放'" @click.stop="play">
+          <Icon :name="failed ? 'refresh' : 'play'" :class="{ retry: failed }" />
+        </button>
+      </Transition>
       <span v-if="failed && !playing" class="fail-tip" role="status">视频暂时无法播放，点击重试</span>
+      <!-- 全屏时改倍速 / 循环：画面上方弹一个小标签（提示条在全屏里看不见） -->
+      <Transition name="chip">
+        <span v-if="chip" :key="chip.key" class="chip-tip" role="status">{{ chip.text }}</span>
+      </Transition>
       <div v-if="waiting && playing" class="spinner" aria-hidden="true" />
 
       <!-- 续播提示：从上次的位置接着播，可以一键从头 -->
@@ -543,7 +598,13 @@ onBeforeUnmount(() => {
             <span v-if="next.hint" class="hint">· {{ next.hint }}</span>
           </div>
           <button type="button" class="end-next" :aria-label="`播放下一个：${next.video.title}`" @click="goNext(false)">
-            <Cover class="end-cv" v-bind="next.video.cover || {}" />
+            <Cover class="end-cv" v-bind="next.video.cover || {}">
+              <!-- 倒计时：封面中间一圈慢慢走满，走满就播 -->
+              <span v-if="countdown" class="cd" aria-hidden="true">
+                <svg viewBox="0 0 36 36"><circle class="cd-bg" cx="18" cy="18" r="16" /><circle class="cd-fg" cx="18" cy="18" r="16" :stroke-dasharray="RING_C" :style="{ strokeDashoffset: ringOffset }" /></svg>
+                <Icon name="play" />
+              </span>
+            </Cover>
             <span class="end-tt">{{ next.video.title }}</span>
           </button>
           <div class="end-btns">
@@ -556,7 +617,7 @@ onBeforeUnmount(() => {
       </div>
 
       <!-- 控制栏隐藏时，底部留一条细进度线 -->
-      <div class="mini" aria-hidden="true"><i :style="{ width: progress }" /></div>
+      <div class="mini" aria-hidden="true"><i :style="{ transform: `translateX(${pct - 100}%)` }" /></div>
 
       <div class="bar" @click.stop>
         <div
@@ -576,8 +637,8 @@ onBeforeUnmount(() => {
           @pointercancel="endSeek"
           @keydown="onSeekKey"
         >
-          <div class="track"><i :style="{ width: progress }" /></div>
-          <b class="knob" :style="{ left: progress }" />
+          <div class="track"><i :style="{ transform: `translateX(${pct - 100}%)` }" /></div>
+          <span class="knob-w" :style="{ transform: `translateX(${pct}%)` }"><b class="knob" /></span>
         </div>
         <div class="ctl">
           <button type="button" :aria-label="playing ? '暂停' : '播放'" @click="toggle"><Icon :name="playing ? 'pause' : 'play'" /></button>
@@ -590,10 +651,11 @@ onBeforeUnmount(() => {
             @click="openSettings"
           >
             <Icon v-if="!fullscreen" name="cog" />
-            <span v-if="fullscreen || rateLabel" class="rate">{{ fullscreen ? store.playback.speed : rateLabel }}</span>
+            <!-- 倍速一换，数字翻过去 -->
+            <span v-if="fullscreen || rateLabel" class="rate"><RollNum :value="fullscreen ? store.playback.speed : rateLabel" :n="rate" /></span>
           </button>
           <!-- 竖屏时循环在「播放设置」里；全屏时设置面板打不开，放到控制栏上 -->
-          <button v-if="isFs" type="button" class="loop" :class="{ on: loop }" :aria-pressed="loop" aria-label="循环播放" @click="toggleLoop"><Icon name="loop" /></button>
+          <button v-if="isFs" type="button" class="loop" :class="{ on: loop }" :aria-pressed="loop" aria-label="循环播放" @click="toggleLoop"><Icon :key="loop ? 1 : 0" name="loop" /></button>
           <button type="button" :aria-label="muted ? '打开声音' : '静音'" @click="toggleMute"><Icon :name="muted ? 'mute' : 'vol'" /></button>
           <button v-if="canPip" type="button" aria-label="小窗播放" @click="togglePip"><Icon name="pip" /></button>
           <button type="button" :aria-label="isFs ? '退出全屏' : '全屏'" @click="toggleFullscreen"><Icon :name="isFs ? 'fullscreenExit' : 'fullscreen'" /></button>
@@ -657,11 +719,23 @@ onBeforeUnmount(() => {
   inset: 0;
   background: linear-gradient(180deg, rgba(0, 0, 0, .5) 0%, rgba(0, 0, 0, 0) 30%, rgba(0, 0, 0, 0) 60%, rgba(0, 0, 0, .65) 100%);
   opacity: 0;
-  transition: opacity .25s;
+  transition: opacity var(--dur-2) var(--ease-in);
   pointer-events: none;
 }
-.top, .bar { opacity: 0; pointer-events: none; transition: opacity .25s; }
+/*
+ * 控制栏：出现时顶栏从上、底栏从下滑进来一点并淡入（减速）；收起时更快地淡出、往回退一点（加速）。
+ * 只动 opacity / transform，按钮在淡入的过程中就能点。
+ */
+.top, .bar {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur-2) var(--ease-in), transform var(--dur-2) var(--ease-in);
+}
+.top { transform: translateY(-6px); }
+.bar { transform: translateY(6px); }
 .ui-on .shade, .ui-on .top, .ui-on .bar { opacity: 1; }
+.ui-on .top, .ui-on .bar { transform: none; transition: opacity var(--dur-3) var(--ease-out), transform var(--dur-3) var(--ease-out); }
+.ui-on .shade { transition: opacity var(--dur-3) var(--ease-out); }
 .ui-on .top, .ui-on .bar { pointer-events: auto; }
 /* 播完时由结束画面接管，控制栏收起 */
 .ended .bar, .ended .mini { display: none; }
@@ -685,7 +759,11 @@ onBeforeUnmount(() => {
 .fs .bar { padding: 0 max(6px, env(safe-area-inset-right)) max(2px, env(safe-area-inset-bottom)) max(6px, env(safe-area-inset-left)); }
 
 /* ---------- 没有片源 ---------- */
-.nosrc .shade { opacity: 1; background: rgba(0, 0, 0, .52); }
+.nosrc .shade { opacity: 1; background: rgba(0, 0, 0, .52); animation: m-fade var(--dur-3) var(--ease-out) backwards; }
+/* 如实说明：遮罩淡入后，标题、说明、按钮依次轻轻升上来 */
+.nosrc-msg > * { animation: m-rise var(--dur-3) var(--ease-out) backwards; }
+.nosrc-msg > :nth-child(2) { animation-delay: var(--stagger); }
+.nosrc-msg > :nth-child(3) { animation-delay: calc(var(--stagger) * 2); }
 .nosrc-msg {
   position: absolute;
   inset: 0;
@@ -711,9 +789,11 @@ onBeforeUnmount(() => {
   color: #0a0a0a;
   font-size: 13px;
   font-weight: 600;
+  transition: transform var(--dur-2) var(--ease-spring);
   pointer-events: auto;
 }
 .ns-btn::after { content: ''; position: absolute; inset: -6px -4px; }
+.ns-btn:active { transform: scale(var(--press-scale)); transition: transform var(--dur-1) var(--ease-out); }
 
 .big-play {
   position: absolute;
@@ -729,9 +809,40 @@ onBeforeUnmount(() => {
   -webkit-backdrop-filter: blur(6px);
   backdrop-filter: blur(6px);
   color: #fff;
+  transition: transform var(--dur-2) var(--ease-spring);
 }
+.big-play:active { transform: scale(var(--press-scale-sm)); transition: transform var(--dur-1) var(--ease-out); }
 .big-play svg { width: 24px; height: 24px; margin-left: 3px; }
 .big-play svg.retry { margin-left: 0; stroke-width: 2.4; }
+/* 暂停：从略大淡入、落到位；开始播：放大淡出（离场更快） */
+.bp-enter-active { transition: opacity var(--dur-2) var(--ease-out), transform var(--dur-3) var(--ease-out); }
+.bp-leave-active { transition: opacity var(--dur-2) var(--ease-in), transform var(--dur-2) var(--ease-in); }
+.bp-enter-from { opacity: 0; transform: scale(1.3); }
+.bp-leave-to { opacity: 0; transform: scale(1.35); }
+
+/* 全屏时的倍速 / 循环小标签：顶部居中，回弹着落下，很快收起 */
+.chip-tip {
+  position: absolute;
+  left: 50%;
+  top: max(14px, env(safe-area-inset-top));
+  z-index: 3;
+  height: 28px;
+  padding: 0 13px;
+  border-radius: 14px;
+  background: rgba(20, 20, 20, .78);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 28px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+.chip-enter-active { transition: opacity var(--dur-2) var(--ease-out), transform var(--dur-3) var(--ease-spring); }
+.chip-leave-active { transition: opacity var(--dur-1) var(--ease-in), transform var(--dur-1) var(--ease-in); }
+.chip-enter-from { opacity: 0; transform: translate(-50%, -10px) scale(.9); }
+.chip-leave-to { opacity: 0; transform: translate(-50%, -4px) scale(.96); }
 .fail-tip {
   position: absolute;
   left: 0;
@@ -758,10 +869,11 @@ onBeforeUnmount(() => {
 }
 
 /* ---------- 续播提示 ---------- */
+/* 控制栏显示时往上让出控制栏的高度（用 transform 跟着控制栏一起滑，不改 bottom） */
 .resume {
   position: absolute;
   left: 10px;
-  bottom: 62px;
+  bottom: 12px;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -771,11 +883,12 @@ onBeforeUnmount(() => {
   background: rgba(20, 20, 20, .82);
   color: #fff;
   font-size: 12px;
-  animation: fi .25s ease;
+  transition: transform var(--dur-2) var(--ease-in);
+  animation: m-fade var(--dur-3) var(--ease-out);
 }
 .resume button { position: relative; height: 24px; padding: 0 10px; border-radius: 12px; background: rgba(255, 255, 255, .16); font-weight: 600; }
 .resume button::after { content: ''; position: absolute; inset: -6px -4px; }
-.player:not(.ui-on) .resume { bottom: 12px; }
+.ui-on .resume { transform: translateY(-50px); transition: transform var(--dur-3) var(--ease-out); }
 
 /* ---------- 结束画面 ---------- */
 .end {
@@ -790,7 +903,12 @@ onBeforeUnmount(() => {
   padding: 40px 16px 8px;
   background: rgba(0, 0, 0, .74);
   color: #fff;
+  animation: m-fade var(--dur-3) var(--ease-out);
 }
+/* 播完：遮罩淡入，标题、下一个、按钮依次升上来 */
+.end > * { animation: m-rise var(--dur-3) var(--ease-out) backwards; }
+.end > :nth-child(2) { animation-delay: var(--stagger); }
+.end > :nth-child(3) { animation-delay: calc(var(--stagger) * 2); }
 .end-hd { font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .end-hd .hint { margin-left: 4px; color: rgba(255, 255, 255, .6); font-weight: 400; }
 .end-next {
@@ -802,8 +920,31 @@ onBeforeUnmount(() => {
   border-radius: 9px;
   background: rgba(255, 255, 255, .1);
   text-align: left;
+  transition: transform var(--dur-2) var(--ease-spring);
 }
+.end-next:active { transform: scale(var(--press-scale)); transition: transform var(--dur-1) var(--ease-out); }
 .end-cv { flex: none; width: 80px; aspect-ratio: 16 / 9; border-radius: 6px; filter: var(--media); }
+/* 自动播下一个的倒计时圆环：压在下一条的封面中间 */
+.cd {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  margin: -15px 0 0 -15px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, .45);
+  animation: cd-in var(--dur-3) var(--ease-spring) backwards;
+}
+.cd svg:first-child { position: absolute; inset: 0; width: 100%; height: 100%; transform: rotate(-90deg); }
+.cd circle { fill: none; stroke-width: 2.5; }
+.cd-bg { stroke: rgba(255, 255, 255, .28); }
+/* 每一秒匀速走一格，和上面的数字同步 */
+.cd-fg { stroke: #fff; stroke-linecap: round; transition: stroke-dashoffset 1s linear; }
+.cd svg + svg { width: 11px; height: 11px; margin-left: 2px; color: #fff; }
+@keyframes cd-in { from { opacity: 0; transform: scale(.6); } }
 .end-tt {
   display: -webkit-box;
   flex: 1;
@@ -825,18 +966,21 @@ onBeforeUnmount(() => {
   background: rgba(255, 255, 255, .14);
   font-size: 13px;
   font-weight: 600;
+  transition: transform var(--dur-2) var(--ease-spring);
 }
+.end-btns button:active,
+.end-replay:active { transform: scale(var(--press-scale)); transition: transform var(--dur-1) var(--ease-out); }
 .end-btns button.pri { background: #fff; color: #0a0a0a; }
 .end-btns svg { width: 15px; height: 15px; stroke-width: 2.4; }
-.end-replay { display: flex; flex-direction: column; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; }
+.end-replay { display: flex; flex-direction: column; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; transition: transform var(--dur-2) var(--ease-spring); }
 .end-replay svg { box-sizing: content-box; width: 24px; height: 24px; padding: 13px; border-radius: 50%; background: rgba(255, 255, 255, .14); stroke-width: 2.2; }
 .fs .end-cv { width: 128px; }
 .fs .end-next { width: min(100%, 420px); }
 .fs .end-tt { font-size: 15px; line-height: 21px; }
 
-.mini { position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: rgba(255, 255, 255, .2); transition: opacity .25s; }
-.mini i { position: absolute; left: 0; top: 0; bottom: 0; background: #fff; }
-.ui-on .mini { opacity: 0; }
+.mini { position: absolute; left: 0; right: 0; bottom: 0; height: 2px; overflow: hidden; background: rgba(255, 255, 255, .2); transition: opacity var(--dur-3) var(--ease-out); }
+.mini i { position: absolute; inset: 0; background: #fff; }
+.ui-on .mini { opacity: 0; transition: opacity var(--dur-2) var(--ease-in); }
 
 .bar { position: absolute; left: 0; right: 0; bottom: 0; padding: 0 6px 2px; }
 .seek { position: relative; display: flex; align-items: center; height: 18px; margin: 0 10px; border-radius: 4px; cursor: pointer; touch-action: none; }
@@ -844,14 +988,25 @@ onBeforeUnmount(() => {
 .seek::before { content: ''; position: absolute; left: -10px; right: -10px; top: -10px; bottom: -4px; }
 .seek:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .seek[aria-disabled] { cursor: default; }
-.track { position: relative; flex: 1; height: 3px; border-radius: 2px; background: rgba(255, 255, 255, .3); }
-.track i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 2px; background: #fff; }
-.knob { position: absolute; top: 50%; width: 11px; height: 11px; margin: -5.5px 0 0 -5.5px; border-radius: 50%; background: #fff; box-shadow: 0 0 4px rgba(0, 0, 0, .4); }
+/* 已播部分是整条白线往左挪出去的那一截；拖动时线用 scaleY 变粗、圆点回弹变大（都只动 transform） */
+.track { position: relative; flex: 1; height: 3px; overflow: hidden; border-radius: 2px; background: rgba(255, 255, 255, .3); transition: transform var(--dur-2) var(--ease-out); }
+.track i { position: absolute; inset: 0; border-radius: 2px; background: #fff; }
+.knob-w { position: absolute; inset: 0; pointer-events: none; }
+.knob { position: absolute; left: 0; top: 50%; width: 11px; height: 11px; margin: -5.5px 0 0 -5.5px; border-radius: 50%; background: #fff; box-shadow: 0 0 4px rgba(0, 0, 0, .4); transition: transform var(--dur-2) var(--ease-out); }
+.seeking .track { transform: scaleY(1.67); }
+.seeking .knob { transform: scale(1.4); transition: transform var(--dur-2) var(--ease-spring); }
 .ctl { display: flex; align-items: center; height: 38px; }
 .ctl button { display: grid; place-items: center; width: 38px; height: 38px; color: #fff; }
-.ctl svg { width: 21px; height: 21px; stroke-width: 2; filter: drop-shadow(0 1px 2px rgba(0, 0, 0, .4)); }
+.ctl svg { width: 21px; height: 21px; stroke-width: 2; filter: drop-shadow(0 1px 2px rgba(0, 0, 0, .4)); transition: transform var(--dur-2) var(--ease-spring); }
+/* 按下图标立刻缩一下，松开回弹 */
+.ctl button:active svg { transform: scale(var(--press-scale-sm)); transition: transform var(--dur-1) var(--ease-out); }
+.back:active svg { transform: scale(var(--press-scale-sm)); }
 .ctl .set { display: flex; gap: 3px; justify-content: center; width: auto; min-width: 38px; padding: 0 7px; }
+.ctl .loop { transition: opacity var(--dur-2) var(--ease-out); }
 .ctl .loop:not(.on) { opacity: .5; }
+/* 切换循环：图标转一圈弹到位 */
+.ctl .loop svg { animation: loop-pop var(--dur-3) var(--ease-out); }
+@keyframes loop-pop { from { transform: rotate(-120deg) scale(.7); } }
 .rate { font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; text-shadow: 0 1px 2px rgba(0, 0, 0, .5); }
 .time { margin-left: 2px; color: #fff; font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .sp { flex: 1; }

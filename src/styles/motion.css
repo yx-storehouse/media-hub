@@ -1,0 +1,96 @@
+/*
+ * 动效规范：全 App 共用一套时长和缓动，动起来才是同一种手感。
+ *
+ * 原则
+ *  - 只动 transform / opacity（必要时 filter），不动宽高和位置，保证 60 帧。
+ *  - 进场用减速曲线（--ease-out），离场更快（--ease-in，时长取进场的 2/3 左右）。
+ *  - 回弹（--ease-spring）只用在「被用户点了」的小元素上：点赞、按钮、图标，不用在大面积上。
+ *  - 动效不能拖住操作：点下去立刻有反馈，页面切换期间也能继续点。
+ *  - 系统开了「减少动态效果」时，下面统一收敛成几乎无动画。
+ */
+:root {
+  /* 时长 */
+  --dur-1: 120ms;   /* 按压、颜色、图标状态 */
+  --dur-2: 200ms;   /* 小元素进出、提示条、指示条 */
+  --dur-3: 280ms;   /* 弹层、卡片入场、图片淡入 */
+  --dur-4: 380ms;   /* 页面切换、大面积过渡 */
+
+  /* 缓动 */
+  --ease-out: cubic-bezier(.22, 1, .36, 1);        /* 进场 / 减速停下：最常用 */
+  --ease-in: cubic-bezier(.55, 0, 1, .45);         /* 离场 / 加速离开 */
+  --ease-in-out: cubic-bezier(.65, 0, .35, 1);     /* 位置互换、指示条滑动 */
+  --ease-spring: cubic-bezier(.34, 1.56, .64, 1);  /* 轻微回弹：点赞、按钮弹起 */
+
+  /* 交互参数 */
+  --press-scale: .96;       /* 卡片、按钮按下时的缩放 */
+  --press-scale-sm: .88;    /* 小图标按钮按下时的缩放 */
+  --stagger: 40ms;          /* 列表错峰入场的间隔（最多错峰前 8 个） */
+  --rise: 10px;             /* 入场时从下往上的位移 */
+}
+
+/* ---- 通用入场 / 骨架闪光 ---- */
+@keyframes m-rise { from { opacity: 0; transform: translateY(var(--rise)); } to { opacity: 1; transform: none; } }
+@keyframes m-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes m-pop { 0% { transform: scale(1); } 40% { transform: scale(1.28); } 100% { transform: scale(1); } }
+@keyframes m-shimmer { from { background-position: 150% 0; } to { background-position: -50% 0; } }
+
+/*
+ * ---- 页面切换（App.vue 给路由出口和底部导航套的 <Transition :name>，方向见 components/motion/pageTransition.js）----
+ *  pg-fwd   进子页面：新页从右边滑进来盖住上一页，上一页往左让一点、变暗
+ *  pg-back  返回：反过来，盖在上面的页面滑出去，下面那页回到原位、变亮（比进入快一点）
+ *  pg-fade  底部 Tab 之间：新页快速淡入，旧页原样垫在下面（两页不会同时半透明、透出黑底）
+ * 离开中的页面不接手指：转场期间点到的总是新页面，可以接着点、接着返回。
+ */
+.pg-fwd-enter-active, .pg-fwd-leave-active {
+  transition: transform var(--dur-4) var(--ease-out), opacity var(--dur-4) var(--ease-out);
+}
+.pg-back-enter-active, .pg-back-leave-active {
+  transition: transform var(--dur-3) var(--ease-out), opacity var(--dur-3) var(--ease-out);
+}
+.pg-fwd-enter-from, .pg-back-leave-to { transform: translate3d(100%, 0, 0); }
+.pg-fwd-leave-to, .pg-back-enter-from { transform: translate3d(-24%, 0, 0); opacity: .62; }
+/* 盖在上面的那一页压过底部导航（z-index 30），左边缘一道柔和的阴影把两页分开 */
+.page.pg-fwd-enter-active, .page.pg-back-leave-active { z-index: 40; box-shadow: -12px 0 32px rgba(0, 0, 0, .5); }
+
+.pg-fade-enter-active { transition: opacity var(--dur-2) var(--ease-out); }
+.pg-fade-enter-from { opacity: 0; }
+/* 旧页不变，只是在新页完全显出之前留在下面（这条 transition 只用来撑住时长） */
+.pg-fade-leave-active { transition: opacity var(--dur-2) linear; }
+.page.pg-fade-enter-active { z-index: 2; }
+.page.pg-fade-leave-active { z-index: 1; }
+
+/*
+ * Tab 之间不用写：新页（z-index 2）整页盖在旧页上面，点到的本来就是新页。
+ * 给旧页加 pointer-events（会继承）要把它整棵子树的样式重算一遍，社区这种长列表在低端机上多出一截卡顿。
+ */
+.pg-fwd-leave-active, .pg-back-leave-active { pointer-events: none; }
+
+/*
+ * ---- 骨架屏闪光：<div class="m-shimmer" /> ----
+ * 深灰底上一道很淡的高光从左扫到右；尺寸、圆角由使用处给。循环周期取 4 个 --dur-4（约 1.5 秒），
+ * 「减少动态效果」时停在没有高光的静止状态。
+ */
+.m-shimmer {
+  background-color: #161616;
+  background-image: linear-gradient(100deg, rgba(255, 255, 255, 0) 30%, rgba(255, 255, 255, .055) 50%, rgba(255, 255, 255, 0) 70%);
+  background-repeat: no-repeat;
+  background-size: 200% 100%;
+  background-position: -50% 0; /* 不动时高光在框外 */
+  animation: m-shimmer calc(var(--dur-4) * 4) var(--ease-in-out) infinite;
+}
+
+/* ---- 系统「减少动态效果」：全部收敛 ---- */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-1: 1ms; --dur-2: 1ms; --dur-3: 1ms; --dur-4: 1ms;
+    --press-scale: 1; --press-scale-sm: 1; --stagger: 0ms; --rise: 0px;
+  }
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    animation-delay: 0ms !important;
+    transition-duration: .01ms !important;
+    transition-delay: 0ms !important;
+    scroll-behavior: auto !important;
+  }
+}

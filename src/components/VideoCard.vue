@@ -17,7 +17,8 @@ const target = computed(() => props.to || `/video/${encodeURIComponent(props.vid
 </script>
 
 <template>
-  <RouterLink :to="target" class="vc" :class="{ big }" @click="rememberVideo(video)">
+  <!-- m-press：按下缩一点、松手弹回（components/motion/press.js） -->
+  <RouterLink :to="target" class="vc m-press" :class="{ big }" @click="rememberVideo(video)">
     <Cover class="cv" v-bind="video.cover">
       <!-- extra overlays (e.g. the code badge on recent searches) -->
       <slot name="badge" />

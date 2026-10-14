@@ -13,6 +13,7 @@ import Icon from '@/components/Icon.vue'
 import ListFoot from '@/components/home/ListFoot.vue'
 import PostCard from '@/components/community/PostCard.vue'
 import PostSkeleton from '@/components/community/PostSkeleton.vue'
+import { useSlider, under, vRise } from '@/components/home/motion'
 
 /*
  * 社区（常驻页）：最新 / 热门 / 关注 / 收藏四个标签，每个标签各自一份分页列表（滚到底自动加载）和滚动位置。
@@ -41,6 +42,16 @@ const tabs = shallowRef(DEFAULT_TABS)
 const active = ref(0)
 const scroller = ref(null)
 useKeepScroll(scroller)
+
+/* 选中标签下面的指示条：换标签时滑过去 */
+const tabRow = ref(null)
+const tabBar = ref(null)
+useSlider(tabRow, tabBar, under('.ct-tab.on', 21), { key: () => active.value, deps: () => tabs.value })
+/*
+ * 骨架 → 列表时骨架原地淡出（m-skel）；换标签时旧内容直接撤掉（滚动位置已经换成新标签的，再淡出会错位），
+ * 新标签的帖子卡片自己错峰浮现
+ */
+const instant = ref(false)
 /* 页面是否显示着（KeepAlive 收起时为 false）；收起期间切了标签，切回来时要放的滚动位置 */
 let shown = true
 let pendingTop = null
@@ -130,6 +141,8 @@ function selectTab(i) {
   if (i === active.value) return toTopOrRefresh()
   const el = scroller.value
   if (el) tops[active.value] = el.scrollTop
+  instant.value = true
+  nextTick(() => { instant.value = false })
   active.value = i
   const f = feedOf(i)
   const fresh = retryDemo(i) || f.total === null
@@ -277,7 +290,8 @@ ensure(active.value)
 <template>
   <div class="page community">
     <header class="bar-hd">
-      <div class="ct-tabs" role="tablist">
+      <div ref="tabRow" class="ct-tabs cm-tabs" role="tablist">
+        <span ref="tabBar" class="m-bar cm-bar" aria-hidden="true" />
         <button
           v-for="(name, i) in tabs"
           :key="name"
@@ -294,53 +308,64 @@ ensure(active.value)
       <button type="button" class="ct-search" aria-label="搜索帖子" @click="openSearch"><Icon name="search" /><span>搜索帖子</span></button>
     </header>
 
-    <div v-if="refreshingTab === active" class="cm-refresh" role="status">正在刷新…</div>
+    <Transition name="cm-pill">
+      <div v-if="refreshingTab === active" class="cm-refresh" role="status">正在刷新…</div>
+    </Transition>
 
     <div ref="scroller" class="scroll" :aria-busy="feed.total === null && !feed.error && !needLogin" @scroll.passive="checkMore">
-      <!-- 关注 / 收藏：未登录 -->
-      <div v-if="needLogin" class="cm-empty">
-        <p class="t">{{ active === FOLLOW ? '登录后查看关注的创作者动态' : '登录后查看你收藏的帖子' }}</p>
-        <p class="s">{{ active === FOLLOW ? '关注喜欢的创作者，他们发的新帖子都在这里' : '收藏的帖子会保存在这里，随时回来看' }}</p>
-        <button type="button" class="cm-btn" @click="login">登录</button>
+      <!-- 关注 / 收藏未登录、第一页失败、骨架、空列表、帖子列表：骨架原地淡出，其余的自己入场 -->
+      <div class="m-swap">
+        <Transition name="m-skel" :css="!instant">
+          <div v-if="needLogin" :key="`login${active}`" v-rise.self class="cm-empty">
+            <p class="t">{{ active === FOLLOW ? '登录后查看关注的创作者动态' : '登录后查看你收藏的帖子' }}</p>
+            <p class="s">{{ active === FOLLOW ? '关注喜欢的创作者，他们发的新帖子都在这里' : '收藏的帖子会保存在这里，随时回来看' }}</p>
+            <button type="button" class="cm-btn m-press" @click="login">登录</button>
+          </div>
+
+          <div v-else-if="feed.total === null && feed.error" key="error" class="empty">
+            {{ online ? '加载失败，请检查网络后重试' : '网络已断开，连上网后会自动重新加载' }}
+            <button type="button" class="retry" @click="feed.more()">重试</button>
+          </div>
+
+          <PostSkeleton v-else-if="feed.total === null" key="skeleton" :count="3" />
+
+          <div v-else-if="!feed.list.length" :key="`empty${active}`" v-rise.self class="cm-empty">
+            <template v-if="active === FOLLOW">
+              <p class="t">还没有关注的创作者</p>
+              <p class="s">关注喜欢的创作者，他们发的新帖子会出现在这里</p>
+              <button type="button" class="cm-btn m-press" @click="router.push('/search')">去发现创作者</button>
+            </template>
+            <template v-else-if="active === FAV">
+              <p class="t">收藏的帖子会出现在这里</p>
+              <p class="s">看到喜欢的帖子，点卡片右下角的书签就能收藏</p>
+            </template>
+            <p v-else class="t">还没有帖子</p>
+          </div>
+
+          <div v-else key="list">
+            <PostCard v-for="post in feed.list" :key="`${active}:${genOf(active)}:${post.id}`" :post="post" />
+            <ListFoot :feed="feed" />
+          </div>
+        </Transition>
       </div>
-
-      <!-- 第一页没取到：只显示错误，不留别的标签或旧的内容 -->
-      <div v-else-if="feed.total === null && feed.error" class="empty">
-        {{ online ? '加载失败，请检查网络后重试' : '网络已断开，连上网后会自动重新加载' }}
-        <button type="button" class="retry" @click="feed.more()">重试</button>
-      </div>
-
-      <PostSkeleton v-else-if="feed.total === null" :count="3" />
-
-      <!-- 空列表 -->
-      <div v-else-if="!feed.list.length" class="cm-empty">
-        <template v-if="active === FOLLOW">
-          <p class="t">还没有关注的创作者</p>
-          <p class="s">关注喜欢的创作者，他们发的新帖子会出现在这里</p>
-          <button type="button" class="cm-btn" @click="router.push('/search')">去发现创作者</button>
-        </template>
-        <template v-else-if="active === FAV">
-          <p class="t">收藏的帖子会出现在这里</p>
-          <p class="s">看到喜欢的帖子，点卡片右下角的书签就能收藏</p>
-        </template>
-        <p v-else class="t">还没有帖子</p>
-      </div>
-
-      <template v-else>
-        <PostCard v-for="post in feed.list" :key="`${active}:${genOf(active)}:${post.id}`" :post="post" />
-        <ListFoot :feed="feed" />
-      </template>
       <div class="pad-b" />
     </div>
   </div>
 </template>
 
 <style scoped>
+/* 标签指示条（useSlider 滑动），代替公共样式里固定在选中标签下的那一条 */
+.cm-tabs { position: relative; }
+.cm-tabs .ct-tab { transition: color var(--dur-2) var(--ease-out); }
+.cm-tabs .ct-tab.on::after { content: none; }
+.cm-bar { bottom: -6px; height: 3px; border-radius: 2px; background: var(--accent); }
+.ct-search { transition: background-color var(--dur-1) var(--ease-out); }
+.ct-search:active { background: #1e1e1e; }
+
 .cm-empty { padding: 84px 32px 40px; text-align: center; }
 .cm-empty .t { color: var(--t1); font-size: 16px; font-weight: 600; line-height: 23px; }
 .cm-empty .s { margin-top: 8px; color: var(--t2); font-size: 13px; line-height: 20px; }
 .cm-btn { height: 38px; margin-top: 20px; padding: 0 26px; border-radius: 19px; background: var(--accent); color: var(--on-accent); font-size: 14px; font-weight: 700; }
-.cm-btn:active { filter: brightness(.9); }
 
 /* 刷新中：压在列表顶部的小胶囊，不推动列表 */
 .cm-refresh {
@@ -359,4 +384,8 @@ ensure(active.value)
   transform: translateX(-50%);
   pointer-events: none;
 }
+/* 「正在刷新」胶囊：从上面轻轻落下，收起时淡出 */
+.cm-pill-enter-active { transition: opacity var(--dur-2) var(--ease-out), transform var(--dur-2) var(--ease-out); }
+.cm-pill-leave-active { pointer-events: none; transition: opacity var(--dur-2) var(--ease-in), transform var(--dur-2) var(--ease-in); }
+.cm-pill-enter-from, .cm-pill-leave-to { opacity: 0; transform: translate(-50%, -8px); }
 </style>

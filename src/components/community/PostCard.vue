@@ -1,14 +1,33 @@
+<script>
+import { rise, canEnter } from '@/components/home/motion'
+
+/*
+ * 同一批挂上的卡片（一页数据、换标签、刷新后的新列表）错峰浮现：挂上时先排队，这一轮挂完一起开始。
+ * 帖子卡片很高，一屏最多三四张，只动这一批的前 4 张。返回恢复出来的列表、KeepAlive 切回来都不播（见 motion.js 的 cameBack）。
+ */
+const queue = []
+function enter(el) {
+  if (!el || !canEnter()) return
+  if (!queue.length) Promise.resolve().then(() => rise(queue.splice(0), { max: 4 }))
+  queue.push(el)
+}
+</script>
+
 <script setup>
-import { computed, shallowRef } from 'vue'
+import { ref, computed, shallowRef, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { getPost } from '@/api'
 import { toast } from '@/composables/useToast'
 import { share } from '@/composables/useShare'
 import { useAuthStore } from '@/stores/auth'
 import { usePostStore } from '@/stores/posts'
+import { haptic } from '@/utils/motion'
+import { pop } from '@/components/home/motion'
 import Cover from '@/components/Cover.vue'
 import Icon from '@/components/Icon.vue'
 import ImageViewer from '@/components/ImageViewer.vue'
+import ActBurst from '@/components/video/ActBurst.vue'
+import RollNum from '@/components/video/RollNum.vue'
 
 const props = defineProps({
   /**
@@ -23,6 +42,9 @@ const props = defineProps({
 const router = useRouter()
 const auth = useAuthStore()
 const postStore = usePostStore()
+
+const root = ref(null)
+onMounted(() => enter(root.value))
 
 /* 卡片上最多放 3 张缩略图，其余的在第 3 张上显示「+N」（N 是真实剩下的张数，详情页里都能看到） */
 const MAX_THUMBS = 3
@@ -62,6 +84,14 @@ const viewer = shallowRef(null)
 function openViewer(index) {
   if (gallery.value.length) viewer.value = { images: gallery.value, index }
 }
+/* 大图从哪张图放大出来、关掉时缩回哪张：主图是图集第 0 张（视频帖除外），缩略图依次在后；没显示出来的（+N 里的）没有 */
+const mainBtn = ref(null)
+const thumbBtns = []
+function originOf(i) {
+  if (mainBtn.value && !playable.value && i === 0) return mainBtn.value
+  const k = i - thumbBase.value
+  return k >= 0 && k < thumbs.value.length ? thumbBtns[k] || null : null
+}
 function onMain() {
   if (playable.value) router.push(`/video/${encodeURIComponent(props.post.videoId)}`)
   else openViewer(0)
@@ -93,21 +123,37 @@ async function favAfterLogin() {
   else await setFav(true)
 }
 
+/* 点了收藏：图标立刻弹一下（点亮时回弹 + 冒一圈小点 + 轻震，取消时轻轻一缩），数字翻过去；失败时状态照常回滚 */
+const favIcon = ref(null)
+const burst = ref(0)
+function favFx(on) {
+  pop(favIcon.value?.$el, on)
+  if (!on) return
+  burst.value++
+  haptic()
+}
+
 function toggleFav() {
   if (postStore.isPending(props.post.id)) return
   if (!auth.requireLogin({ then: favAfterLogin })) return // 未登录：弹登录框
-  setFav(!stats.value.faved)
+  const next = !stats.value.faved
+  favFx(next)
+  setFav(next)
 }
 </script>
 
 <template>
-  <article v-fade-in class="post" @click="open">
+  <article ref="root" class="post m-hold" @click="open">
+    <!--
+      按压反馈（全局 components/motion/press.js）：按在卡片上（会进详情）时卡片底色微亮（m-hold → .m-pressed）；
+      按在图片、按钮、头像 / 名字上时只有它们自己有反馈（离手指最近的那个接手），卡片不亮；一滑动就撤掉
+    -->
     <!-- 头像和名字进作者主页（读屏只读名字那个链接，头像链接不重复朗读） -->
-    <RouterLink v-if="authorTo" class="av-l" :to="authorTo" tabindex="-1" aria-hidden="true"><Cover class="av" v-bind="post.avatar" /></RouterLink>
+    <RouterLink v-if="authorTo" class="av-l m-hold" :to="authorTo" tabindex="-1" aria-hidden="true"><Cover class="av" v-bind="post.avatar" /></RouterLink>
     <Cover v-else class="av" v-bind="post.avatar" />
     <div class="bd">
       <div class="meta">
-        <RouterLink v-if="authorTo" class="nm-l" :to="authorTo" :aria-label="`${post.name} 的主页`">
+        <RouterLink v-if="authorTo" class="nm-l m-hold" :to="authorTo" :aria-label="`${post.name} 的主页`">
           <span class="nm">{{ post.name }}</span>
           <Icon v-if="post.verified" name="verified" class="vf" />
         </RouterLink>
@@ -127,8 +173,9 @@ function toggleFav() {
       <!-- 16:9 主图：能播的视频帖带播放按钮和时长，点了直接播放；其余点了看大图 -->
       <button
         v-if="post.media.main"
+        ref="mainBtn"
         type="button"
-        class="md-b"
+        class="md-b m-hold"
         :aria-label="playable ? `播放视频：${post.text}` : `查看大图，共 ${gallery.length} 张`"
         @click="onMain"
       >
@@ -141,8 +188,9 @@ function toggleFav() {
         <button
           v-for="(thumb, k) in thumbs"
           :key="k"
+          :ref="el => { thumbBtns[k] = el }"
           type="button"
-          class="tn-b"
+          class="tn-b m-press"
           :aria-label="`查看大图：第 ${thumbBase + k + 1} 张，共 ${gallery.length} 张`"
           @click="openViewer(thumbBase + k)"
         >
@@ -154,20 +202,24 @@ function toggleFav() {
 
       <div class="act">
         <span class="ai"><Icon name="eye" />阅读 {{ stats.read }}</span>
-        <button class="ai" @click="share({ title: post.text, url: shareUrl() })"><Icon name="shareUp" />分享</button>
-        <button class="ai" :class="{ on: stats.faved }" :aria-pressed="stats.faved" :aria-label="`收藏 ${stats.fav}`" @click="toggleFav">
-          <Icon name="bookmark" />{{ stats.fav }}
+        <button class="ai m-hold" @click="share({ title: post.text, url: shareUrl() })"><span class="ico"><Icon name="shareUp" /></span>分享</button>
+        <button class="ai fav m-hold" :class="{ on: stats.faved }" :aria-pressed="stats.faved" :aria-label="`收藏 ${stats.fav}`" @click="toggleFav">
+          <span class="ico"><Icon ref="favIcon" name="bookmark" /><ActBurst v-if="burst" :key="burst" @done="burst = 0" /></span>
+          <RollNum :value="String(stats.fav)" :n="stats.fav" />
         </button>
       </div>
     </div>
-    <ImageViewer v-if="viewer" :images="viewer.images" :index="viewer.index" @close="viewer = null" />
+    <ImageViewer v-if="viewer" :images="viewer.images" :index="viewer.index" :origin="originOf" @close="viewer = null" />
   </article>
 </template>
 
 <style scoped>
-.post { display: flex; gap: 11px; padding: 12px 14px 19px; border-bottom: 1px solid var(--line); cursor: pointer; }
+.post { display: flex; gap: 11px; padding: 12px 14px 19px; border-bottom: 1px solid var(--line); cursor: pointer; transition: background-color var(--dur-2) var(--ease-out); }
+.post.m-pressed { background-color: #121212; transition-duration: var(--dur-1); }
 .av { flex: none; width: 44px; height: 44px; border-radius: 50%; filter: var(--media); }
 .av-l { flex: none; align-self: flex-start; border-radius: 50%; }
+.av-l .av, .nm-l { transition: opacity var(--dur-2) var(--ease-out); }
+.av-l.m-pressed .av, .nm-l.m-pressed { opacity: .7; transition-duration: var(--dur-1); }
 .nm-l { display: flex; flex: none; align-items: center; gap: 5px; min-width: 0; max-width: 62%; }
 .nm-l .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .bd { flex: 1; min-width: 0; }
@@ -182,7 +234,8 @@ function toggleFav() {
 .tg { display: flex; flex-wrap: wrap; gap: 0 9px; margin-top: 4px; color: var(--tag); font-size: 15px; line-height: 24px; }
 
 .md-b { display: block; width: 100%; margin-top: 8px; border-radius: 7px; }
-.md { aspect-ratio: 16 / 9; border-radius: 7px; filter: var(--media); }
+.md { aspect-ratio: 16 / 9; border-radius: 7px; filter: var(--media); transition: opacity var(--dur-2) var(--ease-out); }
+.md-b.m-pressed .md { opacity: .82; transition-duration: var(--dur-1); }
 .md .pl {
   position: absolute;
   left: 50%;
@@ -206,8 +259,13 @@ function toggleFav() {
 .more { position: absolute; inset: 0; display: grid; place-items: center; background: rgba(0, 0, 0, .52); color: #fff; font-size: 22px; font-weight: 700; }
 
 .act { display: flex; align-items: center; gap: 23px; height: 36px; margin-top: 14px; color: var(--t2); font-size: 13px; }
-.ai { display: flex; align-self: stretch; align-items: center; gap: 7px; } /* full row height = bigger tap area */
+.ai { display: flex; align-self: stretch; align-items: center; gap: 7px; transition: color var(--dur-1) var(--ease-out); } /* full row height = bigger tap area */
 .ai svg { width: 17px; height: 17px; stroke-width: 1.9; }
+/* 图标外面包一层：按压缩放在外层，点亮的弹跳在图标上，两者互不打断 */
+.ai .ico { position: relative; display: block; transition: transform var(--dur-2) var(--ease-spring); }
+.ai.m-pressed .ico { transform: scale(var(--press-scale-sm)); transition: transform var(--dur-1) var(--ease-out); }
 .ai.on { color: var(--accent); }
-.ai.on svg { fill: currentColor; }
+/* 填充用 fill-opacity 过渡（fill 从 none 到颜色没法渐变） */
+.fav svg { fill: currentColor; fill-opacity: 0; transition: fill-opacity var(--dur-1) var(--ease-out); }
+.fav.on svg { fill-opacity: 1; }
 </style>

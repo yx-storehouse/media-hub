@@ -9,7 +9,8 @@ const back = useBack()
 
 <template>
   <div class="sub-hd">
-    <button class="sh-back" aria-label="返回" @click="back"><Icon name="chevL" /></button>
+    <!-- m-press-sm：按下缩一点、松手带回弹（components/motion/press.js） -->
+    <button class="sh-back m-press-sm" aria-label="返回" @click="back"><Icon name="chevL" /></button>
     <slot>{{ title }}</slot>
   </div>
 </template>

@@ -23,6 +23,7 @@ import { useRecentSearches } from '@/components/search/recent'
 import { useBack } from '@/composables/useBack'
 import { toast } from '@/composables/useToast'
 import { getHotWords, getCreators, searchVideos, searchPosts } from '@/api'
+import { cameBack, useSlider, under, vRise, fadeIn, pin } from '@/components/home/motion'
 
 /*
  * 搜索页（#/search?q=关键词&type=post）。
@@ -44,6 +45,8 @@ const fmtCount = n => (n >= 10000 ? (n / 10000).toFixed(1).replace(/\.0$/, '') +
 const route = useRoute()
 const router = useRouter()
 const back = useBack()
+/* 按返回回到搜索页：恢复出来的结果、之后取回的建议都不播入场 */
+const calm = cameBack()
 
 const inputEl = ref(null)
 const scroller = ref(null)
@@ -75,6 +78,8 @@ const editing = ref(false)
 watch(recentList, list => { if (!list.length) editing.value = false })
 
 const hotWords = shallowRef([])
+/* 每换一批热门词 +1：列表换 key，新的一批错峰浮现 */
+const hotGen = ref(0)
 /* 一批热门词的个数（和服务端 /api/search/hot 一致）；不够一批说明没有别的可换 */
 const HOT_BATCH = 8
 const creators = shallowRef([])
@@ -88,7 +93,10 @@ async function loadHotWords() {
   hotLoaded = true
   try {
     const words = await getHotWords(page)
-    if (page === hotPage) hotWords.value = words
+    if (page === hotPage) {
+      hotWords.value = words
+      hotGen.value++
+    }
   } catch {
     if (page === hotPage) hotLoaded = false   // 下次显示时再试
   }
@@ -122,10 +130,17 @@ function onKeyword(k) {
   else searchFor(k)
 }
 
+/* 全部清除：近期搜索整块淡出，淡完了下面两块再往上补（.clearing 给补位加一点延迟） */
+const clearingRecent = ref(false)
+let clearingTimer = 0
 function clearRecent() {
   editing.value = false
+  clearingRecent.value = true
+  clearTimeout(clearingTimer)
+  clearingTimer = setTimeout(() => { clearingRecent.value = false }, 800)
   recent.clear()
 }
+onBeforeUnmount(() => clearTimeout(clearingTimer))
 
 /* 热门创作者：有 id 就进主页；拿不到 id 的（旧数据）还是按名字搜索 */
 function openCreator(c) {
@@ -218,13 +233,21 @@ function selectType(key) {
     return
   }
   if (el) savedTop[type.value] = el.scrollTop
+  // 新的一栏从切换的方向淡入一点
+  const dir = TYPES.findIndex(t => t.key === key) > TYPES.findIndex(t => t.key === type.value) ? 1 : -1
   type.value = key
   syncUrl()
   nextTick(() => {
     if (el) el.scrollTop = savedTop[key]
     checkMore()
+    if (query.value) fadeIn(document.getElementById(`sr-pane-${key}`), { x: dir * 12 })
   })
 }
+
+/* 结果标签下的指示条：切标签时滑过去 */
+const tabRow = ref(null)
+const tabBar = ref(null)
+useSlider(tabRow, tabBar, under('.sr-tab.on', 20), { key: () => type.value, deps: () => [query.value, feedCount(feeds.video), feedCount(feeds.post)] })
 
 /* 方向键在两个标签之间切换（只有选中的标签能 Tab 进入） */
 function onTabKey(e) {
@@ -330,13 +353,16 @@ watch(() => route.fullPath, () => {
           :placeholder="placeholder"
           @keydown.enter="onEnter"
         >
-        <button v-show="text" type="button" class="clr" aria-label="清除" @click="clear"><Icon name="close" /></button>
+        <Transition name="sh-clr">
+          <button v-show="text" type="button" class="clr" aria-label="清除" @click="clear"><Icon name="close" /></button>
+        </Transition>
       </div>
-      <button type="button" class="sh-btn" @click="search">搜索</button>
+      <button type="button" class="sh-btn m-press" @click="search">搜索</button>
     </div>
 
     <!-- 结果页：视频 / 帖子 -->
-    <div v-if="query" class="sr-tabs" role="tablist" aria-label="搜索结果">
+    <div v-if="query" ref="tabRow" class="sr-tabs" role="tablist" aria-label="搜索结果">
+      <span ref="tabBar" class="m-bar sr-bar" aria-hidden="true" />
       <button
         v-for="t in TYPES"
         :id="`sr-tab-${t.key}`"
@@ -366,56 +392,61 @@ watch(() => route.fullPath, () => {
           role="tabpanel"
           :aria-labelledby="`sr-tab-${t.key}`"
         >
-          <!-- 第一页还没回来：骨架；第一页失败：重试 -->
-          <template v-if="feeds[t.key].total === null">
-            <div v-if="feeds[t.key].error" class="empty">
-              加载失败，请检查网络
-              <button type="button" class="retry" @click="feeds[t.key].more()">重试</button>
-            </div>
-            <SkeletonGrid v-else-if="t.key === 'video'" :count="6" gap="g16" />
-            <div v-else aria-hidden="true">
-              <div v-for="i in 3" :key="i" class="sk-post">
-                <div class="sk av" />
-                <div class="bd"><div class="sk l1" /><div class="sk l2" /><div class="sk md" /></div>
+          <!-- 第一页还没回来：骨架；第一页失败：重试。骨架 / 上一次的结果原地淡出，新结果错峰浮现 -->
+          <div class="m-swap">
+            <Transition name="m-skel">
+              <div v-if="feeds[t.key].total === null && feeds[t.key].error" class="empty">
+                加载失败，请检查网络
+                <button type="button" class="retry" @click="feeds[t.key].more()">重试</button>
               </div>
-            </div>
-          </template>
+              <SkeletonGrid v-else-if="feeds[t.key].total === null && t.key === 'video'" :count="6" gap="g16" />
+              <div v-else-if="feeds[t.key].total === null" aria-hidden="true">
+                <div v-for="i in 3" :key="i" class="sk-post">
+                  <div class="sk av" />
+                  <div class="bd"><div class="sk l1" /><div class="sk l2" /><div class="sk md" /></div>
+                </div>
+              </div>
 
-          <!-- 没有结果：换个词，或者看看另一个标签 -->
-          <div v-else-if="!feeds[t.key].list.length" class="sr-none">
-            <p class="t1">没有找到相关{{ t.label }}</p>
-            <p class="t2">换个关键词试试</p>
-            <button
-              v-if="feedCount(feeds[otherOf(t.key)]) > 0"
-              type="button"
-              class="sr-alt"
-              @click="selectType(otherOf(t.key))"
-            >
-              看看相关{{ typeInfo(otherOf(t.key)).label }} · {{ fmtCount(feedCount(feeds[otherOf(t.key)])) }} {{ typeInfo(otherOf(t.key)).unit }}<Icon name="chevR" />
-            </button>
-            <template v-if="hotForEmpty.length">
-              <div class="sr-hot-t">大家都在搜</div>
-              <div class="kws">
-                <button v-for="w in hotForEmpty" :key="w.word" type="button" class="kw" @click="searchFor(w.word)"><span>{{ w.word }}</span></button>
+              <div v-else-if="!feeds[t.key].list.length" :key="`none${resultKey}`" v-rise.self class="sr-none">
+                <!-- 没有结果：换个词，或者看看另一个标签 -->
+                <p class="t1">没有找到相关{{ t.label }}</p>
+                <p class="t2">换个关键词试试</p>
+                <button
+                  v-if="feedCount(feeds[otherOf(t.key)]) > 0"
+                  type="button"
+                  class="sr-alt"
+                  @click="selectType(otherOf(t.key))"
+                >
+                  看看相关{{ typeInfo(otherOf(t.key)).label }} · {{ fmtCount(feedCount(feeds[otherOf(t.key)])) }} {{ typeInfo(otherOf(t.key)).unit }}<Icon name="chevR" />
+                </button>
+                <template v-if="hotForEmpty.length">
+                  <div class="sr-hot-t">大家都在搜</div>
+                  <div class="kws">
+                    <button v-for="w in hotForEmpty" :key="w.word" type="button" class="kw" @click="searchFor(w.word)"><span>{{ w.word }}</span></button>
+                  </div>
+                </template>
               </div>
-            </template>
+
+              <div v-else :key="`res${resultKey}`">
+                <div v-if="t.key === 'video'" v-rise class="grid g16 sr-grid">
+                  <VideoCard v-for="v in feeds.video.list" :key="v.id" :video="v" />
+                </div>
+                <div v-else>
+                  <PostCard v-for="p in feeds.post.list" :key="p.id" :post="p" />
+                </div>
+                <ListFoot :feed="feeds[t.key]" />
+              </div>
+            </Transition>
           </div>
-
-          <template v-else>
-            <div v-if="t.key === 'video'" :key="resultKey" v-fade-in class="grid g16 sr-grid">
-              <VideoCard v-for="v in feeds.video.list" :key="v.id" :video="v" />
-            </div>
-            <div v-else :key="resultKey">
-              <PostCard v-for="p in feeds.post.list" :key="p.id" :post="p" />
-            </div>
-            <ListFoot :feed="feeds[t.key]" />
-          </template>
         </section>
       </template>
 
-      <!-- 建议页 -->
-      <template v-else>
-        <template v-if="recentList.length">
+      <!--
+        建议页：三块各自出现时错峰浮现；「全部清除」时近期搜索的词依次淡出，下面的两块平滑往上补位；
+        编辑时删掉一个词，后面的词平滑挪过来
+      -->
+      <TransitionGroup v-else tag="div" name="sh-blk" class="sh-sug" :class="{ clearing: clearingRecent }" @before-leave="pin">
+        <section v-if="recentList.length" key="recent" class="sh-blk">
           <div class="sh-st">
             <div class="t">近期搜索</div>
             <button v-if="!editing" type="button" class="pill" @click="editing = true">清除</button>
@@ -424,44 +455,47 @@ watch(() => route.fullPath, () => {
               <button type="button" class="pill" @click="editing = false">完成</button>
             </div>
           </div>
-          <div class="kws recent" :class="{ editing }">
+          <TransitionGroup v-rise="!calm" tag="div" name="sh-kw" class="kws recent" :class="{ editing }" @before-leave="pin">
             <button
-              v-for="k in recentList"
+              v-for="(k, i) in recentList"
               :key="k"
               type="button"
               class="kw"
+              :style="{ '--i': Math.min(i, 7) }"
               :aria-label="editing ? `删除 ${k}` : undefined"
               @click="onKeyword(k)"
             >
               <span>{{ k }}</span><Icon v-if="editing" name="close" class="x" />
             </button>
-          </div>
-        </template>
+          </TransitionGroup>
+        </section>
 
         <!-- 热门搜索：服务端只给搜得到东西的词；一个都没有就整块不显示，不够一批时没有「换一批」 -->
-        <template v-if="hotWords.length">
+        <section v-if="hotWords.length" key="hot" class="sh-blk">
           <div class="sh-st">
             <div class="t">热门搜索</div>
             <button v-if="hotWords.length >= HOT_BATCH" type="button" class="pill" @click="shuffleHot">换一批</button>
           </div>
-          <div class="hot">
+          <div :key="hotGen" v-rise="!calm" class="hot">
             <button v-for="w in hotWords" :key="w.word" type="button" @click="searchFor(w.word)">
               {{ w.word }}<Icon v-if="w.hot" name="flame" class="fl" />
             </button>
           </div>
-        </template>
+        </section>
 
-        <div class="sh-st">
-          <div class="t">热门创作者</div>
-          <button type="button" class="pill r" @click="toast('创作者列表即将上线')">查看全部<Icon name="chevR" /></button>
-        </div>
-        <div class="stars">
-          <div v-for="c in creators" :key="c.id ?? c.name" v-press class="st" :aria-label="c.id != null ? `${c.name} 的主页` : undefined" @click="openCreator(c)">
-            <Cover class="av" v-bind="c.avatar" />
-            <div class="nm">{{ c.name }}</div>
+        <section key="stars" class="sh-blk">
+          <div class="sh-st">
+            <div class="t">热门创作者</div>
+            <button type="button" class="pill r" @click="toast('创作者列表即将上线')">查看全部<Icon name="chevR" /></button>
           </div>
-        </div>
-      </template>
+          <div v-if="creators.length" v-rise="!calm" class="stars">
+            <div v-for="c in creators" :key="c.id ?? c.name" v-press class="st" :aria-label="c.id != null ? `${c.name} 的主页` : undefined" @click="openCreator(c)">
+              <Cover class="av" v-bind="c.avatar" />
+              <div class="nm">{{ c.name }}</div>
+            </div>
+          </div>
+        </section>
+      </TransitionGroup>
       <div class="pad-b" />
     </div>
   </div>
@@ -473,6 +507,7 @@ watch(() => route.fullPath, () => {
 /* 结果页下面紧跟着标签栏（它自己有分隔线） */
 .has-res .sh-hd { border-bottom-color: transparent; }
 .sh-field {
+  position: relative;
   display: flex;
   flex: 1;
   align-items: center;
@@ -483,8 +518,24 @@ watch(() => route.fullPath, () => {
   border-radius: 18px;
   background: var(--field);
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .02);
+  transition: background-color var(--dur-2) var(--ease-out);
 }
-.sh-field svg { width: 14px; height: 14px; color: var(--t2); stroke-width: 2.4; }
+/* 聚焦：一圈细边从里往外展开、底色微亮，放大镜变亮 */
+.sh-field::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, .22);
+  opacity: 0;
+  transform: scale(.96);
+  transition: opacity var(--dur-2) var(--ease-out), transform var(--dur-3) var(--ease-out);
+  pointer-events: none;
+}
+.sh-field:focus-within { background: #1f1f1f; }
+.sh-field:focus-within::before { opacity: 1; transform: none; }
+.sh-field svg { width: 14px; height: 14px; color: var(--t2); stroke-width: 2.4; transition: color var(--dur-2) var(--ease-out); }
+.sh-field:focus-within > svg { color: var(--t1); }
 /* 输入的字用主文字色，和灰色的占位文字分得开；16px 让 iOS 聚焦时不自动放大页面 */
 .sh-field input { flex: 1; min-width: 0; height: 100%; border: 0; background: none; color: var(--t1); font-size: 16px; caret-color: #fff; }
 .sh-field input::placeholder { color: #6e6e6e; }
@@ -494,10 +545,28 @@ watch(() => route.fullPath, () => {
 /* 16px is too small to tap: enlarge the hit area only */
 .sh-field .clr::after { content: ''; position: absolute; inset: -10px; }
 .sh-field .clr svg { width: 10px; height: 10px; color: var(--bg); stroke-width: 3; }
+/* 清除键：有字时弹出来，清空时缩回去 */
+.sh-clr-enter-active { transition: opacity var(--dur-2) var(--ease-out), transform var(--dur-2) var(--ease-spring); }
+.sh-clr-leave-active { transition: opacity var(--dur-1) var(--ease-in), transform var(--dur-1) var(--ease-in); }
+.sh-clr-enter-from, .sh-clr-leave-to { opacity: 0; transform: scale(.5); }
 .sh-btn { flex: none; width: 59px; height: 36px; border-radius: 18px; background: var(--accent); color: var(--on-accent); font-size: 14px; font-weight: 700; }
-.sh-btn:active { filter: brightness(.92); }
 
 /* ---- suggestions ---- */
+/* 三块：离场时钉在原处淡出（pin），淡完了下面的再平滑补位（不和淡出的字叠在一起） */
+.sh-sug { position: relative; }
+.sh-blk-move { transition: transform var(--dur-3) var(--ease-out); }
+.sh-sug.clearing .sh-blk-move { transition-delay: var(--dur-2); }
+.sh-blk-leave-active { position: absolute; pointer-events: none; transition: opacity var(--dur-2) var(--ease-in); }
+.sh-blk-leave-to { opacity: 0; }
+/* 整块离场时里面的词依次淡出、缩一点 */
+.sh-blk-leave-active .kw { transition: opacity var(--dur-2) var(--ease-in), transform var(--dur-2) var(--ease-in); transition-delay: calc(var(--i, 0) * var(--stagger) / 2); }
+.sh-blk-leave-to .kw { opacity: 0; transform: scale(.9); }
+/* 编辑时删掉一个词：它原地缩小淡出，后面的词挪过来 */
+.kws.recent { position: relative; }
+/* 写成两级选择器：要压过下面 .kw 自己的 transition（按压变色） */
+.kws .sh-kw-move { transition: transform var(--dur-3) var(--ease-out); }
+.kws .sh-kw-leave-active { position: absolute; pointer-events: none; transition: opacity var(--dur-2) var(--ease-in), transform var(--dur-2) var(--ease-in); }
+.kws .sh-kw-leave-to { opacity: 0; transform: scale(.8); }
 .sh-st { display: flex; align-items: center; justify-content: space-between; height: 44px; padding: 0 14px 0 12px; }
 .sh-st .t { display: flex; align-items: center; gap: 6px; color: var(--t2); font-size: 13px; font-weight: 500; }
 .sh-st .t::before { content: ''; width: 3px; height: 13px; border-radius: 2px; background: var(--accent); }
@@ -520,12 +589,14 @@ watch(() => route.fullPath, () => {
   font-size: 13px;
 }
 .kw span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kw { transition: background-color var(--dur-1) var(--ease-out); }
 .kw:active { background: #222; }
 .kw .x { flex: none; width: 11px; height: 11px; margin-right: -3px; color: var(--t2); stroke-width: 2.8; }
 .editing .kw { padding-right: 11px; }
 
 .hot { display: grid; grid-template-columns: 189.5px 1fr; margin-bottom: 22px; padding-left: 22px; }
-.hot button { display: flex; align-items: center; gap: 7px; height: 29px; color: #fff; font-size: 13px; white-space: nowrap; }
+.hot button { display: flex; align-items: center; gap: 7px; height: 29px; color: #fff; font-size: 13px; white-space: nowrap; transition: opacity var(--dur-1) var(--ease-out); }
+.hot button:active { opacity: .55; }
 .hot .fl { width: 11px; height: 13px; opacity: .5; }
 
 .stars { display: flex; margin-bottom: 10px; padding: 0 8px; }
@@ -535,12 +606,13 @@ watch(() => route.fullPath, () => {
 .stars .nm { margin-top: 6px; color: #fff; font-size: 12px; line-height: 17px; }
 
 /* ---- results ---- */
-.sr-tabs { display: flex; flex: none; gap: 28px; height: 42px; padding: 0 18px; border-bottom: 1px solid var(--line); }
-.sr-tab { position: relative; display: flex; align-items: center; gap: 4px; height: 100%; color: var(--t2); font-size: 15px; font-weight: 500; }
+.sr-tabs { position: relative; display: flex; flex: none; gap: 28px; height: 42px; padding: 0 18px; border-bottom: 1px solid var(--line); }
+.sr-tab { position: relative; display: flex; align-items: center; gap: 4px; height: 100%; color: var(--t2); font-size: 15px; font-weight: 500; transition: color var(--dur-2) var(--ease-out); }
 .sr-tab .n { font-size: 12px; font-weight: 400; font-variant-numeric: tabular-nums; }
 .sr-tab.on { color: var(--t1); font-weight: 600; }
-.sr-tab.on::after { content: ''; position: absolute; left: 50%; bottom: 0; width: 20px; height: 3px; margin-left: -10px; border-radius: 2px; background: var(--accent); }
-.sr-grid, .sr-pane > .sk-grid { padding-top: 12px; }
+/* 指示条（useSlider）：切标签时滑过去 */
+.sr-bar { bottom: 0; height: 3px; border-radius: 2px; background: var(--accent); }
+.sr-grid, .sr-pane .sk-grid { padding-top: 12px; }
 
 .sr-none { padding: 56px 0 8px; text-align: center; }
 .sr-none .t1 { color: var(--t1); font-size: 15px; font-weight: 500; }

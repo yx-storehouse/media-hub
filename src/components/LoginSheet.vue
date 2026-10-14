@@ -4,10 +4,11 @@ import { useRoute } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { toast } from '@/composables/useToast'
 import { useBackDismiss } from '@/composables/useBackDismiss'
+import { useSheetDrag } from '@/components/motion/sheetDrag'
 import Icon from '@/components/Icon.vue'
 
 /*
- * 登录弹层：底部升起，和 App 其他弹层风格一致。
+ * 登录弹层：底部升起，和 App 其他弹层风格一致（动效、下拉关闭和 BottomSheet 共用）。
  * 未登录时点「点赞 / 收藏 / 我的」都会打开它（见 stores/auth.js 的 requireLogin，登录后补做那次操作）。
  * 返回键 / 返回手势只关登录框；换页面时自动关掉，不会留到下一个页面上。
  */
@@ -24,6 +25,19 @@ const busy = ref(false)
 const error = ref('')
 const uidInput = useTemplateRef('uidInput')
 const pwdInput = useTemplateRef('pwdInput')
+const sheetEl = useTemplateRef('sheetEl')
+const maskEl = useTemplateRef('maskEl')
+
+/*
+ * 聚焦输入框，但不让浏览器去「滚到它」：这时弹层还在屏幕下面（升起动画的起点），浏览器会把整个 #app
+ * 往上滚一大截，升起的过程中再一点点滚回来，整页跟着上下晃。不认 preventScroll 的老 iOS 聚焦后把外壳拨回原位。
+ */
+function focusField(el) {
+  if (!el?.focus) return
+  el.focus({ preventScroll: true })
+  const app = document.getElementById('app')
+  if (app?.scrollTop) app.scrollTop = 0
+}
 
 // immediate：启动时就要登录（直接打开需要登录的页面）也照样聚焦
 watch(open, isOpen => {
@@ -31,7 +45,7 @@ watch(open, isOpen => {
     error.value = ''
     busy.value = false
     // 先填账号；账号已经填过（上次输错密码）就直接到密码框
-    nextTick(() => (uid.value.trim() ? pwdInput : uidInput).value?.focus?.())
+    nextTick(() => focusField((uid.value.trim() ? pwdInput : uidInput).value))
   } else {
     password.value = ''
   }
@@ -66,15 +80,26 @@ function close() {
   auth.closeLogin()
   error.value = ''
 }
+/* 往下拉关闭：和点遮罩一样 */
+const drag = useSheetDrag(sheetEl, maskEl, close)
 </script>
 
 <template>
   <Teleport to="#app">
     <Transition name="sheet-mask">
-      <div v-if="open" class="mask" @click="close" />
+      <div v-if="open" ref="maskEl" class="mask" @click="close" />
     </Transition>
-    <Transition name="sheet">
-      <div v-if="open" class="sheet login" role="dialog" aria-modal="true" aria-labelledby="login-title" @keydown.esc="close">
+    <Transition name="sheet" @before-leave="drag.beforeLeave" @after-leave="drag.afterLeave">
+      <div
+        v-if="open"
+        ref="sheetEl"
+        class="sheet login"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="login-title"
+        @keydown.esc="close"
+        v-on="drag.on"
+      >
         <div class="grab" />
         <h4 id="login-title">登录</h4>
 
@@ -113,7 +138,7 @@ function close() {
 
           <p v-if="error" class="err" role="alert">{{ error }}</p>
 
-          <button class="submit" type="submit" :disabled="busy">
+          <button class="submit m-press" type="submit" :disabled="busy">
             {{ busy ? '登录中…' : '登录' }}
           </button>
         </form>

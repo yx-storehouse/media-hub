@@ -23,6 +23,8 @@ import PostSkeleton from '@/components/community/PostSkeleton.vue'
 import CreatorHeader from '@/components/creator/CreatorHeader.vue'
 import UnfollowSheet from '@/components/creator/UnfollowSheet.vue'
 import { createFeed, PAGE } from '@/components/creator/feed'
+import { haptic } from '@/utils/motion'
+import { cameBack, useSlider, cover, vRise, fadeIn } from '@/components/home/motion'
 
 /*
  * 创作者主页（#/creator/:id?tab=videos|posts）：头图 + 头像 + 关注 + 数据行，下面是吸顶的「视频 / 帖子」标签。
@@ -44,6 +46,8 @@ const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 const back = useBack()
+/* 按返回回到这一页：恢复出来的头部和列表不播入场 */
+cameBack()
 
 const scroller = ref(null)
 const header = ref(null)
@@ -142,7 +146,15 @@ function onScroll() {
   lastTop = el.scrollTop
   collapsed.value = el.scrollTop > BANNER - TOP_BAR
   checkMore()
+  // 头图视差 / 回弹放大：每帧最多改一次
+  if (!parallaxRaf) parallaxRaf = requestAnimationFrame(applyParallax)
 }
+let parallaxRaf = 0
+function applyParallax() {
+  parallaxRaf = 0
+  header.value?.parallax?.(scroller.value?.scrollTop ?? 0)
+}
+onBeforeUnmount(() => cancelAnimationFrame(parallaxRaf))
 
 function checkMore() {
   const el = scroller.value
@@ -157,6 +169,21 @@ watch(() => feed.value.loading, busy => { if (!busy) nextTick(checkMore) })
 /* 标签栏吸顶时的滚动位置 */
 const stickTop = () => Math.max(0, (header.value?.$el?.offsetHeight ?? 0) - TOP_BAR)
 
+/* 标签下的指示条（跟着文字宽度）、排序胶囊的白底：选中项变了滑过去 */
+const tabRow = ref(null)
+const tabBar = ref(null)
+useSlider(tabRow, tabBar, cover('.cr-tab.on .lb', 2), { key: () => tab.value, deps: () => [creator.value, count('videos'), count('posts')] })
+const sortRow = ref(null)
+const sortBar = ref(null)
+useSlider(sortRow, sortBar, cover('.chip.on'), { key: () => sort.value })
+
+/* 切标签：新的一栏从切换的方向淡入一点 */
+const panes = {}
+function showPane(key) {
+  const dir = TABS.findIndex(t => t.key === key) > TABS.findIndex(t => t.key === tab.value) ? 1 : -1
+  nextTick(() => fadeIn(panes[key], { x: dir * 12 }))
+}
+
 /* ---------- 标签 / 排序 ---------- */
 
 function selectTab(key) {
@@ -170,6 +197,7 @@ function selectTab(key) {
   }
   savedTop[tab.value] = el.scrollTop
   const stuck = el.scrollTop >= stick - 1
+  showPane(key)
   tab.value = key
   router.replace({ query: { ...route.query, tab: key } })
   nextTick(() => {
@@ -208,7 +236,10 @@ function onFollow() {
   if (!c || followBusy) return
   if (!auth.requireLogin({ then: followAfterLogin })) return // 未登录：弹登录框，登录后自动关注
   if (following.value) unfollowAsk.value = true // 取消关注先确认
-  else setFollow(true)
+  else {
+    haptic()
+    setFollow(true)
+  }
 }
 
 /* 登录后补做关注：先按新账号取一次头部（是否已关注、粉丝数），已经关注过就不再重复 */
@@ -331,7 +362,7 @@ onBeforeRouteUpdate(to => {
   <div class="page creator">
     <!-- 顶栏：返回键压在头图上；滚过头图后变成实底并显示名字 -->
     <div class="cr-top" :class="{ solid: collapsed || failed }">
-      <button type="button" class="cr-back hit-44" aria-label="返回" @click="back"><Icon name="chevL" /></button>
+      <button type="button" class="cr-back hit-44 m-press-sm" aria-label="返回" @click="back"><Icon name="chevL" /></button>
       <span class="cr-tt" :aria-hidden="!collapsed">{{ creator?.name }}</span>
     </div>
 
@@ -343,9 +374,10 @@ onBeforeRouteUpdate(to => {
       </div>
 
       <template v-else>
-        <CreatorHeader ref="header" :creator="creator" :following="following" :followers="followers" @follow="onFollow" />
+        <CreatorHeader ref="header" :creator="creator" :following="following" :followers="followers" :calm="restored" @follow="onFollow" />
 
-        <div class="cr-tabs" role="tablist" aria-label="主页内容">
+        <div ref="tabRow" class="cr-tabs" role="tablist" aria-label="主页内容">
+          <span ref="tabBar" class="m-bar cr-bar" aria-hidden="true" />
           <button
             v-for="t in TABS"
             :id="`cr-tab-${t.key}`"
@@ -365,56 +397,80 @@ onBeforeRouteUpdate(to => {
         </div>
 
         <!-- 视频 -->
-        <section v-show="tab === 'videos'" id="cr-pane-videos" class="cr-pane" role="tabpanel" aria-labelledby="cr-tab-videos">
-          <div v-if="creator && (count('videos') > 0 || sort !== 0)" class="chips">
+        <section
+          v-show="tab === 'videos'"
+          id="cr-pane-videos"
+          :ref="el => { panes.videos = el }"
+          class="cr-pane"
+          role="tabpanel"
+          aria-labelledby="cr-tab-videos"
+        >
+          <div v-if="creator && (count('videos') > 0 || sort !== 0)" ref="sortRow" class="chips">
+            <span ref="sortBar" class="m-bar cr-sort-bar" aria-hidden="true" />
             <button
               v-for="(s, i) in SORTS"
               :key="s"
               type="button"
-              class="chip"
+              class="chip m-off"
               :class="{ on: sort === i }"
               :aria-pressed="sort === i"
               @click="changeSort(i)"
             >
-              {{ s }}
+              <span class="lb">{{ s }}</span>
             </button>
           </div>
-          <div v-if="videos.total === null && !videos.error" class="grid g11 cr-sk" :class="{ pt: !creator }" aria-hidden="true">
-            <div v-for="i in 6" :key="i" class="vc"><div class="cv sk" /><div class="sk sk-tt" /></div>
+          <!-- 骨架 / 换排序前的旧列表原地淡出，新列表错峰浮现 -->
+          <div class="m-swap">
+            <Transition name="m-skel">
+              <div v-if="videos.total === null && !videos.error" class="grid g11 cr-sk" :class="{ pt: !creator }" aria-hidden="true">
+                <div v-for="i in 6" :key="i" class="vc"><div class="cv sk" /><div class="sk sk-tt" /></div>
+              </div>
+              <div v-else-if="videos.total === null" class="empty">
+                加载失败，请检查网络
+                <button type="button" class="retry" @click="videos.more()">重试</button>
+              </div>
+              <div v-else-if="!videos.list.length" v-rise.self class="empty">还没有发布视频</div>
+              <div v-else :key="`list${sortKey}`">
+                <div v-rise class="grid g11">
+                  <VideoCard v-for="v in videos.list" :key="v.id" :video="v" />
+                </div>
+                <div class="cr-foot">
+                  <span v-if="videos.loading">加载中…</span>
+                  <button v-else-if="videos.error" type="button" class="cr-more" @click="videos.more()">加载失败，点击重试</button>
+                  <span v-else-if="videos.done">没有更多了</span>
+                </div>
+              </div>
+            </Transition>
           </div>
-          <div v-else-if="videos.total === null" class="empty">
-            加载失败，请检查网络
-            <button type="button" class="retry" @click="videos.more()">重试</button>
-          </div>
-          <div v-else-if="!videos.list.length" class="empty">还没有发布视频</div>
-          <template v-else>
-            <div :key="sortKey" v-fade-in="sortKey > 0" class="grid g11">
-              <VideoCard v-for="v in videos.list" :key="v.id" :video="v" />
-            </div>
-            <div class="cr-foot">
-              <span v-if="videos.loading">加载中…</span>
-              <button v-else-if="videos.error" type="button" class="cr-more" @click="videos.more()">加载失败，点击重试</button>
-              <span v-else-if="videos.done">没有更多了</span>
-            </div>
-          </template>
         </section>
 
         <!-- 帖子：卡片和社区列表同一个组件；作者就是本页的创作者，头像 / 名字不再链接 -->
-        <section v-show="tab === 'posts'" id="cr-pane-posts" class="cr-pane" role="tabpanel" aria-labelledby="cr-tab-posts">
-          <PostSkeleton v-if="posts.total === null && !posts.error" :count="2" />
-          <div v-else-if="posts.total === null" class="empty">
-            加载失败，请检查网络
-            <button type="button" class="retry" @click="posts.more()">重试</button>
+        <section
+          v-show="tab === 'posts'"
+          id="cr-pane-posts"
+          :ref="el => { panes.posts = el }"
+          class="cr-pane"
+          role="tabpanel"
+          aria-labelledby="cr-tab-posts"
+        >
+          <div class="m-swap">
+            <Transition name="m-skel">
+              <PostSkeleton v-if="posts.total === null && !posts.error" :count="2" />
+              <div v-else-if="posts.total === null" class="empty">
+                加载失败，请检查网络
+                <button type="button" class="retry" @click="posts.more()">重试</button>
+              </div>
+              <div v-else-if="!posts.list.length" v-rise.self class="empty">还没有发布帖子</div>
+              <div v-else>
+                <PostCard v-for="p in posts.list" :key="p.id" :post="p" :author-link="false" />
+                <div class="cr-foot">
+                  <span v-if="posts.loading">加载中…</span>
+                  <button v-else-if="posts.error" type="button" class="cr-more" @click="posts.more()">加载失败，点击重试</button>
+                  <span v-else-if="posts.done">没有更多了</span>
+                </div>
+              </div>
+            </Transition>
           </div>
-          <div v-else-if="!posts.list.length" class="empty">还没有发布帖子</div>
-          <template v-else>
-            <PostCard v-for="p in posts.list" :key="p.id" :post="p" :author-link="false" />
-            <div class="cr-foot">
-              <span v-if="posts.loading">加载中…</span>
-              <button v-else-if="posts.error" type="button" class="cr-more" @click="posts.more()">加载失败，点击重试</button>
-              <span v-else-if="posts.done">没有更多了</span>
-            </div>
-          </template>
         </section>
       </template>
       <div class="pad-b" />
@@ -439,7 +495,7 @@ onBeforeRouteUpdate(to => {
   padding: 0 14px 0 12px;
   /* 透明时不挡住下面的滚动（拖头图也能滚）；变成实底后挡住，免得点穿到下面的卡片 */
   pointer-events: none;
-  transition: background-color .2s, box-shadow .2s;
+  transition: background-color var(--dur-2) var(--ease-out), box-shadow var(--dur-2) var(--ease-out);
 }
 .cr-top > * { pointer-events: auto; }
 .cr-top.solid { background: var(--bg); box-shadow: 0 1px 0 var(--line); pointer-events: auto; }
@@ -455,27 +511,47 @@ onBeforeRouteUpdate(to => {
   -webkit-backdrop-filter: blur(6px);
   backdrop-filter: blur(6px);
   color: #fff;
-  transition: background-color .2s;
+  transition: background-color var(--dur-2) var(--ease-out);
 }
 .cr-back svg { width: 18px; height: 18px; stroke-width: 2.8; }
 .cr-top.solid .cr-back { background: transparent; }
-.cr-tt { min-width: 0; overflow: hidden; font-size: 16px; font-weight: 600; white-space: nowrap; text-overflow: ellipsis; opacity: 0; transition: opacity .2s; }
-.cr-top.solid .cr-tt { opacity: 1; }
+/* 顶栏变实底时名字从下面浮上来，变回透明时淡出 */
+.cr-tt {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 16px;
+  font-weight: 600;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  opacity: 0;
+  transform: translate3d(0, 8px, 0);
+  transition: opacity var(--dur-2) var(--ease-in), transform var(--dur-2) var(--ease-in);
+}
+.cr-top.solid .cr-tt { opacity: 1; transform: none; transition: opacity var(--dur-3) var(--ease-out), transform var(--dur-3) var(--ease-out); }
 
 .cr-fail { padding-top: 120px; }
 
 /* ---- 吸顶标签栏 ---- */
 .cr-tabs { position: sticky; top: 48px; z-index: 4; display: flex; height: 46px; border-bottom: 1px solid var(--line); background: var(--bg); }
-.cr-tab { display: flex; flex: 1; justify-content: center; color: var(--t2); font-size: 16px; font-weight: 500; }
+.cr-tab { display: flex; flex: 1; justify-content: center; color: var(--t2); font-size: 16px; font-weight: 500; transition: color var(--dur-2) var(--ease-out); }
 .cr-tab .lb { position: relative; display: flex; align-items: center; gap: 5px; white-space: nowrap; }
 .cr-tab .n { font-size: 13px; font-weight: 500; font-variant-numeric: tabular-nums; }
 .cr-tab.on { color: var(--t1); font-weight: 700; }
-.cr-tab.on .lb::after { content: ''; position: absolute; left: -2px; right: -2px; bottom: 0; height: 3px; border-radius: 2px; background: var(--accent); }
+/* 指示条（useSlider）：和文字一样宽，换标签时滑过去 */
+.cr-bar { bottom: 0; height: 3px; border-radius: 2px; background: var(--accent); }
+/* 排序胶囊的白底（useSlider）：压在灰底上面、文字下面 */
+.cr-pane .chips { position: relative; z-index: 0; }
+.cr-sort-bar { top: 12px; z-index: 1; height: 27.5px; border-radius: 14px; background: var(--accent); }
+.cr-pane .chip { transition: color var(--dur-2) var(--ease-in-out), background-color var(--dur-2) var(--ease-in-out); }
+.cr-pane [data-slider] > .chip.on { background: transparent; }
+.cr-pane .chip .lb { position: relative; z-index: 2; transition: opacity var(--dur-1) var(--ease-out); }
+/* 胶囊不缩放（m-off）：缩放会让文字跑到白底下面去，按下时只把字调暗 */
+.cr-pane .chip:active .lb { opacity: .6; }
 .cr-tab:focus-visible { outline-offset: -4px; }
 
 /* 内容不满一屏时也能让标签栏吸顶（切标签时不跳回头部） */
 .cr-pane { min-height: calc(100% - 94px); }
-.cr-pane > .grid:first-child { padding-top: 14px; }
+.cr-pane > .m-swap:first-child .grid { padding-top: 14px; }
 
 .cr-foot { display: grid; place-items: center; height: 52px; color: var(--t2); font-size: 13px; }
 .cr-more { height: 32px; padding: 0 14px; color: var(--t1); font-size: 13px; }

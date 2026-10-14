@@ -5,10 +5,11 @@ import router, { prefetchRoutes } from './router'
 import { useAuthStore, connectAuthToHttp } from './stores/auth'
 import { setTokenProvider } from './api/http'
 import { vPress } from './directives/press'
-import { vFadeIn } from './directives/fadeIn'
+import { installPress } from './components/motion/press'
 import { toast } from './composables/useToast'
 
 import './styles/tokens.css'
+import './styles/motion.css'
 import './styles/base.css'
 import './styles/common.css'
 
@@ -23,7 +24,8 @@ auth.init()
 
 app.use(router)
 app.directive('press', vPress)
-app.directive('fade-in', vFadeIn)
+/* 全局按压反馈：卡片、按钮按下缩一点、松手弹回（一组委托监听，见 components/motion/press.js） */
+installPress()
 
 /* last line of defence: a failed request or render error shows a message instead of failing silently */
 app.config.errorHandler = err => {

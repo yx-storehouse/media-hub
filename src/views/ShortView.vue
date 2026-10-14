@@ -1,6 +1,6 @@
 <script setup>
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref, shallowRef, useTemplateRef, watch } from 'vue'
-import { getShorts, getVideo, toggleVideoLike, toggleVideoFav, toggleVideoDislike, addHistory, isDemoId } from '@/api'
+import { getShorts, getVideo, getCreator, toggleVideoLike, toggleVideoFav, toggleVideoDislike, toggleFollow, addHistory, isDemoId } from '@/api'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { toast } from '@/composables/useToast'
@@ -419,6 +419,79 @@ function syncNear() {
   const from = Math.max(0, active.value - 1)
   const to = Math.min(clips.value.length - 1, active.value + 2)
   for (let i = from; i <= to; i++) syncState(clips.value[i])
+  // 关注状态只取屏幕上这条和下一条的作者（同一位作者只取一次）
+  checkFollow(clips.value[active.value]?.creator?.id)
+  checkFollow(clips.value[active.value + 1]?.creator?.id)
+}
+
+/* ---------- 关注作者：头像下的「+」（只管关注；取消关注去主页） ---------- */
+
+/*
+ * 作者 id → 是否已关注（按当前登录身份）。没登录时谁都是「没关注」，不用取；
+ * 登录后滑到附近才取一次（取到之前不显示「+」，免得已关注的作者闪一下）。
+ * 每次回到这个页面都重新核对一遍（可能在主页、播放页里取消过），核对完之前先显示原来的。
+ */
+const follows = reactive(new Map())
+/** 这一轮已经核对过的作者；followRound 在每次回到页面、换身份时 +1 */
+const followChecked = new Map()
+const followLoading = new Map()
+let followRound = 0
+const followBusy = new Set()
+
+function followOf(clip) {
+  const id = clip.creator?.id
+  if (id == null) return null
+  if (!auth.loggedIn) return false
+  return follows.has(id) ? follows.get(id) : null
+}
+
+/** 取一位作者在当前身份下的关注状态（force：这一轮核对过也再取，登录后补做关注时用） */
+function checkFollow(id, force = false) {
+  if (id == null || !auth.loggedIn || !isRealId(id)) return Promise.resolve()
+  if (followLoading.has(id)) return followLoading.get(id)
+  if (!force && followChecked.get(id) === followRound) return Promise.resolve()
+  const round = followRound
+  const ep = authEpoch()
+  const p = getCreator(id)
+    .then(d => {
+      if (ep !== authEpoch()) return
+      // 正在关注中（请求还没回来）的以本地为准
+      if (!followBusy.has(id)) follows.set(id, !!d.following)
+      followChecked.set(id, round)
+    })
+    .catch(() => { /* 取不到就不显示「+」，下次滑到附近再试 */ })
+    .finally(() => { if (followLoading.get(id) === p) followLoading.delete(id) })
+  followLoading.set(id, p)
+  return p
+}
+
+async function onFollow(i) {
+  const id = clips.value[i]?.creator?.id
+  if (id == null) return
+  if (!auth.loggedIn) {
+    // 登录框在全屏里看不见，先退出全屏；登录后先取回这位作者的状态，已经关注了就不再点
+    exitFullscreen()
+    auth.requireLogin({ then: () => followAfterLogin(id) })
+    return
+  }
+  if (followBusy.has(id) || follows.get(id) === true) return
+  follows.set(id, true)
+  followBusy.add(id)
+  try {
+    const res = await toggleFollow(id, { on: true })
+    if (typeof res?.active === 'boolean') follows.set(id, res.active)
+  } catch (e) {
+    follows.set(id, false)
+    toast(e?.code === 'demo' ? e.message : '关注失败，请稍后重试')
+  } finally {
+    followBusy.delete(id)
+  }
+}
+async function followAfterLogin(id) {
+  await checkFollow(id, true)
+  if (follows.get(id) !== false) return
+  const i = clips.value.findIndex(c => c.creator?.id === id)
+  if (i >= 0) onFollow(i)
 }
 
 /** 登录前点的赞 / 藏：先取回这条在新身份下的状态，再补做（已经是想要的状态就不动） */
@@ -429,6 +502,10 @@ async function completeAfterLogin(id, kind, on) {
 }
 
 watch(() => auth.token, tok => {
+  // 换了身份：关注状态全部作废（没登录时都显示「+」，登录后滑到附近重新取）
+  follows.clear()
+  followLoading.clear()
+  followRound++
   if (!tok) {
     // 退出登录：上一个人的赞 / 藏不再显示（未登录时大家都是没点过）
     const ep = authEpoch()
@@ -730,6 +807,8 @@ onMounted(() => {
 
 onActivated(() => {
   visible = true
+  // 关注状态可能在别的页面改过：这一轮重新核对（下面 syncNear 取屏幕上这条的作者）
+  followRound++
   clearInterval(timer)
   timer = setInterval(tick, TICK_MS)
   window.addEventListener('online', onOnline)
@@ -871,6 +950,7 @@ function setSpeed(speed) {
           :current="i === active"
           :eager="Math.abs(i - active) <= 1"
           :near="Math.abs(i - active) <= 1"
+          :following="followOf(clip)"
           @toggle="toggle(i)"
           @dbllike="onDoubleLike(i)"
           @seek="t => seek(i, t)"
@@ -884,6 +964,7 @@ function setSpeed(speed) {
           @like="onLike(i)"
           @dislike="onDislike(i)"
           @fav="onFav(i)"
+          @follow="onFollow(i)"
           @settings="openSettings"
         />
       </div>

@@ -16,6 +16,8 @@ import VideoCard from '@/components/VideoCard.vue'
 import PostCard from '@/components/community/PostCard.vue'
 import ListFoot from '@/components/home/ListFoot.vue'
 import SkeletonGrid from '@/components/home/SkeletonGrid.vue'
+import { haptic } from '@/utils/motion'
+import { cameBack, useSlider, cover, vRise, fadeIn, pop } from '@/components/home/motion'
 
 defineOptions({ name: 'FavoritesView' })
 
@@ -36,6 +38,8 @@ const router = useRouter()
 const auth = useAuthStore()
 const app = useAppStore()
 const postStore = usePostStore()
+/* 按返回回到这一页：恢复出来的列表不播入场 */
+cameBack()
 
 const feeds = {
   video: createFeed(page => getMyFavs('video', page)),
@@ -67,10 +71,13 @@ const off = reactive(new Set())
 const busy = new Set()
 const isOff = (type, id) => off.has(`${type}:${id}`)
 
-async function toggleFav(type, item) {
+async function toggleFav(type, item, e) {
   const k = `${type}:${item.id}`
   if (busy.has(k)) return
   const on = off.has(k) // 现在是取消状态 → 收藏回来
+  // 心形立刻弹一下：收藏回来时回弹 + 轻震，取消时轻轻一缩
+  pop(e?.currentTarget?.querySelector('svg'), on)
+  if (on) haptic()
   const set = active => (active ? off.delete(k) : off.add(k))
   busy.add(k)
   set(on)
@@ -120,6 +127,11 @@ watch(() => KEYS.map(k => feeds[k].total), totals => {
   if (i >= 0) selectTab(KEYS[i])
 })
 
+/* 标签下的指示条（跟着文字宽度）：切标签时滑过去 */
+const tabRow = ref(null)
+const tabBar = ref(null)
+useSlider(tabRow, tabBar, cover('.fv-tab.on .lb', 2), { key: () => tab.value, deps: () => KEYS.map(count) })
+
 function selectTab(key) {
   if (key === tab.value) {
     // 再点一次当前标签：回到顶部
@@ -127,6 +139,9 @@ function selectTab(key) {
     return
   }
   pinned = true
+  // 新的一栏从切换的方向淡入一点
+  const dir = KEYS.indexOf(key) > KEYS.indexOf(tab.value) ? 1 : -1
+  nextTick(() => fadeIn(scrollers[key].value, { x: dir * 12 }))
   tab.value = key
   router.replace({ query: { ...route.query, tab: key } })
   nextTick(checkMore[key])
@@ -211,14 +226,15 @@ onBeforeUnmount(() => {
   <div class="page favorites">
     <BackHeader title="我的收藏" />
 
-    <div v-if="session === 0" class="empty">
+    <div v-if="session === 0" v-rise.self class="empty">
       <Icon name="heart" class="em-ic" />
       登录后可以在这里看到收藏的视频、帖子和专题
       <button type="button" class="retry" @click="auth.requireLogin()">去登录</button>
     </div>
 
     <template v-else>
-      <div class="fv-tabs" role="tablist" aria-label="收藏的内容">
+      <div ref="tabRow" class="fv-tabs" role="tablist" aria-label="收藏的内容">
+        <span ref="tabBar" class="m-bar fv-bar" aria-hidden="true" />
         <button
           v-for="t in TABS"
           :id="`fv-tab-${t.key}`"
@@ -248,77 +264,79 @@ onBeforeUnmount(() => {
         :aria-labelledby="`fv-tab-${t.key}`"
         @scroll.passive="onScroll(t.key, $event)"
       >
-        <!-- 第一页还没回来：骨架 -->
-        <template v-if="session === null || (feeds[t.key].total === null && !feeds[t.key].error)">
-          <SkeletonGrid v-if="t.key === 'video'" :count="6" gap="g16" class="fv-pt" />
-          <div v-else-if="t.key === 'topic'" class="tp-grid" aria-hidden="true">
-            <div v-for="i in 4" :key="i" class="tp sk" />
-          </div>
-          <div v-else aria-hidden="true">
-            <div v-for="i in 2" :key="i" class="sk-post">
-              <div class="sk av" />
-              <div class="bd"><div class="sk l1" /><div class="sk l2" /><div class="sk md" /></div>
+        <!-- 第一页还没回来：骨架。骨架原地淡出，内容错峰浮现 -->
+        <div class="m-swap">
+          <Transition name="m-skel">
+            <SkeletonGrid v-if="(session === null || (feeds[t.key].total === null && !feeds[t.key].error)) && t.key === 'video'" :count="6" gap="g16" class="fv-pt" />
+            <div v-else-if="(session === null || (feeds[t.key].total === null && !feeds[t.key].error)) && t.key === 'topic'" class="tp-grid" aria-hidden="true">
+              <div v-for="i in 4" :key="i" class="tp sk" />
             </div>
-          </div>
-        </template>
+            <div v-else-if="session === null || (feeds[t.key].total === null && !feeds[t.key].error)" aria-hidden="true">
+              <div v-for="i in 2" :key="i" class="sk-post">
+                <div class="sk av" />
+                <div class="bd"><div class="sk l1" /><div class="sk l2" /><div class="sk md" /></div>
+              </div>
+            </div>
 
-        <div v-else-if="feeds[t.key].total === null" class="empty">
-          加载失败，请检查网络
-          <button type="button" class="retry" @click="feeds[t.key].more()">重试</button>
+            <div v-else-if="feeds[t.key].total === null" class="empty">
+              加载失败，请检查网络
+              <button type="button" class="retry" @click="feeds[t.key].more()">重试</button>
+            </div>
+
+            <div v-else-if="!feeds[t.key].list.length" v-rise.self class="empty">
+              <Icon name="heart" class="em-ic" />
+              {{ t.empty }}
+              <p class="em-sub">{{ t.hint }}</p>
+              <button type="button" class="retry" @click="goFind(t.key)">{{ t.go }}</button>
+            </div>
+
+            <div v-else>
+              <!-- 视频：两列卡片，右上角的心形取消 / 恢复收藏 -->
+              <div v-if="t.key === 'video'" v-rise class="grid g16 fv-pt">
+                <div v-for="v in feeds.video.list" :key="v.id" class="fv" :class="{ off: isOff('video', v.id) }">
+                  <VideoCard :video="v" @click="onOpen('video', v.id)" />
+                  <button
+                    type="button"
+                    class="fv-heart hit-44 m-press-sm"
+                    :aria-pressed="!isOff('video', v.id)"
+                    :aria-label="isOff('video', v.id) ? `收藏：${v.title}` : `取消收藏：${v.title}`"
+                    @click="toggleFav('video', v, $event)"
+                  >
+                    <Icon name="heart" />
+                  </button>
+                </div>
+              </div>
+
+              <!-- 帖子：和社区同一个卡片，卡片底部的收藏按钮就能取消 -->
+              <div v-else-if="t.key === 'post'">
+                <PostCard v-for="p in feeds.post.list" :key="p.id" :post="p" :class="{ 'fv-off': !postStore.stats(p).faved }" />
+              </div>
+
+              <!-- 专题：和片库一样的卡片 -->
+              <div v-else v-rise class="tp-grid">
+                <div v-for="c in feeds.topic.list" :key="c.id" class="tp-it" :class="{ off: isOff('topic', c.id) }">
+                  <RouterLink :to="`/topic/${encodeURIComponent(c.id)}`" @click="onOpen('topic', c.id)">
+                    <Cover class="tp" v-bind="c.cover">
+                      <b>{{ c.name }}</b>
+                      <span>{{ c.count }}部</span>
+                    </Cover>
+                  </RouterLink>
+                  <button
+                    type="button"
+                    class="fv-heart hit-44 m-press-sm"
+                    :aria-pressed="!isOff('topic', c.id)"
+                    :aria-label="isOff('topic', c.id) ? `收藏：${c.name}` : `取消收藏：${c.name}`"
+                    @click="toggleFav('topic', c, $event)"
+                  >
+                    <Icon name="heart" />
+                  </button>
+                </div>
+              </div>
+
+              <ListFoot :feed="feeds[t.key]" />
+            </div>
+          </Transition>
         </div>
-
-        <div v-else-if="!feeds[t.key].list.length" class="empty">
-          <Icon name="heart" class="em-ic" />
-          {{ t.empty }}
-          <p class="em-sub">{{ t.hint }}</p>
-          <button type="button" class="retry" @click="goFind(t.key)">{{ t.go }}</button>
-        </div>
-
-        <template v-else>
-          <!-- 视频：两列卡片，右上角的心形取消 / 恢复收藏 -->
-          <div v-if="t.key === 'video'" class="grid g16 fv-pt">
-            <div v-for="v in feeds.video.list" :key="v.id" class="fv" :class="{ off: isOff('video', v.id) }">
-              <VideoCard :video="v" @click="onOpen('video', v.id)" />
-              <button
-                type="button"
-                class="fv-heart hit-44"
-                :aria-pressed="!isOff('video', v.id)"
-                :aria-label="isOff('video', v.id) ? `收藏：${v.title}` : `取消收藏：${v.title}`"
-                @click="toggleFav('video', v)"
-              >
-                <Icon name="heart" />
-              </button>
-            </div>
-          </div>
-
-          <!-- 帖子：和社区同一个卡片，卡片底部的收藏按钮就能取消 -->
-          <template v-else-if="t.key === 'post'">
-            <PostCard v-for="p in feeds.post.list" :key="p.id" :post="p" :class="{ 'fv-off': !postStore.stats(p).faved }" />
-          </template>
-
-          <!-- 专题：和片库一样的卡片 -->
-          <div v-else class="tp-grid">
-            <div v-for="c in feeds.topic.list" :key="c.id" class="tp-it" :class="{ off: isOff('topic', c.id) }">
-              <RouterLink :to="`/topic/${encodeURIComponent(c.id)}`" @click="onOpen('topic', c.id)">
-                <Cover class="tp" v-bind="c.cover">
-                  <b>{{ c.name }}</b>
-                  <span>{{ c.count }}部</span>
-                </Cover>
-              </RouterLink>
-              <button
-                type="button"
-                class="fv-heart hit-44"
-                :aria-pressed="!isOff('topic', c.id)"
-                :aria-label="isOff('topic', c.id) ? `收藏：${c.name}` : `取消收藏：${c.name}`"
-                @click="toggleFav('topic', c)"
-              >
-                <Icon name="heart" />
-              </button>
-            </div>
-          </div>
-
-          <ListFoot :feed="feeds[t.key]" />
-        </template>
         <div class="pad-b" />
       </section>
     </template>
@@ -327,19 +345,20 @@ onBeforeUnmount(() => {
 
 <style scoped>
 /* ---- 标签栏 ---- */
-.fv-tabs { display: flex; flex: none; height: 44px; border-bottom: 1px solid var(--line); }
-.fv-tab { display: flex; flex: 1; justify-content: center; color: var(--t2); font-size: 15px; font-weight: 500; }
+.fv-tabs { position: relative; display: flex; flex: none; height: 44px; border-bottom: 1px solid var(--line); }
+.fv-tab { display: flex; flex: 1; justify-content: center; color: var(--t2); font-size: 15px; font-weight: 500; transition: color var(--dur-2) var(--ease-out); }
 .fv-tab .lb { position: relative; display: flex; align-items: center; gap: 5px; white-space: nowrap; }
 .fv-tab .n { font-size: 12.5px; font-weight: 500; font-variant-numeric: tabular-nums; }
 .fv-tab.on { color: var(--t1); font-weight: 700; }
-.fv-tab.on .lb::after { content: ''; position: absolute; left: -2px; right: -2px; bottom: 0; height: 3px; border-radius: 2px; background: var(--accent); }
+/* 指示条（useSlider）：和文字一样宽，切标签时滑过去 */
+.fv-bar { bottom: 0; height: 3px; border-radius: 2px; background: var(--accent); }
 .fv-tab:focus-visible { outline-offset: -4px; }
 
 .fv-pt { padding-top: 14px; }
 
 /* ---- 视频卡片 + 心形按钮 ---- */
 .fv { position: relative; min-width: 0; }
-.fv .vc { display: block; transition: opacity .2s; }
+.fv .vc { display: block; transition: opacity var(--dur-2) var(--ease-out); }
 .fv.off .vc, .tp-it.off > a { opacity: .4; }
 .fv-heart {
   position: absolute;
@@ -356,17 +375,18 @@ onBeforeUnmount(() => {
   backdrop-filter: blur(6px);
   color: #fff;
 }
-.fv-heart svg { width: 16px; height: 16px; fill: currentColor; stroke-width: 2; }
-.fv-heart[aria-pressed="false"] svg { fill: none; }
-.fv-heart:active { transform: scale(.92); }
+/* 填充用 fill-opacity 过渡（fill 从 none 到颜色没法渐变）；按下去立刻缩、松手回弹是全局 m-press-sm */
+.fv-heart svg { width: 16px; height: 16px; fill: currentColor; stroke-width: 2; transition: fill-opacity var(--dur-1) var(--ease-out); }
+.fv-heart[aria-pressed="false"] svg { fill-opacity: 0; }
 
 /* ---- 帖子：取消收藏后变暗 ---- */
 .fv-off { opacity: .55; }
+:deep(.post) { transition: opacity var(--dur-2) var(--ease-out), background-color var(--dur-2) var(--ease-out); }
 
 /* ---- 专题卡片（同片库） ---- */
 .tp-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 14px; padding: 14px; }
 .tp-it { position: relative; min-width: 0; }
-.tp-it > a { display: block; transition: opacity .2s; }
+.tp-it > a { display: block; transition: opacity var(--dur-2) var(--ease-out); }
 .tp {
   display: flex;
   align-items: flex-end;

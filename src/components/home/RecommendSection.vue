@@ -1,8 +1,10 @@
 <script setup>
-import { ref, shallowRef, computed, onDeactivated } from 'vue'
+import { ref, shallowRef, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { getVideos } from '@/api'
 import { toast } from '@/composables/useToast'
+import { reducedMotion } from '@/utils/motion'
+import { vRise, dur, ease } from './motion'
 import Icon from '@/components/Icon.vue'
 import VideoCard from '@/components/VideoCard.vue'
 import SkeletonGrid from './SkeletonGrid.vue'
@@ -22,12 +24,11 @@ const batchNo = ref(0)
 /* null = 第一批还没回来（显示同样大小的骨架，卡片到了不把页面往下推） */
 const videos = shallowRef(null)
 const failed = ref(false)
-/* bumps whenever a list arrives: re-keys the grid so a new batch replays the fade */
+/* 每到一批就 +1：网格换 key，旧的一批原地淡出，新的一批入场 */
 const batch = ref(0)
-/* the next grid fades in (换一批 only, not the first load) */
+/* 新的一批怎么入场：第一次是错峰从下往上浮现；换一批是错峰淡入 + 轻微放大（和旧的一批交叉） */
 const fading = ref(false)
-/* one-shot spin, cleared on animationend so it doesn't replay when the tab is shown again */
-const spinning = ref(false)
+const enterWith = () => (fading.value ? { y: 0, scale: 0.96 } : {})
 
 async function load(fade = false) {
   const requested = batchNo.value
@@ -60,14 +61,20 @@ const prevBatch = n => {
   return total ? (n - 1 + total) % total : Math.max(0, n - 1)
 }
 
+/* 换一批：刷新图标快速转一圈（一次性动画，KeepAlive 收起再回来不会重播；连点从头再转） */
+const shuffleBtn = ref(null)
+function spin() {
+  const svg = shuffleBtn.value?.querySelector('svg')
+  if (!svg || reducedMotion()) return
+  svg.getAnimations?.().forEach(a => a.cancel())
+  svg.animate([{ transform: 'rotate(0deg)' }, { transform: 'rotate(360deg)' }], { duration: dur('--dur-4'), easing: ease('--ease-out') })
+}
+
 function shuffle() {
-  spinning.value = true
+  spin()
   batchNo.value = nextBatch(batchNo.value)
   load(true)
 }
-
-/* hidden mid-spin: animationend never fires on detached DOM, so drop the class now */
-onDeactivated(() => { spinning.value = false })
 
 /* 推荐页「再点一次首页」时整页换一批 */
 defineExpose({ shuffle })
@@ -82,19 +89,23 @@ load()
       <RouterLink v-if="topicPath" class="sec-more" :to="topicPath">全部<Icon name="chevR" /></RouterLink>
     </div>
 
-    <div v-if="videos" :key="batch" v-fade-in="fading" class="grid">
-      <VideoCard v-for="(v, i) in videos" :key="v.id" :video="v" :big="section.featured && i === 0" />
+    <!-- 骨架 / 上一批原地淡出，新的一批错峰入场 -->
+    <div class="m-swap">
+      <Transition name="m-skel">
+        <div v-if="videos" :key="batch" v-rise="enterWith()" class="grid">
+          <VideoCard v-for="(v, i) in videos" :key="v.id" :video="v" :big="section.featured && i === 0" />
+        </div>
+        <div v-else-if="failed" class="sec-fail">
+          这一组没加载出来
+          <button type="button" class="retry" @click="load()">重试</button>
+        </div>
+        <SkeletonGrid v-else :count="section.size || 4" :big="section.featured" />
+      </Transition>
     </div>
-    <div v-else-if="failed" class="sec-fail">
-      这一组没加载出来
-      <button type="button" class="retry" @click="load()">重试</button>
-    </div>
-    <SkeletonGrid v-else :count="section.size || 4" :big="section.featured" />
 
     <div class="sec-btns">
-      <!-- keyed icon: every press restarts the spin -->
-      <button type="button" class="btn-soft" :class="{ spin: spinning }" @click="shuffle" @animationend="spinning = false">
-        <Icon :key="batchNo" name="refresh" />换一批
+      <button ref="shuffleBtn" type="button" class="btn-soft" @click="shuffle">
+        <Icon name="refresh" />换一批
       </button>
       <button v-if="topicPath" type="button" class="btn-soft" @click="router.push(topicPath)"><Icon name="more" />看更多</button>
     </div>
@@ -125,6 +136,7 @@ load()
 /* enlarge the tap area of the small text link without moving it */
 .sec-more::after { content: ''; position: absolute; inset: -12px -10px; }
 .sec-more svg { width: 13px; height: 13px; stroke-width: 2.8; }
+.sec-more:active { color: var(--t3); }
 .sec-btns { display: flex; gap: 11px; padding: 12px 14px 0; }
 .sec-fail { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; height: 150px; margin: 0 14px; border-radius: 8px; background: #121212; color: var(--t2); font-size: 13px; }
 .sec-fail .retry { height: 30px; padding: 0 18px; border-radius: 15px; background: var(--chip); color: var(--t1); font-size: 13px; }

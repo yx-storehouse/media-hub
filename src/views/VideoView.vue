@@ -1,5 +1,13 @@
+<script>
+/*
+ * 这次打开 App 以来已经「依次升上来」过的相似推荐（视频 id:第几批）：
+ * 返回到同一个视频、或者同一批再显示一次时不再重播入场动画。
+ */
+const shownRelated = new Set()
+</script>
+
 <script setup>
-import { ref, shallowRef, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
+import { ref, shallowRef, computed, watch, nextTick, reactive, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter, onBeforeRouteUpdate } from 'vue-router'
 import {
   getVideo, getRelatedVideos, getCreator, toggleVideoLike, toggleVideoDislike, toggleVideoFav, toggleFollow, addHistory, isDemoId
@@ -9,10 +17,13 @@ import { useBack } from '@/composables/useBack'
 import { toast } from '@/composables/useToast'
 import { share } from '@/composables/useShare'
 import { formatCount, formatDate } from '@/utils/format'
+import { cssDuration, cssEasing, haptic, reducedMotion } from '@/utils/motion'
 import Icon from '@/components/Icon.vue'
 import Cover from '@/components/Cover.vue'
 import VideoPlayer from '@/components/video/VideoPlayer.vue'
 import RelatedVideo from '@/components/video/RelatedVideo.vue'
+import ActBurst from '@/components/video/ActBurst.vue'
+import RollNum from '@/components/video/RollNum.vue'
 import { pickResume, setResume } from '@/components/video/resume'
 import { peekVideo, rememberVideo } from '@/components/video/preview'
 import { parseList, nextInList } from '@/components/video/playlist'
@@ -39,9 +50,17 @@ const preview = shallowRef(peekVideo(route.params.id))
 const failed = ref(null)
 const scroller = ref(null)
 const relatedEl = ref(null)
-/* 换一批：batch 递增；relatedKey 让新的一批重新淡入 */
+/* 换一批：batch 递增；relatedKey 让新的一批重新挂上，riseRelated 决定这一批要不要依次升上来 */
 const batch = ref(0)
 const relatedKey = ref(0)
+const riseRelated = ref(false)
+/** 新的一批相似推荐到了：同一个视频的同一批这次打开 App 里只升上来一次 */
+function showRelated(id, b) {
+  const key = `${id}:${b}`
+  riseRelated.value = !shownRelated.has(key)
+  shownRelated.add(key)
+  relatedKey.value++
+}
 const spinning = ref(false)
 const tagsOpen = ref(false)
 const descOpen = ref(false)
@@ -96,7 +115,7 @@ async function load(id, query = route.query) {
     startSec.value = pickResume(v)
     video.value = v
     related.value = list
-    relatedKey.value++
+    showRelated(v.id, 0)
     if (scroller.value) scroller.value.scrollTop = 0
     loadCreator(v)
     loadListNext(parseList(query), v.id)
@@ -141,7 +160,7 @@ async function shuffle() {
     const list = await getRelatedVideos(id, { batch: b })
     if (b !== batch.value || id !== video.value?.id) return
     related.value = list
-    relatedKey.value++
+    showRelated(id, b)
   } catch {
     toast('加载失败，请稍后重试')
   }
@@ -283,8 +302,48 @@ async function afterLogin(kind, id) {
   interact(kind)
 }
 
+/* ---------- 底部操作栏的动效（和短视频右侧按钮同一套） ---------- */
+
+/*
+ * 按下立刻缩一下（CSS :active）；状态真的变了才弹：点亮是回弹 + 赞 / 收藏冒一圈小点并轻震，熄掉是轻轻一缩。
+ * 没登录会先弹登录框、请求中连点不算，所以先记下「刚点过」，等状态真的变了再动；登录后补做的那一下不动。
+ * fx[kind] = { kind: 'on' | 'off' | 'tap', key }：key 递增会重新挂上图标，连点时从头播。
+ */
+const fx = reactive({})
+const rings = reactive({})
+const tappedAt = {}
+const TAP_FX_MS = 600
+function playFx(id, kind) {
+  fx[id] = { kind, key: (fx[id]?.key || 0) + 1 }
+}
+function tapAct(kind) {
+  tappedAt[kind] = performance.now()
+  interact(kind)
+}
+function tapShare() {
+  playFx('share', 'tap')
+  share({ title: video.value?.title })
+}
+for (const kind of ['like', 'fav', 'dislike']) {
+  watch(() => !!video.value?.[FIELD[kind]], on => {
+    if (performance.now() - (tappedAt[kind] ?? -Infinity) > TAP_FX_MS) return
+    tappedAt[kind] = -Infinity
+    playFx(kind, on ? 'on' : 'off')
+    if (on && kind !== 'dislike') {
+      rings[kind] = (rings[kind] || 0) + 1
+      haptic()
+    }
+  })
+}
+const fxClass = id => (fx[id] ? `fx-${fx[id].kind}` : null)
+function endFx(id, e) {
+  if (e.target === e.currentTarget) fx[id] = null
+}
+
 /* ---------- 关注作者 ---------- */
 
+/** 点了关注 / 取消关注：按钮回弹一下（动画播完清掉） */
+const followPop = ref(false)
 let followBusy = false
 async function onFollow() {
   const c = creator.value
@@ -292,6 +351,8 @@ async function onFollow() {
   if (!auth.requireLogin({ then: () => afterLoginFollow(c.id) })) return
   const next = !following.value
   following.value = next
+  followPop.value = true
+  if (next) haptic()
   followBusy = true
   try {
     const res = await toggleFollow(c.id, { on: next })
@@ -337,10 +398,42 @@ onMounted(() => {
   }
 })
 onBeforeUnmount(() => ro?.disconnect())
+
+/*
+ * 展开 / 收起（标签、简介）：先量好切换前后的高度，再在这一小块上做一次高度过渡，
+ * 下面的内容跟着平滑移动，不是一下子跳过去。减少动态效果时直接切换。
+ */
+const tagsEl = ref(null)
+async function animateHeight(el, change) {
+  if (!el || !el.animate || reducedMotion()) {
+    change()
+    return
+  }
+  // 上一次还没播完就又点：从当前看到的高度接着过渡
+  const from = el.getBoundingClientRect().height
+  el._heightAnim?.cancel()
+  change()
+  await nextTick()
+  const to = el.getBoundingClientRect().height
+  if (Math.abs(to - from) < 1) return
+  el.style.overflow = 'hidden'
+  const a = el.animate([{ height: `${from}px` }, { height: `${to}px` }], { duration: cssDuration('--dur-3'), easing: cssEasing('--ease-out') })
+  el._heightAnim = a
+  a.onfinish = a.oncancel = () => {
+    if (el._heightAnim !== a) return
+    el._heightAnim = null
+    el.style.overflow = ''
+  }
+}
+const toggleTags = () => animateHeight(tagsEl.value, () => { tagsOpen.value = !tagsOpen.value })
+const toggleDesc = () => animateHeight(descEl.value, () => { descOpen.value = !descOpen.value })
+
+/* iOS Safari 只有挂了 touchstart 监听的区域才会出现 :active 按压效果 */
+const noop = () => {}
 </script>
 
 <template>
-  <div class="page video">
+  <div class="page video" @touchstart.passive="noop">
     <VideoPlayer
       v-if="video"
       :key="video.id"
@@ -390,7 +483,14 @@ onBeforeUnmount(() => ro?.disconnect())
                 </div>
               </div>
             </RouterLink>
-            <button type="button" class="au-follow" :class="{ on: following }" :aria-pressed="following" @click="onFollow">
+            <button
+              type="button"
+              class="au-follow"
+              :class="{ on: following, pop: followPop }"
+              :aria-pressed="following"
+              @click="onFollow"
+              @animationend.self="followPop = false"
+            >
               <template v-if="following">已关注</template>
               <template v-else><Icon name="plus" />关注</template>
             </button>
@@ -399,7 +499,7 @@ onBeforeUnmount(() => ro?.disconnect())
           <!-- 简介：超过三行可以展开 -->
           <div v-if="description" class="desc" :class="{ open: descOpen }">
             <p ref="descEl" class="desc-t">{{ description }}</p>
-            <button v-if="canExpandDesc || descOpen" type="button" class="more" :aria-expanded="descOpen" @click="descOpen = !descOpen">
+            <button v-if="canExpandDesc || descOpen" type="button" class="more" :aria-expanded="descOpen" @click="toggleDesc">
               {{ descOpen ? '收起' : '展开' }}<Icon name="chevD" />
             </button>
           </div>
@@ -412,12 +512,12 @@ onBeforeUnmount(() => ro?.disconnect())
             </RouterLink>
           </div>
 
-          <div v-if="tags.length" class="v-tags" :class="{ open: tagsOpen }">
+          <div v-if="tags.length" ref="tagsEl" class="v-tags" :class="{ open: tagsOpen }">
             <span class="lb">标签:</span>
             <div ref="tagList" class="list">
               <button v-for="t in tags" :key="t" type="button" class="tag" @click="searchTag(t)">{{ t }}</button>
             </div>
-            <button v-if="canExpand || tagsOpen" type="button" class="more" :aria-expanded="tagsOpen" @click="tagsOpen = !tagsOpen">
+            <button v-if="canExpand || tagsOpen" type="button" class="more" :aria-expanded="tagsOpen" @click="toggleTags">
               {{ tagsOpen ? '收起' : '展开' }}<Icon name="chevD" />
             </button>
           </div>
@@ -430,8 +530,9 @@ onBeforeUnmount(() => ro?.disconnect())
               <Icon name="refresh" />换一批
             </button>
           </div>
-          <div :key="relatedKey" v-fade-in="relatedKey > 1" class="r-list">
-            <RelatedVideo v-for="v in related" :key="v.id" :video="v" />
+          <!-- 每一批第一次出现时一条条错开升上来（最多错开前 8 条），返回再看同一批不重播 -->
+          <div :key="relatedKey" class="r-list" :class="{ rise: riseRelated }">
+            <RelatedVideo v-for="(v, i) in related" :key="v.id" :video="v" :style="{ '--i': Math.min(i, 7) }" />
             <div v-if="!related.length" class="r-empty">暂时没有相似推荐</div>
           </div>
         </section>
@@ -462,17 +563,27 @@ onBeforeUnmount(() => ro?.disconnect())
     </div>
 
     <nav v-if="video" class="acts" aria-label="视频操作">
-      <button type="button" :class="{ on: video.liked }" :aria-pressed="!!video.liked" :aria-label="`点赞 ${video.likeCount ?? 0}`" @click="interact('like')">
-        <Icon name="thumbUp" /><span>{{ formatCount(video.likeCount) }}</span>
+      <button type="button" :class="{ on: video.liked }" :aria-pressed="!!video.liked" :aria-label="`点赞 ${video.likeCount ?? 0}`" @click="tapAct('like')">
+        <span class="ico">
+          <Icon :key="fx.like?.key || 0" name="thumbUp" :class="fxClass('like')" @animationend="endFx('like', $event)" />
+          <ActBurst v-if="rings.like" :key="rings.like" @done="rings.like = 0" />
+        </span>
+        <RollNum :value="formatCount(video.likeCount)" :n="video.likeCount ?? 0" />
       </button>
-      <button type="button" :class="{ on: video.disliked }" :aria-pressed="!!video.disliked" @click="interact('dislike')">
-        <Icon name="thumbDown" /><span>不喜欢</span>
+      <button type="button" :class="{ on: video.disliked }" :aria-pressed="!!video.disliked" @click="tapAct('dislike')">
+        <span class="ico"><Icon :key="fx.dislike?.key || 0" name="thumbDown" :class="fxClass('dislike')" @animationend="endFx('dislike', $event)" /></span>
+        <span>不喜欢</span>
       </button>
-      <button type="button" :class="{ on: video.faved }" :aria-pressed="!!video.faved" :aria-label="`收藏 ${video.favCount ?? 0}`" @click="interact('fav')">
-        <Icon name="heart" /><span>{{ formatCount(video.favCount) }}</span>
+      <button type="button" :class="{ on: video.faved }" :aria-pressed="!!video.faved" :aria-label="`收藏 ${video.favCount ?? 0}`" @click="tapAct('fav')">
+        <span class="ico">
+          <Icon :key="fx.fav?.key || 0" name="heart" :class="fxClass('fav')" @animationend="endFx('fav', $event)" />
+          <ActBurst v-if="rings.fav" :key="rings.fav" @done="rings.fav = 0" />
+        </span>
+        <RollNum :value="formatCount(video.favCount)" :n="video.favCount ?? 0" />
       </button>
-      <button type="button" @click="share({ title: video.title })">
-        <Icon name="shareNodes" /><span>分享</span>
+      <button type="button" @click="tapShare">
+        <span class="ico"><Icon :key="fx.share?.key || 0" name="shareNodes" :class="fxClass('share')" @animationend="endFx('share', $event)" /></span>
+        <span>分享</span>
       </button>
     </nav>
   </div>
@@ -531,6 +642,15 @@ onBeforeUnmount(() => ro?.disconnect())
 .au-follow::after { content: ''; position: absolute; inset: -7px -4px; }
 .au-follow svg { width: 13px; height: 13px; stroke-width: 3; }
 .au-follow.on { padding: 0 13px; background: var(--chip); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .1); color: var(--t2); font-weight: 500; }
+.au-follow { transition: transform var(--dur-2) var(--ease-spring); }
+.au-follow:active { transform: scale(var(--press-scale)); transition: transform var(--dur-1) var(--ease-out); }
+/* 关注 / 取消关注：先缩一下再回弹到位，盖住文字和底色的切换 */
+.au-follow.pop { animation: follow-pop var(--dur-3) var(--ease-out); }
+@keyframes follow-pop {
+  0% { transform: scale(.86); }
+  55% { transform: scale(1.06); }
+  100% { transform: scale(1); }
+}
 
 /* ---------- 简介 ---------- */
 .desc { margin-top: 10px; }
@@ -582,7 +702,7 @@ onBeforeUnmount(() => ro?.disconnect())
 .tag { flex: none; height: 24px; padding: 0 11px; border-radius: 12px; background: var(--chip); color: #b5b5b5; font-size: 12px; }
 .tag:active { background: #222; }
 .more { display: flex; flex: none; align-items: center; gap: 2px; height: 24px; color: var(--t1); font-size: 13px; font-weight: 500; }
-.more svg { width: 13px; height: 13px; stroke-width: 2.6; transition: transform .2s; }
+.more svg { width: 13px; height: 13px; stroke-width: 2.6; transition: transform var(--dur-3) var(--ease-in-out); }
 .v-tags.open .more svg, .desc.open .more svg { transform: rotate(180deg); }
 
 /* ---------- 相似推荐 ---------- */
@@ -594,6 +714,8 @@ onBeforeUnmount(() => ro?.disconnect())
 .r-more svg { width: 13px; height: 13px; }
 .r-more::after { content: ''; position: absolute; inset: -12px -10px; }
 .r-list { display: flex; flex-direction: column; gap: 14px; }
+/* 一条条错开升上来（--i 由模板给，最多错开前 8 条）；不挡点击 */
+.r-list.rise > * { animation: m-rise var(--dur-3) var(--ease-out) backwards; animation-delay: calc(var(--i, 0) * var(--stagger)); }
 .r-empty { padding: 18px 0 24px; color: var(--t2); font-size: 13px; text-align: center; }
 
 /* ---------- 底部操作栏 ---------- */
@@ -606,10 +728,29 @@ onBeforeUnmount(() => ro?.disconnect())
   border-top: 1px solid var(--line);
   background: var(--bg);
 }
-.acts button { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; color: var(--t2); font-size: 11px; font-variant-numeric: tabular-nums; }
-.acts svg { width: 23px; height: 23px; stroke-width: 1.8; }
+.acts button { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; color: var(--t2); font-size: 11px; font-variant-numeric: tabular-nums; transition: color var(--dur-1) var(--ease-out); }
+/* 图标外面包一层：按压缩放在外层，状态动画在图标上，两者叠加互不打断 */
+.acts .ico { position: relative; display: block; width: 23px; height: 23px; transition: transform var(--dur-2) var(--ease-spring); }
+.acts button:active .ico { transform: scale(var(--press-scale-sm)); transition: transform var(--dur-1) var(--ease-out); }
+/* 填充用 fill-opacity 过渡（fill 从 none 到颜色没法渐变） */
+.acts svg { width: 23px; height: 23px; fill: currentColor; fill-opacity: 0; stroke-width: 1.8; transition: fill-opacity var(--dur-1) var(--ease-out); }
 .acts .on { color: var(--t1); }
-.acts .on svg { fill: currentColor; }
+.acts .on svg { fill-opacity: 1; }
+/* 点亮：先缩一下再回弹放大；熄掉：轻轻一缩；分享：小弹一下 */
+.acts svg.fx-on { animation: act-on var(--dur-3) var(--ease-out); }
+.acts svg.fx-off { animation: act-off var(--dur-2) var(--ease-out); }
+.acts svg.fx-tap { animation: act-tap var(--dur-3) var(--ease-spring); }
+@keyframes act-on {
+  0% { transform: scale(.6); }
+  50% { transform: scale(1.22); }
+  100% { transform: scale(1); }
+}
+@keyframes act-off {
+  50% { transform: scale(.82); }
+}
+@keyframes act-tap {
+  from { transform: scale(.82); }
+}
 
 /* ---------- 骨架 ---------- */
 .sk { border-radius: 6px; background: #161616; animation: sk 1.2s ease-in-out infinite; }

@@ -13,6 +13,10 @@ import Cover from '@/components/Cover.vue'
 import Icon from '@/components/Icon.vue'
 import ListFoot from '@/components/home/ListFoot.vue'
 import ConfirmSheet from '@/components/me/ConfirmSheet.vue'
+import FollowBtn from '@/components/creator/FollowBtn.vue'
+import RollNum from '@/components/video/RollNum.vue'
+import { haptic } from '@/utils/motion'
+import { cameBack, vRise } from '@/components/home/motion'
 
 defineOptions({ name: 'FollowsView' })
 
@@ -23,6 +27,8 @@ defineOptions({ name: 'FollowsView' })
  */
 const router = useRouter()
 const auth = useAuthStore()
+/* 按返回回到这一页：恢复出来的列表不播入场 */
+cameBack()
 
 const feed = createFeed(page => getMyFollows(page))
 const scroller = ref(null)
@@ -58,6 +64,7 @@ function onFollowBtn(c) {
     target.value = c
     asking.value = true
   } else {
+    haptic()
     setFollow(c, true)
   }
 }
@@ -140,7 +147,7 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <div v-else-if="!session" class="empty">
+    <div v-else-if="!session" v-rise.self class="empty">
       <Icon name="tMe" class="em-ic" />
       登录后可以在这里看到关注的创作者
       <button type="button" class="retry" @click="auth.requireLogin()">去登录</button>
@@ -151,7 +158,7 @@ onBeforeUnmount(() => {
       <button type="button" class="retry" @click="feed.more()">重试</button>
     </div>
 
-    <div v-else-if="!feed.list.length" class="empty">
+    <div v-else-if="!feed.list.length" v-rise.self class="empty">
       <Icon name="tMe" class="em-ic" />
       还没有关注任何创作者
       <p class="em-sub">在帖子、创作者主页点「关注」，就能在这里找到 TA</p>
@@ -159,7 +166,7 @@ onBeforeUnmount(() => {
     </div>
 
     <div v-else ref="scroller" class="scroll" @scroll.passive="onScroll">
-      <div class="fl-list">
+      <div v-rise class="fl-list">
         <div v-for="c in feed.list" :key="c.id" class="fl">
           <RouterLink class="fl-main" :to="`/creator/${encodeURIComponent(c.id)}`" @click="opened = c.id">
             <Cover class="fl-av" v-bind="c.avatar || {}" />
@@ -168,23 +175,19 @@ onBeforeUnmount(() => {
                 <span>{{ c.name }}</span>
                 <span v-if="c.verified" class="vf" role="img" aria-label="已认证"><Icon name="verified" /></span>
               </div>
+              <!-- 关注 / 取消关注后粉丝数像里程表一样翻过去（和创作者主页一致） -->
               <div class="fl-meta">
-                <template v-if="c.handle">@{{ c.handle }} · </template>{{ formatCount(followers(c)) }} 粉丝
+                <template v-if="c.handle">@{{ c.handle }} · </template><RollNum :value="formatCount(followers(c))" :n="followers(c)" /> 粉丝
               </div>
               <div v-if="c.bio" class="fl-bio">{{ c.bio }}</div>
             </div>
           </RouterLink>
-          <button
-            type="button"
+          <FollowBtn
             class="fl-btn"
-            :class="{ on: following(c) }"
-            :aria-pressed="following(c)"
+            :on="following(c)"
             :aria-label="following(c) ? `已关注 ${c.name}，点按取消关注` : `关注 ${c.name}`"
             @click="onFollowBtn(c)"
-          >
-            <template v-if="following(c)">已关注</template>
-            <template v-else><Icon name="plus" />关注</template>
-          </button>
+          />
         </div>
       </div>
       <ListFoot :feed="feed" />
@@ -209,7 +212,9 @@ onBeforeUnmount(() => {
 .fl-list { padding: 4px 0; }
 .fl { display: flex; align-items: center; gap: 10px; padding-right: 14px; }
 .fl-main { display: flex; flex: 1; align-items: center; gap: 12px; min-width: 0; padding: 11px 0 11px 14px; }
-.fl-main:active { opacity: .75; }
+.fl-main { transition: opacity var(--dur-2) var(--ease-out); }
+.fl-main:active { opacity: .75; transition-duration: var(--dur-1); }
+.fl-meta, .fl-meta * { font-variant-numeric: tabular-nums; }
 .fl-av { flex: none; width: 48px; height: 48px; border-radius: 50%; background-color: #1a1a1a; filter: var(--media); }
 .fl-bd { flex: 1; min-width: 0; }
 .fl-nm { display: flex; align-items: center; gap: 5px; min-width: 0; font-size: 15px; font-weight: 600; line-height: 21px; }
@@ -218,13 +223,9 @@ onBeforeUnmount(() => {
 .fl-meta { overflow: hidden; color: var(--t2); font-size: 12px; line-height: 18px; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .fl-bio { overflow: hidden; color: #6e6e6e; font-size: 12px; line-height: 18px; text-overflow: ellipsis; white-space: nowrap; }
 
+/* 关注按钮（FollowBtn）：两种文字叠在一格里，宽度不跳 */
 .fl-btn {
-  position: relative;
-  display: flex;
   flex: none;
-  align-items: center;
-  justify-content: center;
-  gap: 2px;
   min-width: 70px;
   height: 30px;
   padding: 0 12px;
@@ -236,9 +237,7 @@ onBeforeUnmount(() => {
 }
 /* 按钮只有 30px 高：点按区域上下各放大 7px */
 .fl-btn::after { content: ''; position: absolute; inset: -7px -4px; }
-.fl-btn svg { width: 13px; height: 13px; stroke-width: 3; }
-.fl-btn.on { background: var(--chip); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .12); color: var(--t2); font-weight: 500; }
-.fl-btn:active { filter: brightness(.9); }
+.fl-btn.on { background: var(--chip); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .12); color: var(--t2); }
 
 .em-ic { width: 34px; height: 34px; margin: 0 auto 12px; color: #4a4a4a; stroke-width: 1.6; }
 .em-sub { margin-top: 6px; color: #6e6e6e; font-size: 12px; }

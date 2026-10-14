@@ -130,3 +130,16 @@
 /* empty / error state with an optional retry button */
 .empty { padding: 70px 0; color: var(--t2); font-size: 13px; text-align: center; }
 .empty .retry { display: block; height: 30px; margin: 14px auto 0; padding: 0 18px; border-radius: 15px; background: var(--chip); color: var(--t1); font-size: 13px; }
+
+/*
+ * ---- 内容页动效（配合 src/components/home/motion.js）----
+ * 骨架 → 内容、换排序 / 换一批：<div class="m-swap"><Transition name="m-skel">…</Transition></div>
+ * 离开的那块（骨架或旧列表）绝对定位叠在原处淡出、不再占位，新内容自己入场（v-rise），两者交叉进行。
+ * 离开的那块垫在新内容下面（z-index: -1，只在 .m-swap 里比）：骨架不会盖住刚出来的卡片，看起来是新内容从它上面浮现。
+ */
+/* flow-root：子元素的外边距不穿出去，离场时绝对定位的那块和在流里时位置完全一样 */
+.m-swap { position: relative; z-index: 0; display: flow-root; }
+.m-skel-leave-active { position: absolute; top: 0; left: 0; right: 0; z-index: -1; pointer-events: none; transition: opacity var(--dur-2) var(--ease-in); }
+.m-skel-leave-to { opacity: 0; }
+/* 跟着选中项滑动的块（useSlider）：位置、宽度由脚本放好之前不显示 */
+.m-bar { position: absolute; left: 0; opacity: 0; transform-origin: 0 0; pointer-events: none; }

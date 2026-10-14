@@ -1,12 +1,15 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, useTemplateRef, watch } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, useTemplateRef, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAppStore } from '@/stores/app'
 import { share } from '@/composables/useShare'
 import { setResume } from '@/components/video/resume'
 import { rememberVideo } from '@/components/video/preview'
+import { cssDuration, haptic } from '@/utils/motion'
 import Cover from '@/components/Cover.vue'
 import Icon from '@/components/Icon.vue'
+import ActBurst from '@/components/video/ActBurst.vue'
+import RollNum from '@/components/video/RollNum.vue'
 
 /*
  * One full-screen clip of the short-video feed.
@@ -18,6 +21,7 @@ import Icon from '@/components/Icon.vue'
  *   unmute   "点击恢复声音" pill
  *   settings 设置 action
  *   like / dislike / fav  右侧按钮（状态由父组件维护）
+ *   follow   头像下的「+」：关注作者（following 由父组件维护；只管关注，取消关注去主页）
  *
  * clip.src 有值（后台给视频配了素材文件）时用原生 <video> 播放，并把实际情况报给父组件：
  *   time     播放到第几秒（timeupdate）
@@ -46,9 +50,11 @@ const props = defineProps({
   /** load the background photo immediately (clips on or next to the screen) */
   eager: Boolean,
   /** 在当前这条附近：真实视频提前加载，离得远的不加载 */
-  near: Boolean
+  near: Boolean,
+  /** 是否已关注作者：true / false；null = 还不知道（登录后正在取），这时不显示「+」 */
+  following: { type: Boolean, default: null }
 })
-const emit = defineEmits(['toggle', 'dbllike', 'seek', 'boost', 'unmute', 'settings', 'like', 'dislike', 'fav', 'time', 'duration', 'state', 'ended', 'failed'])
+const emit = defineEmits(['toggle', 'dbllike', 'seek', 'boost', 'unmute', 'settings', 'like', 'dislike', 'fav', 'follow', 'time', 'duration', 'state', 'ended', 'failed'])
 
 const store = useAppStore()
 const router = useRouter()
@@ -106,6 +112,9 @@ async function sync() {
 }
 watch(() => props.playing, on => {
   if (!on) endPress(true)   // 播完 / 被暂停时还按着：结束快进
+  // 是用户点出来的切换：中间的播放键带一下动画（自动播放、翻页、播完都不带）
+  if (performance.now() - toggledAt < TOGGLE_FX_MS) ctlFx.value = on ? 'out' : 'in'
+  toggledAt = -Infinity
   sync()
 })
 watch(hasVideo, on => { if (on) sync() }, { flush: 'post' })
@@ -124,20 +133,40 @@ watch(() => props.current, on => {
   clearTimeout(tapTimer)
   tapTimer = 0
   titleOpen.value = false
+  followTapped = false
   exitPip()
 })
 
-/* 页面被 KeepAlive 收起时父组件会先暂停全部；这里再兜一层，保证不会在后台继续出声 */
+/*
+ * 页面被 KeepAlive 收起时父组件会先暂停全部；这里再兜一层，保证不会在后台继续出声。
+ * 还没播完的动效一并撤掉：收起时动画被打断，再挂回来时浏览器会从头重播一遍。
+ */
 onDeactivated(() => {
   endPress()
   clearTimeout(tapTimer)
   tapTimer = 0
   videoEl.value?.pause()
+  clearFx()
+  quiet.value = true
+})
+/*
+ * 收起时父组件把每条都暂停了，回来又接着播：这一来一回不该让播放键淡入淡出一遍。
+ * 收起时先关掉过渡（.quiet），回来两帧以后再打开。
+ */
+const quiet = ref(false)
+let quietRaf = 0
+onActivated(() => {
+  cancelAnimationFrame(quietRaf)
+  quietRaf = requestAnimationFrame(() => {
+    quietRaf = requestAnimationFrame(() => { quiet.value = false })
+  })
 })
 /* 卸载时释放地址，否则离开后还可能在后台下载 */
 onBeforeUnmount(() => {
   endPress()
   clearTimeout(tapTimer)
+  clearTimeout(followTimer)
+  cancelAnimationFrame(quietRaf)
   ro?.disconnect()
   const v = videoEl.value
   if (!v) return
@@ -186,7 +215,8 @@ const drag = reactive({ id: null, t: 0, x: 0, y: 0, moved: false })
 const dragging = computed(() => drag.id !== null)
 const scrubbing = computed(() => dragging.value && drag.moved)
 const shownTime = computed(() => (dragging.value ? drag.t : props.time))
-const progress = computed(() => `${length.value ? Math.min(100, (shownTime.value / length.value) * 100) : 0}%`)
+/** 进度百分比（0–100）：填充条和圆点都用 transform 移动，播放中不触发重新排版 */
+const pct = computed(() => (length.value ? Math.min(100, (shownTime.value / length.value) * 100) : 0))
 
 const timeAt = (e, el) => {
   const rect = el.getBoundingClientRect()
@@ -304,7 +334,7 @@ function onTap(e) {
   clearTimeout(tapTimer)
   tapTimer = setTimeout(() => {
     tapTimer = 0
-    if (props.current) emit('toggle')
+    if (props.current) userToggle()
   }, TAP_MS)
 }
 /* 快进时手指上下动也不翻页 */
@@ -312,13 +342,41 @@ function holdScroll(e) {
   if (boosting.value && e.cancelable) e.preventDefault()
 }
 
-/* 双击时在手指位置冒出的大拇指（和右侧点赞按钮同一个图标），动画结束自己移除 */
+/*
+ * 双击时在手指位置冒出的大拇指（和右侧点赞按钮同一个图标）：回弹放大、随机歪一点，停一下再上浮淡出，
+ * 动画结束自己移除；连着双击会叠出好几个。
+ */
 const bursts = ref([])
 let burstSeq = 0
 function burst(x, y) {
-  bursts.value = [...bursts.value.slice(-5), { id: ++burstSeq, x, y, r: Math.round(Math.random() * 36 - 18) }]
+  bursts.value = [...bursts.value.slice(-5), { id: ++burstSeq, x, y, r: Math.round(Math.random() * 30 - 15) }]
+  haptic()
+  // 右侧的赞按钮也跟着弹一下（状态真的从没赞变成赞了才弹，见 watchAct）；震动上面已经给过
+  markTap('like', true)
 }
 const dropBurst = id => { bursts.value = bursts.value.filter(b => b.id !== id) }
+
+/* ---------- 点画面 / 播放键切换播放：中间的播放键带一下动画 ---------- */
+
+/** 'in'：刚暂停，播放键从大到小落到位 / 'out'：刚继续播，播放键放大淡出；动画播完清空 */
+const ctlFx = ref('')
+/** 用户这一下切换的时间：之后 playing 真的变了才算是用户点出来的 */
+let toggledAt = -Infinity
+const TOGGLE_FX_MS = 400
+function userToggle() {
+  toggledAt = performance.now()
+  emit('toggle')
+}
+
+/* ---------- ±10 秒：按钮上的箭头转一下，同一侧冒出一道向外的箭头 ---------- */
+
+/** { dir: -1 | 1, key }：key 递增让连点时从头再播 */
+const seekFx = ref(null)
+let seekFxSeq = 0
+function seekBy(delta) {
+  seekFx.value = { dir: Math.sign(delta), key: ++seekFxSeq }
+  seekTo(props.time + delta)
+}
 
 /* ---------- 作者 / 话题 / 标题 / 看完整版 ---------- */
 
@@ -372,44 +430,107 @@ const mmss = sec => {
   return `${pad(Math.floor(s / 60))}:${pad(s % 60)}`
 }
 
-function seekBy(delta) {
-  seekTo(props.time + delta)
-}
+/* ---------- 右侧按钮的动效 ---------- */
 
 /*
- * A tapped action's icon plays the shared `pop` keyframes once. Each action pops independently;
- * bumping its icon key remounts the <svg>, which restarts the animation on rapid repeated taps.
- * The class is dropped on animationend so a kept-alive page does not replay it when re-attached.
+ * 按下去立刻缩一下（CSS :active）；状态真的变了才弹：点亮是回弹 + 赞 / 收藏冒一圈小点，熄掉是轻轻一缩。
+ * 赞 / 藏 / 不喜欢的状态由父组件决定（没登录会先弹登录框、请求中连点不算），所以先记下「刚点过」，
+ * 等 liked / faved / disliked 真的变了再动；登录后补做、换身份同步这些不是这一下点出来的，不动。
+ * 分享 / 设置没有状态，点了就弹一下。
+ *
+ * fx[id] = { kind: 'on' | 'off' | 'tap', key }：key 递增会重新挂上图标，连点时动画从头播；
+ * 播完（animationend）就清掉，页面被 KeepAlive 收起再回来也不会重播。
  */
-const popKeys = reactive({})
-const popping = reactive(new Set())
-function pop(id) {
-  popKeys[id] = (popKeys[id] || 0) + 1
-  popping.add(id)
+const fx = reactive({})
+/** 冒小点的那一圈（ActBurst）：值是 key，0 = 没有 */
+const rings = reactive({})
+/** 刚点过的按钮：{ at, quiet }，quiet = 震动已经给过了（双击点赞） */
+const tapped = {}
+const TAP_FX_MS = 600
+
+function playFx(id, kind) {
+  fx[id] = { kind, key: (fx[id]?.key || 0) + 1 }
+}
+function markTap(id, quiet = false) {
+  tapped[id] = { at: performance.now(), quiet }
+}
+/** 状态从父组件回来时才动：只认刚点过的那一下 */
+function watchAct(id, get, burstOn) {
+  watch(get, on => {
+    const t = tapped[id]
+    if (!t || performance.now() - t.at > TAP_FX_MS) return
+    tapped[id] = null
+    playFx(id, on ? 'on' : 'off')
+    if (!on || !burstOn) return
+    rings[id] = (rings[id] || 0) + 1
+    if (!t.quiet) haptic()
+  })
+}
+watchAct('like', () => props.liked, true)
+watchAct('fav', () => props.faved, true)
+watchAct('dislike', () => props.disliked, false)
+
+const fxClass = id => (fx[id] ? `fx-${fx[id].kind}` : null)
+function endFx(e) {
+  // 只认图标自己的动画结束（冒小点的那一圈在旁边，各管各的）
+  if (e.target === e.currentTarget) fx[e.currentTarget.dataset.fx] = null
+}
+/** 小点圈播完撤掉：每个按钮一个固定的函数（同上，不在模板里写内联函数） */
+const ringDone = { like: () => { rings.like = 0 }, fav: () => { rings.fav = 0 } }
+function clearFx() {
+  for (const k of Object.keys(fx)) fx[k] = null
+  for (const k of Object.keys(rings)) rings[k] = 0
+  bursts.value = []
+  ctlFx.value = ''
+  seekFx.value = null
 }
 
-/* 互动都交给父组件（赞和不喜欢的互斥也由它处理）；这里只让图标动一下 */
-function like() { pop('like'); emit('like') }
-function dislike() { pop('dislike'); emit('dislike') }
-function fav() { pop('fav'); emit('fav') }
+/* 互动都交给父组件（赞和不喜欢的互斥也由它处理）；这里只记下「刚点过」，好让图标跟着状态动 */
+function like() { markTap('like'); emit('like') }
+function dislike() { markTap('dislike'); emit('dislike') }
+function fav() { markTap('fav'); emit('fav') }
+function tapPlain(id, run) {
+  playFx(id, 'tap')
+  run()
+}
+
+/* ---------- 头像下的「+」：点了变成「✓」，停一下再收起（只在知道没关注时出现） ---------- */
+
+const followFx = ref(false)
+let followTapped = false
+let followTimer = 0
+const showFollow = computed(() => !!creator.value && (props.following === false || followFx.value))
+function follow() {
+  followTapped = true
+  emit('follow')
+}
+watch(() => props.following, (on, before) => {
+  if (on !== true || before !== false || !followTapped) return
+  followTapped = false
+  haptic()
+  followFx.value = true
+  clearTimeout(followTimer)
+  // 「+」转成「✓」画完以后再停一小会儿，然后收起（减少动态效果时立刻收起）
+  followTimer = setTimeout(() => { followFx.value = false }, cssDuration('--dur-4', 380) * 2)
+})
 
 /* 倍速不是 1.0x 时「设置」直接显示当前倍速，免得忘了自己调过 */
 const speedLabel = computed(() => (store.playback.speed === '1.0x' ? '设置' : store.playback.speed))
 
 /* `on` is only set for toggles (it also drives aria-pressed); `aria` names the count-only buttons */
 const actions = computed(() => [
-    { id: 'like', icon: 'thumbUp', label: props.likes, aria: `点赞 ${props.likes}`, on: props.liked, run: like },
+    { id: 'like', icon: 'thumbUp', label: props.likes, roll: true, aria: `点赞 ${props.likes}`, on: props.liked, run: like },
     { id: 'dislike', icon: 'thumbDown', label: '不喜欢', on: props.disliked, run: dislike },
-    { id: 'fav', icon: 'heart', label: props.favs, aria: `收藏 ${props.favs}`, on: props.faved, run: fav },
-    { id: 'share', icon: 'shareNodes', label: '分享', run: () => share({ title: props.clip.title, url: shareUrl() }) },
-    { id: 'settings', icon: 'gear', label: speedLabel.value, aria: `播放设置，当前 ${store.playback.speed} 倍速`, run: () => emit('settings') }
+    { id: 'fav', icon: 'heart', label: props.favs, roll: true, aria: `收藏 ${props.favs}`, on: props.faved, run: fav },
+    { id: 'share', icon: 'shareNodes', label: '分享', run: () => tapPlain('share', () => share({ title: props.clip.title, url: shareUrl() })) },
+    { id: 'settings', icon: 'gear', label: speedLabel.value, roll: true, aria: `播放设置，当前 ${store.playback.speed} 倍速`, run: () => tapPlain('settings', () => emit('settings')) }
 ])
 </script>
 
 <template>
   <section
     class="sv"
-    :class="{ playing, real: hasVideo, still: !hasVideo, 'poster-ok': posterOk, scrubbing, boosting, 'title-open': titleOpen }"
+    :class="{ playing, cur: current, quiet, real: hasVideo, still: !hasVideo, 'poster-ok': posterOk, scrubbing, boosting, 'title-open': titleOpen }"
     @contextmenu.prevent
   >
     <Cover class="sv-bg" v-bind="clip.cover" :eager="eager" />
@@ -445,22 +566,47 @@ const actions = computed(() => [
       @pointercancel="pressCancel"
       @touchmove="holdScroll"
     />
+    <!-- 外层上浮淡出（停一下再走），里层回弹放大 + 随机歪一点；外层的动画播完才移除 -->
     <i
       v-for="b in bursts"
       :key="b.id"
       class="sv-burst"
       :style="{ left: `${b.x}px`, top: `${b.y}px`, '--r': `${b.r}deg` }"
       aria-hidden="true"
-      @animationend="dropBurst(b.id)"
-    ><Icon name="thumbUp" /></i>
+      @animationend.self="dropBurst(b.id)"
+    ><i class="sb-in"><Icon name="thumbUp" /></i></i>
 
-    <div v-show="boosting" class="sv-boost" role="status"><Icon name="ffwd" />2X 快进中</div>
-    <div v-show="scrubbing" class="sv-scrub" aria-hidden="true"><b>{{ mmss(drag.t) }}</b> / {{ mmss(length) }}</div>
+    <!-- 长按快进：从顶部弹下来，两个箭头轮流亮（像在往前流），松手很快收起 -->
+    <Transition name="boost">
+      <div v-show="boosting" class="sv-boost" role="status">
+        <svg class="ic chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m4.5 6 6 6-6 6" /><path d="m12.5 6 6 6-6 6" /></svg>2X 快进中
+      </div>
+    </Transition>
+    <Transition name="scrub">
+      <div v-show="scrubbing" class="sv-scrub" aria-hidden="true"><b>{{ mmss(drag.t) }}</b> / {{ mmss(length) }}</div>
+    </Transition>
 
-    <div class="sv-ctl">
-      <button v-if="hasVideo" class="sk" type="button" aria-label="后退10秒" @click="seekBy(-10)"><Icon name="replay" /></button>
-      <button class="pb" type="button" :aria-label="playing ? '暂停' : '播放'" @click="emit('toggle')"><Icon name="play" /></button>
-      <button v-if="hasVideo" class="sk" type="button" aria-label="前进10秒" @click="seekBy(10)"><Icon name="forward" /></button>
+    <!-- ±10 秒：在按钮那一侧冒一道向外的箭头 -->
+    <i
+      v-if="seekFx"
+      :key="seekFx.key"
+      class="sv-seekfx"
+      :class="seekFx.dir < 0 ? 'l' : 'r'"
+      aria-hidden="true"
+      @animationend.self="seekFx = null"
+    >
+      <svg class="ic" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6" /><path d="m3 6 6 6-6 6" /></svg>
+      <span>{{ seekFx.dir < 0 ? '-' : '+' }}10秒</span>
+    </i>
+
+    <div class="sv-ctl" :class="ctlFx && `fx-${ctlFx}`">
+      <button v-if="hasVideo" class="sk back" :class="{ spin: seekFx?.dir < 0 }" type="button" aria-label="后退10秒" @click="seekBy(-10)">
+        <Icon :key="seekFx?.dir < 0 ? seekFx.key : 0" name="replay" />
+      </button>
+      <button class="pb" type="button" :aria-label="playing ? '暂停' : '播放'" @click="userToggle" @animationend.self="ctlFx = ''"><Icon name="play" /></button>
+      <button v-if="hasVideo" class="sk fwd" :class="{ spin: seekFx?.dir > 0 }" type="button" aria-label="前进10秒" @click="seekBy(10)">
+        <Icon :key="seekFx?.dir > 0 ? seekFx.key : 0" name="forward" />
+      </button>
     </div>
 
     <!-- 左下角一列：恢复声音 / 暂无视频源、作者、话题、标题、看完整版（按内容高度往上排） -->
@@ -510,32 +656,58 @@ const actions = computed(() => [
         @lostpointercapture="scrubCancel"
         @keydown="scrubKey"
       >
-        <div class="bar"><i :style="{ width: progress }" /><b :style="{ left: progress }" /></div>
+        <!-- 线（拖动时用 scaleY 变粗）和圆点（按住时回弹长出来）分开：圆点不跟着线一起被压扁 -->
+        <div class="bar"><i :style="{ transform: `translateX(${pct - 100}%)` }" /></div>
+        <span class="knob" :style="{ transform: `translateX(${pct}%)` }"><b /></span>
       </div>
       <span>{{ mmss(length) }}</span>
     </div>
     <!-- 封面预览：只有一条细线表示多久后自动翻到下一条，不显示时间、不能拖 -->
     <div v-else class="sv-prog sv-wait" aria-hidden="true">
-      <div class="bar"><i :style="{ width: progress }" /></div>
+      <div class="bar"><i :style="{ transform: `translateX(${pct - 100}%)` }" /></div>
     </div>
 
     <div class="sv-side">
-      <button v-if="creator" class="sv-author" type="button" :aria-label="`${creator.name} 的主页`" @click="openCreator">
-        <Cover class="av" v-bind="creator.avatar" />
-      </button>
+      <div v-if="creator" class="sv-au">
+        <button class="sv-author" type="button" :aria-label="`${creator.name} 的主页`" @click="openCreator">
+          <Cover class="av" v-bind="creator.avatar" />
+        </button>
+        <!-- 「+」：点了以后横线竖线转走、对勾一笔画出来，停一下整个收起 -->
+        <Transition name="fl">
+          <button
+            v-if="showFollow"
+            class="sv-follow"
+            :class="{ done: following }"
+            type="button"
+            :aria-label="following ? `已关注 ${creator.name}` : `关注 ${creator.name}`"
+            :aria-pressed="!!following"
+            @click="follow"
+          >
+            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true">
+              <path class="fl-p" d="M12 6.5v11M6.5 12h11" />
+              <path class="fl-c" pathLength="1" d="m6.6 12.4 3.7 3.7 7.1-7.4" />
+            </svg>
+          </button>
+        </Transition>
+      </div>
       <button
         v-for="a in actions"
         :key="a.id"
         class="sv-act"
-        :class="{ on: a.on, pop: popping.has(a.id) }"
+        :class="{ on: a.on }"
         type="button"
         :aria-label="a.aria"
         :aria-pressed="a.on"
         @click="a.run"
-        @animationend="popping.delete(a.id)"
       >
-        <Icon :key="popKeys[a.id] || 0" :name="a.icon" />
-        <span>{{ a.label }}</span>
+        <!-- 图标上的监听用同一个函数（按 data-fx 认按钮）：v-for 里写内联函数会让图标随每次进度更新一起重渲染 -->
+        <span class="ico">
+          <Icon :key="fx[a.id]?.key || 0" :name="a.icon" :class="fxClass(a.id)" :data-fx="a.id" @animationend="endFx" />
+          <ActBurst v-if="rings[a.id]" :key="rings[a.id]" @done="ringDone[a.id]" />
+        </span>
+        <!-- 会变的（赞 / 收藏数、倍速）才翻动；「不喜欢」「分享」是固定文字，不多挂一层组件 -->
+        <RollNum v-if="a.roll" :value="a.label" :n="typeof a.label === 'number' ? a.label : null" />
+        <span v-else>{{ a.label }}</span>
       </button>
     </div>
   </section>
@@ -567,7 +739,8 @@ const actions = computed(() => [
  * 底图：有视频文件时只当模糊背景；没有文件时，封面图片加载出来就虚化当背景、上面完整显示封面，
  * 图片加载不出来（离线、被拦）时直接清晰显示生成的占位图。不再用平移动画假装在播放。
  */
-.sv-bg { position: absolute; inset: 0; transition: filter .25s; }
+/* 整屏的底图不做 filter 过渡（大面积模糊逐帧重算很费）：直接切换，上面的封面图自己会淡入 */
+.sv-bg { position: absolute; inset: 0; }
 .sv.real .sv-bg,
 .sv.still.poster-ok .sv-bg { inset: -10%; filter: blur(18px) brightness(.55); }
 .sv-video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: transparent; }
@@ -576,7 +749,10 @@ const actions = computed(() => [
 
 .sv-click { position: absolute; inset: 0; z-index: 2; touch-action: manipulation; }
 
-/* 双击点赞：在手指位置弹出、上浮、淡出 */
+/*
+ * 双击点赞：里层在手指位置回弹放大（随机歪一点），停一下，外层再上浮、略放大、淡出。
+ * 外层的动画最后结束，播完由 animationend 移除（减少动态效果时一闪而过，赞按钮本身照样点亮）。
+ */
 .sv-burst {
   position: absolute;
   z-index: 3;
@@ -584,17 +760,25 @@ const actions = computed(() => [
   height: 88px;
   margin: -44px 0 0 -44px;
   color: var(--accent);
-  filter: drop-shadow(0 2px 10px rgba(0, 0, 0, .35));
   pointer-events: none;
-  animation: burst .9s ease-out forwards;
+  animation: burst-float var(--dur-4) var(--ease-in) calc(var(--dur-3) + var(--dur-2)) forwards;
+}
+.sb-in {
+  display: block;
+  width: 100%;
+  height: 100%;
+  filter: drop-shadow(0 2px 10px rgba(0, 0, 0, .35));
+  transform: rotate(var(--r));
+  animation: burst-pop var(--dur-3) var(--ease-out) backwards;
 }
 .sv-burst svg { width: 100%; height: 100%; fill: currentColor; stroke-width: 1.2; }
-@keyframes burst {
-  0% { opacity: 0; transform: rotate(var(--r)) scale(.4); }
-  16% { opacity: 1; transform: rotate(var(--r)) scale(1.15); }
-  30% { transform: rotate(var(--r)) scale(.95); }
-  45% { opacity: 1; transform: rotate(var(--r)) scale(1); }
-  100% { opacity: 0; transform: rotate(var(--r)) translateY(-110px) scale(1.5); }
+@keyframes burst-pop {
+  0% { opacity: 0; transform: rotate(var(--r)) scale(.3); }
+  55% { opacity: 1; transform: rotate(var(--r)) scale(1.18); }
+  100% { opacity: 1; transform: rotate(var(--r)) scale(1); }
+}
+@keyframes burst-float {
+  to { opacity: 0; transform: translateY(-96px) scale(1.25); }
 }
 
 /* 长按快进的提示：顶部居中，在「推荐 / 专题」下面 */
@@ -619,11 +803,19 @@ const actions = computed(() => [
   transform: translateX(-50%);
   pointer-events: none;
 }
-.sv-boost svg { width: 15px; height: 15px; stroke-width: 2.6; animation: ff .8s ease-in-out infinite; }
-@keyframes ff {
-  0%, 100% { opacity: .45; transform: translateX(-1px); }
-  50% { opacity: 1; transform: translateX(1px); }
+.sv-boost svg { width: 15px; height: 15px; stroke-width: 2.6; }
+/* 两个箭头轮流亮起，像在往前流；减少动态效果时停在全亮 */
+.sv-boost .chev path { animation: chev calc(var(--dur-4) * 2) var(--ease-in-out) infinite; }
+.sv-boost .chev path + path { animation-delay: calc(var(--dur-4) / 2); }
+@keyframes chev {
+  0%, 100% { opacity: .3; }
+  45% { opacity: 1; }
 }
+/* 从顶部回弹着落下；松手时更快地往上收 */
+.boost-enter-active { transition: transform var(--dur-3) var(--ease-spring), opacity var(--dur-2) var(--ease-out); }
+.boost-leave-active { transition: transform var(--dur-1) var(--ease-in), opacity var(--dur-1) var(--ease-in); }
+.boost-enter-from { opacity: 0; transform: translate(-50%, -14px) scale(.9); }
+.boost-leave-to { opacity: 0; transform: translate(-50%, -8px) scale(.96); }
 
 /* 拖进度条时屏幕中间的大号时间 */
 .sv-scrub {
@@ -643,6 +835,44 @@ const actions = computed(() => [
   pointer-events: none;
 }
 .sv-scrub b { color: #fff; font-weight: 700; }
+/* 开始拖：从略小淡入放大到位；松手：很快淡掉 */
+.scrub-enter-active { transition: transform var(--dur-2) var(--ease-out), opacity var(--dur-2) var(--ease-out); }
+.scrub-leave-active { transition: transform var(--dur-1) var(--ease-in), opacity var(--dur-1) var(--ease-in); }
+.scrub-enter-from,
+.scrub-leave-to { opacity: 0; transform: translateY(-50%) scale(.88); }
+
+/* ±10 秒：按钮那一侧的半屏位置冒出「››  +10秒」，箭头往外推一下再淡出 */
+.sv-seekfx {
+  position: absolute;
+  top: 52.5%;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  width: 72px;
+  margin: -30px 0 0 -36px;
+  color: #fff;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 600;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, .45);
+  pointer-events: none;
+  animation: seekfx var(--dur-4) var(--ease-out) forwards;
+}
+.sv-seekfx.l { left: 16%; }
+.sv-seekfx.r { left: 84%; }
+.sv-seekfx svg { width: 30px; height: 30px; stroke-width: 2.4; filter: drop-shadow(0 1px 4px rgba(0, 0, 0, .4)); animation: seekfx-arrow var(--dur-4) var(--ease-out); }
+/* 后退：箭头朝左（镜像），同样往外推 */
+.sv-seekfx.l svg { transform: scaleX(-1); animation-name: seekfx-arrow-l; }
+@keyframes seekfx {
+  0% { opacity: 0; transform: scale(.8); }
+  30% { opacity: 1; transform: scale(1); }
+  70% { opacity: 1; }
+  100% { opacity: 0; transform: scale(1); }
+}
+@keyframes seekfx-arrow { from { transform: translateX(-8px); } }
+@keyframes seekfx-arrow-l { from { transform: scaleX(-1) translateX(-8px); } }
 
 /* centre controls: only visible (and tappable) while paused */
 .sv-ctl {
@@ -656,10 +886,15 @@ const actions = computed(() => [
   justify-content: center;
   gap: 36px;
   transform: translateY(-50%);
-  transition: opacity .2s;
+  transition: opacity var(--dur-2) var(--ease-out);
   pointer-events: none;
 }
 .sv.playing .sv-ctl { opacity: 0; }
+/*
+ * 不在屏幕中间的那几条（还没开始播 / 刚被划走暂停的）不露播放键：滑动途中上下两条都是干净的画面，
+ * 不会一条带着播放键滑进来再淡掉、另一条滑走时又亮起一个（换条时 current 和 playing 是同一次更新里变的）
+ */
+.sv:not(.cur) .sv-ctl { opacity: 0; }
 .sv-ctl .pb {
   display: grid;
   place-items: center;
@@ -669,6 +904,7 @@ const actions = computed(() => [
   background: rgba(60, 60, 60, .52);
   -webkit-backdrop-filter: blur(8px);
   backdrop-filter: blur(8px);
+  transition: transform var(--dur-2) var(--ease-spring);
   pointer-events: auto;
 }
 .sv-ctl .pb svg { width: 25px; height: 25px; margin-left: 3px; color: #fff; }
@@ -677,13 +913,41 @@ const actions = computed(() => [
   height: 28px;
   color: #fff;
   filter: drop-shadow(0 1px 4px rgba(0, 0, 0, .4));
+  transition: transform var(--dur-2) var(--ease-spring);
   pointer-events: auto;
 }
 .sv-ctl .sk svg { width: 100%; height: 100%; }
 .sv.playing .sv-ctl > * { pointer-events: none; }
+/* 按下立刻缩一下，松开回弹 */
+.sv-ctl .pb:active,
+.sv-ctl .sk:active { transform: scale(var(--press-scale-sm)); transition-duration: var(--dur-1); transition-timing-function: var(--ease-out); }
+/*
+ * 用户点出来的切换（自动播放、翻页不带）：
+ * 暂停 → 播放键从大到小轻轻落到位，±10 秒从中间往两边让开；继续播 → 播放键先鼓一下再放大淡出。
+ */
+.sv-ctl.fx-in .pb { animation: pb-in var(--dur-3) var(--ease-out); }
+.sv-ctl.fx-in .sk { animation: sk-in var(--dur-3) var(--ease-out); }
+.sv-ctl.fx-in .sk.fwd { --sx: -16px; }
+.sv-ctl.fx-out .pb { animation: pb-out var(--dur-3) var(--ease-out); }
+.sv.playing .sv-ctl.fx-out { transition: opacity var(--dur-3) var(--ease-in); }
+@keyframes pb-in { from { transform: scale(1.35); } }
+@keyframes pb-out { 30% { transform: scale(1.12); } to { transform: scale(1.5); } }
+@keyframes sk-in { from { transform: translateX(var(--sx, 16px)) scale(.7); } }
+/* 点 ±10 秒：箭头顺着方向转一下 */
+.sv-ctl .sk.spin svg { animation: sk-spin var(--dur-3) var(--ease-out); }
+.sv-ctl .sk.back.spin svg { animation-name: sk-spin-back; }
+@keyframes sk-spin { 40% { transform: rotate(40deg) scale(1.08); } }
+@keyframes sk-spin-back { 40% { transform: rotate(-40deg) scale(1.08); } }
 
 /* 只有里面的按钮、话题、可展开的标题接收点击，其余空白处点下去还是播放 / 暂停 */
 .sv-meta { position: absolute; left: 12px; right: 68px; bottom: 50px; z-index: 4; pointer-events: none; }
+/*
+ * 换到这一条：左下角的文字整块轻轻升上来；不在屏幕中间的那几条先藏着，滑走时很快淡掉。
+ * 只动 .sv-meta 这一层（一个合成层），不逐行错开：换条时主线程本来就忙，逐行动画在低端机上会多出一截卡顿。
+ * 第一次打开、换一批、KeepAlive 切回来时 current 没变，不会重播。
+ */
+.sv:not(.cur) .sv-meta { opacity: 0; transform: translateY(var(--rise)); transition: opacity var(--dur-2) var(--ease-in), transform var(--dur-2) var(--ease-in); }
+.sv.cur .sv-meta { transition: opacity var(--dur-3) var(--ease-out), transform var(--dur-3) var(--ease-out); }
 .sv-unmute,
 .sv-chip {
   display: flex;
@@ -782,17 +1046,22 @@ const actions = computed(() => [
   touch-action: pan-y;
 }
 .sv-prog .track:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+/* 线本身 3px：拖动时用 scaleY 变成 6px（只动 transform，不重新排版）；已播部分是整条白线往左挪出去的那一截 */
 .sv-prog .bar {
   position: relative;
   flex: 1;
   height: 3px;
+  overflow: hidden;
   border-radius: 2px;
   background: rgba(255, 255, 255, .4);
-  transition: height .15s;
+  transition: transform var(--dur-2) var(--ease-out);
 }
-.sv-prog .bar i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 2px; background: #fff; }
-.sv-prog .bar b {
+.sv-prog .bar i { position: absolute; inset: 0; border-radius: 2px; background: #fff; }
+/* 圆点：外层和线一样宽，按进度平移；里面的圆点按住时回弹着长出来 */
+.sv-prog .knob { position: absolute; inset: 0; pointer-events: none; }
+.sv-prog .knob b {
   position: absolute;
+  left: 0;
   top: 50%;
   width: 13px;
   height: 13px;
@@ -801,20 +1070,19 @@ const actions = computed(() => [
   background: #fff;
   box-shadow: 0 0 6px rgba(0, 0, 0, .35);
   transform: scale(0);
-  transition: transform .15s;
+  transition: transform var(--dur-1) var(--ease-in);
 }
-.sv-prog.drag .bar { height: 6px; border-radius: 3px; }
-.sv-prog.drag .bar b,
-.sv-prog .track:focus-visible .bar b { transform: scale(1); }
+.sv-prog.drag .bar { transform: scaleY(2); }
+.sv-prog.drag .knob b,
+.sv-prog .track:focus-visible .knob b { transform: scale(1); transition: transform var(--dur-2) var(--ease-spring); }
 /* 封面预览的计时线：更细、更淡，点击穿透到画面 */
 .sv-wait { pointer-events: none; }
 .sv-wait .bar { height: 2px; background: rgba(255, 255, 255, .22); }
 .sv-wait .bar i { background: rgba(255, 255, 255, .6); }
 
 /* 拖进度条时把其他浮层让开，只留进度和中间的时间 */
-.sv-meta,
 .sv-side,
-.sv-ctl { transition: opacity .15s; }
+.sv.scrubbing .sv-meta { transition: opacity var(--dur-1) var(--ease-out); }
 .sv.scrubbing .sv-meta,
 .sv.scrubbing .sv-side,
 .sv.scrubbing .sv-ctl { opacity: 0; }
@@ -830,8 +1098,43 @@ const actions = computed(() => [
   gap: 20px;
   width: 54px;
 }
-.sv-author { display: block; width: 44px; height: 44px; border-radius: 50%; }
+/* 头像下沿压着「+」：多留 4px，不和下面的赞按钮挤在一起 */
+.sv-au { position: relative; margin-bottom: 4px; }
+.sv-author { display: block; width: 44px; height: 44px; border-radius: 50%; transition: transform var(--dur-2) var(--ease-spring); }
+.sv-author:active { transform: scale(var(--press-scale)); transition: transform var(--dur-1) var(--ease-out); }
 .sv-author .av { width: 100%; height: 100%; border: 1.5px solid #fff; border-radius: 50%; }
+
+/* 头像下的「+」：白底黑字的小圆，压在头像下沿 */
+.sv-follow {
+  position: absolute;
+  left: 50%;
+  bottom: -9px;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  margin-left: -10px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, .3);
+  color: var(--on-accent);
+  transition: transform var(--dur-2) var(--ease-spring);
+}
+/* 只有 20px：可点区域往左右下多扩一些（往上少扩，免得压住头像本身） */
+.sv-follow::after { content: ''; position: absolute; inset: -4px -10px -8px; }
+.sv-follow:active { transform: scale(var(--press-scale-sm)); transition: transform var(--dur-1) var(--ease-out); }
+.sv-follow svg { width: 14px; height: 14px; stroke-width: 2.8; overflow: visible; }
+.fl-p { transform-origin: 12px 12px; transition: transform var(--dur-2) var(--ease-in-out), opacity var(--dur-2) var(--ease-in-out); }
+.fl-c { stroke-dasharray: 1; stroke-dashoffset: 1; transition: stroke-dashoffset var(--dur-2) var(--ease-in); }
+/* 点了：横竖两笔转 90° 缩走，对勾稍后一笔画出来 */
+.sv-follow.done .fl-p { opacity: 0; transform: rotate(90deg) scale(.3); }
+.sv-follow.done .fl-c { stroke-dashoffset: 0; transition: stroke-dashoffset var(--dur-3) var(--ease-out) var(--dur-1); }
+/* 出现：回弹着冒出来；收起：缩没 */
+.fl-enter-active { transition: transform var(--dur-2) var(--ease-spring), opacity var(--dur-2) var(--ease-out); }
+.fl-leave-active { transition: transform var(--dur-2) var(--ease-in), opacity var(--dur-2) var(--ease-in); }
+.fl-enter-from,
+.fl-leave-to { opacity: 0; transform: scale(.2); }
+
 /* 按钮占满整列宽（54px），比图标本身好点得多 */
 .sv-act {
   display: flex;
@@ -844,10 +1147,28 @@ const actions = computed(() => [
   line-height: 17px;
   text-shadow: 0 1px 4px rgba(0, 0, 0, .45);
 }
-.sv-act svg { width: 27px; height: 27px; stroke-width: 2.2; }
+/* 图标外面包一层：按压缩放在外层，状态动画在图标上，两者叠加互不打断 */
+.sv-act .ico { position: relative; display: block; width: 27px; height: 27px; transition: transform var(--dur-2) var(--ease-spring); }
+.sv-act:active .ico { transform: scale(var(--press-scale-sm)); transition: transform var(--dur-1) var(--ease-out); }
+/* 填充用 fill-opacity 过渡（fill 从 none 到颜色没法渐变） */
+.sv-act svg { width: 27px; height: 27px; fill: currentColor; fill-opacity: 0; stroke-width: 2.2; transition: fill-opacity var(--dur-1) var(--ease-out); }
 .sv-act.on { color: var(--accent); }
-.sv-act.on svg { fill: currentColor; }
-.sv-act.pop svg { animation: pop .35s ease; }
+.sv-act.on svg { fill-opacity: 1; }
+/* 点亮：先缩一下再回弹放大；熄掉：轻轻一缩；分享 / 设置：小弹一下 */
+.sv-act svg.fx-on { animation: act-on var(--dur-3) var(--ease-out); }
+.sv-act svg.fx-off { animation: act-off var(--dur-2) var(--ease-out); }
+.sv-act svg.fx-tap { animation: act-tap var(--dur-3) var(--ease-spring); }
+@keyframes act-on {
+  0% { transform: scale(.6); }
+  50% { transform: scale(1.22); }
+  100% { transform: scale(1); }
+}
+@keyframes act-off {
+  50% { transform: scale(.82); }
+}
+@keyframes act-tap {
+  from { transform: scale(.82); }
+}
 
 /*
  * 手机横过来（高度很矮）：右侧一列收紧、去掉头像（左下角的名字照样进主页），
@@ -855,8 +1176,9 @@ const actions = computed(() => [
  */
 @media (orientation: landscape) and (max-height: 500px) {
   .sv-side { bottom: 8px; gap: 4px; }
-  .sv-author { display: none; }
+  .sv-au { display: none; }
   .sv-act { gap: 1px; font-size: 11px; line-height: 14px; }
+  .sv-act .ico,
   .sv-act svg { width: 23px; height: 23px; }
   .sv-meta { bottom: 38px; }
   .sv-unmute,
@@ -869,12 +1191,12 @@ const actions = computed(() => [
   .sv-boost { top: 54px; }
 }
 
+/* 页面被 KeepAlive 收起 / 刚切回来的两帧里：暂停→继续这一来一回直接到位，不播过渡 */
+.sv.quiet,
+.sv.quiet * { transition: none !important; }
+
+/* 减少动态效果：时长已经由 motion.css 统一收敛；循环的箭头直接停住，免得只闪一下 */
 @media (prefers-reduced-motion: reduce) {
-  .sv-boost svg { animation: none; }
-  .sv-burst { animation-duration: .6s; animation-name: burst-fade; }
-}
-@keyframes burst-fade {
-  0%, 60% { opacity: 1; transform: rotate(var(--r)); }
-  100% { opacity: 0; transform: rotate(var(--r)); }
+  .sv-boost .chev path { animation: none; }
 }
 </style>

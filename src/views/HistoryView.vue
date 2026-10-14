@@ -16,6 +16,7 @@ import Cover from '@/components/Cover.vue'
 import Icon from '@/components/Icon.vue'
 import ListFoot from '@/components/home/ListFoot.vue'
 import ConfirmSheet from '@/components/me/ConfirmSheet.vue'
+import { cameBack, vRise, leave } from '@/components/home/motion'
 
 defineOptions({ name: 'HistoryView' })
 
@@ -28,6 +29,8 @@ defineOptions({ name: 'HistoryView' })
 const router = useRouter()
 const auth = useAuthStore()
 const app = useAppStore()
+/* 按返回回到这一页：恢复出来的列表不播入场 */
+cameBack()
 
 /* 剩不到 5 秒算看完（和 components/video/resume.js 一致） */
 const DONE_LEFT = 5
@@ -130,15 +133,22 @@ function cancelRemovals() {
 const asking = ref(false)
 const clearing = ref(false)
 
+/*
+ * 清空：请求马上发出，同时屏幕上的记录依次淡出；两样都完了才换成空状态（动画不到 0.3 秒，请求慢时就等请求）。
+ * 失败了记录原样放回来。
+ */
+const listEl = ref(null)
 async function clearAll() {
   if (clearing.value) return
   clearing.value = true
   cancelRemovals()
+  const out = leave(listEl.value?.$el?.children, { y: -6, scale: 0.96 })
   try {
-    await clearHistory()
+    await Promise.all([clearHistory(), ...out.map(a => a.finished.catch(() => {}))])
     feed.restore({ list: [], total: 0, done: true })
     toast('观看历史已清空')
   } catch {
+    out.forEach(a => a.cancel())
     toast('清空失败，请稍后重试')
   } finally {
     clearing.value = false
@@ -214,7 +224,7 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <div v-else-if="!session" class="empty">
+    <div v-else-if="!session" v-rise.self class="empty">
       <Icon name="iHistory" class="em-ic" />
       登录后可以在这里看到观看记录
       <button type="button" class="retry" @click="auth.requireLogin()">去登录</button>
@@ -225,7 +235,7 @@ onBeforeUnmount(() => {
       <button type="button" class="retry" @click="feed.more()">重试</button>
     </div>
 
-    <div v-else-if="!feed.list.length" class="empty">
+    <div v-else-if="!feed.list.length" v-rise.self class="empty">
       <Icon name="iHistory" class="em-ic" />
       还没有观看记录
       <p class="em-sub">看过的视频会出现在这里，下次可以接着看</p>
@@ -233,28 +243,35 @@ onBeforeUnmount(() => {
     </div>
 
     <div v-else ref="scroller" class="scroll" @scroll.passive="onScroll">
-      <div class="hi-list">
-        <div v-for="v in feed.list" :key="v.id" class="hi">
-          <div v-if="removing.has(v.id)" class="hi-undo" role="status">
-            <span>已删除「{{ v.title }}」</span>
-            <button type="button" class="undo" @click="undo(v)">撤销</button>
-          </div>
-          <template v-else>
-            <RouterLink class="hi-link" :to="`/video/${encodeURIComponent(v.id)}`" @click="open(v)">
-              <Cover class="hi-cv" v-bind="v.cover">
-                <span v-if="v.dur" class="dur">{{ v.dur }}</span>
-                <span v-if="progress(v).pct" class="hi-track"><span class="hi-bar" :style="{ width: progress(v).pct + '%' }" /></span>
-              </Cover>
-              <div class="hi-bd">
-                <div class="hi-tt">{{ v.title }}</div>
-                <div class="hi-pg" :class="{ done: progress(v).pct === 100 }">{{ progress(v).text }}</div>
-                <div class="hi-at">{{ when(v.watchedAt) }}</div>
-              </div>
-            </RouterLink>
-            <button type="button" class="hi-del" :aria-label="`删除观看记录：${v.title}`" @click="remove(v)"><Icon name="close" /></button>
-          </template>
+      <!--
+        一条记录：点 × 后原地换成「已删除 · 撤销」（交叉淡入淡出，下面的记录平滑补位）；
+        几秒后真正删掉时这一条淡出、下面的往上补
+      -->
+      <TransitionGroup ref="listEl" v-rise tag="div" name="hi" class="hi-list">
+        <!-- class 里读一下删除状态：换成撤销条时列表也跟着重新排一次位置，下面的记录才会平滑补位 -->
+        <div v-for="v in feed.list" :key="v.id" class="hi" :class="{ removed: removing.has(v.id) }">
+          <Transition name="hi-swap">
+            <div v-if="removing.has(v.id)" class="hi-undo" role="status">
+              <span>已删除「{{ v.title }}」</span>
+              <button type="button" class="undo" @click="undo(v)">撤销</button>
+            </div>
+            <div v-else class="hi-row">
+              <RouterLink class="hi-link" :to="`/video/${encodeURIComponent(v.id)}`" @click="open(v)">
+                <Cover class="hi-cv" v-bind="v.cover">
+                  <span v-if="v.dur" class="dur">{{ v.dur }}</span>
+                  <span v-if="progress(v).pct" class="hi-track"><span class="hi-bar" :style="{ width: progress(v).pct + '%' }" /></span>
+                </Cover>
+                <div class="hi-bd">
+                  <div class="hi-tt">{{ v.title }}</div>
+                  <div class="hi-pg" :class="{ done: progress(v).pct === 100 }">{{ progress(v).text }}</div>
+                  <div class="hi-at">{{ when(v.watchedAt) }}</div>
+                </div>
+              </RouterLink>
+              <button type="button" class="hi-del m-hold" :aria-label="`删除观看记录：${v.title}`" @click="remove(v)"><Icon name="close" /></button>
+            </div>
+          </Transition>
         </div>
-      </div>
+      </TransitionGroup>
       <ListFoot :feed="feed" />
       <div class="pad-b" />
     </div>
@@ -275,12 +292,25 @@ onBeforeUnmount(() => {
 .hd-n { color: var(--t2); font-size: 13px; font-weight: 500; font-variant-numeric: tabular-nums; }
 .hd-act { position: relative; height: 30px; margin-left: auto; padding: 0 4px; color: var(--t2); font-size: 14px; font-weight: 500; }
 .hd-act::after { content: ''; position: absolute; inset: -7px -10px; }
+.hd-act { transition: opacity var(--dur-1) var(--ease-out); }
+.hd-act:active { opacity: .6; }
 .hd-act:disabled { opacity: .5; }
 
-.hi-list { padding: 6px 0; }
+.hi-list { position: relative; padding: 6px 0; }
 .hi { position: relative; }
-.hi-link { display: flex; gap: 12px; padding: 9px 14px; }
-.hi-link:active { background: #121212; }
+.hi-row { position: relative; }
+.hi-link { display: flex; gap: 12px; padding: 9px 14px; transition: background-color var(--dur-2) var(--ease-out); }
+.hi-link:active { background: #121212; transition-duration: var(--dur-1); }
+
+/* 列表：删掉的一条原地淡出、往左滑一点，下面的平滑补位（只动 transform） */
+.hi-move { transition: transform var(--dur-3) var(--ease-out); }
+.hi-leave-active { position: absolute; left: 0; right: 0; pointer-events: none; transition: opacity var(--dur-2) var(--ease-in), transform var(--dur-2) var(--ease-in); }
+.hi-leave-to { opacity: 0; transform: translate3d(-24px, 0, 0); }
+/* 一条记录换成「已删除 · 撤销」：旧的叠在原处淡出，新的淡入 */
+.hi-swap-enter-active { transition: opacity var(--dur-2) var(--ease-out), transform var(--dur-2) var(--ease-out); }
+.hi-swap-leave-active { position: absolute; top: 0; left: 0; right: 0; pointer-events: none; transition: opacity var(--dur-1) var(--ease-in); }
+.hi-swap-enter-from { opacity: 0; transform: scale(.98); }
+.hi-swap-leave-to { opacity: 0; }
 .hi-cv { flex: none; width: 136px; aspect-ratio: 16 / 10; border-radius: 8px; filter: var(--media); }
 /* 进度条：封面底部，白色是看过的部分（刚开始看的不画） */
 .hi-track { position: absolute; left: 0; right: 0; bottom: 0; z-index: 1; height: 3px; background: rgba(255, 255, 255, .22); }
@@ -303,13 +333,15 @@ onBeforeUnmount(() => {
 .hi-at { color: #6e6e6e; font-size: 12px; line-height: 17px; font-variant-numeric: tabular-nums; }
 
 /* 删除：图标小，点按区域 44x44 */
-.hi-del { position: absolute; right: 2px; bottom: 2px; display: grid; place-items: center; width: 44px; height: 44px; color: #6e6e6e; }
-.hi-del svg { width: 16px; height: 16px; stroke-width: 2.2; }
+.hi-del { position: absolute; right: 2px; bottom: 2px; display: grid; place-items: center; width: 44px; height: 44px; color: #6e6e6e; transition: color var(--dur-1) var(--ease-out); }
+.hi-del svg { width: 16px; height: 16px; stroke-width: 2.2; transition: transform var(--dur-2) var(--ease-spring); }
 .hi-del:active { color: var(--t1); }
+.hi-del.m-pressed svg { transform: scale(var(--press-scale-sm)); transition: transform var(--dur-1) var(--ease-out); }
 
 .hi-undo { display: flex; align-items: center; gap: 12px; height: 52px; margin: 6px 14px; padding: 0 6px 0 14px; border-radius: 10px; background: var(--panel); color: var(--t2); font-size: 13px; }
 .hi-undo span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.undo { flex: none; height: 40px; padding: 0 12px; color: var(--t1); font-size: 14px; font-weight: 600; }
+.undo { flex: none; height: 40px; padding: 0 12px; color: var(--t1); font-size: 14px; font-weight: 600; transition: opacity var(--dur-1) var(--ease-out); }
+.undo:active { opacity: .6; }
 
 .em-ic { width: 34px; height: 34px; margin: 0 auto 12px; color: #4a4a4a; stroke-width: 1.6; }
 .em-sub { margin-top: 6px; color: #6e6e6e; font-size: 12px; }

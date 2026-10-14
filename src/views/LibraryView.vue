@@ -13,8 +13,12 @@ import { ref, shallowRef, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { getLibrary } from '@/api'
 import BackHeader from '@/components/BackHeader.vue'
 import Cover from '@/components/Cover.vue'
+import { cameBack, vRise } from '@/components/home/motion'
 
 defineOptions({ name: 'LibraryView' })
+
+/* 按返回回到片库：恢复出来的列表不播入场 */
+cameBack()
 
 const scrollEl = ref(null)
 /* null = 还没取到（显示骨架） */
@@ -75,17 +79,22 @@ onBeforeUnmount(saveSnapshot)
       <button type="button" class="retry" @click="load()">重试</button>
     </div>
     <div v-else ref="scrollEl" class="scroll" @scroll.passive="onScroll">
-      <div v-if="!categories" class="cat-grid" aria-hidden="true">
-        <div v-for="i in 8" :key="i" class="cat sk" />
-      </div>
-      <div v-else-if="!categories.length" class="empty">片库里还没有专题</div>
-      <div v-else class="cat-grid">
-        <RouterLink v-for="c in categories" :key="c.id" :to="`/topic/${c.id}`">
-          <Cover class="cat" v-bind="c.cover">
-            <b>{{ c.name }}</b>
-            <span>{{ c.count }}部</span>
-          </Cover>
-        </RouterLink>
+      <!-- 骨架原地淡出，专题瓷砖一块块淡入、从略小放大到原位 -->
+      <div class="m-swap">
+        <Transition name="m-skel">
+          <div v-if="!categories" class="cat-grid" aria-hidden="true">
+            <div v-for="i in 8" :key="i" class="cat sk" />
+          </div>
+          <div v-else-if="!categories.length" v-rise.self class="empty">片库里还没有专题</div>
+          <div v-else v-rise="{ y: 0, scale: 0.94 }" class="cat-grid">
+            <RouterLink v-for="c in categories" :key="c.id" class="cat-l m-press" :to="`/topic/${c.id}`">
+              <Cover class="cat" v-bind="c.cover">
+                <b>{{ c.name }}</b>
+                <span>{{ c.count }}部</span>
+              </Cover>
+            </RouterLink>
+          </div>
+        </Transition>
       </div>
       <div class="pad-b" />
     </div>
@@ -102,6 +111,8 @@ onBeforeUnmount(saveSnapshot)
   border-radius: 10px;
   filter: var(--media);
 }
+/* 按下去立刻缩一点，松手回弹（全局 m-press） */
+.cat-l { display: block; border-radius: 10px; }
 /* bottom shade for the label; z-index keeps it (and the text) above the lazily loaded photo */
 .cat::before {
   content: '';

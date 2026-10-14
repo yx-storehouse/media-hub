@@ -54,7 +54,6 @@ img { display: block; }
   padding-top: var(--safe-t);
   background: var(--bg);
 }
-.has-tabbar .page { bottom: calc(var(--tabbar-h) + var(--safe-b)); }
 
 /* vertical scroller that fills the rest of the page */
 .scroll {
@@ -77,8 +76,6 @@ img { display: block; }
 .pad-b { height: 16px; }
 
 /* shared animations */
-.fade-in { animation: fi .28s ease; }
-@keyframes fi { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 .spin svg { animation: rot .5s linear; }
 @keyframes rot { to { transform: rotate(360deg); } }
 @keyframes pop { 40% { transform: scale(1.28); } }

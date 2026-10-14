@@ -1,8 +1,11 @@
 <script setup>
-import { computed } from 'vue'
+import { ref, computed } from 'vue'
 import { formatCount } from '@/utils/format'
 import Cover from '@/components/Cover.vue'
 import Icon from '@/components/Icon.vue'
+import RollNum from '@/components/video/RollNum.vue'
+import FollowBtn from './FollowBtn.vue'
+import { vRise } from '@/components/home/motion'
 
 /*
  * 创作者主页头部：头图（最近作品拼成的一排图，没有作品时用按 id 生成的灰色渐变）→ 压在头图上的头像 + 关注按钮
@@ -13,9 +16,32 @@ const props = defineProps({
   /** getCreator() 的结果；null = 加载中 */
   creator: { type: Object, default: null },
   following: Boolean,
-  followers: { type: Number, default: 0 }
+  followers: { type: Number, default: 0 },
+  /** 返回恢复：头部原样出现，不播入场 */
+  calm: Boolean
 })
 defineEmits(['follow'])
+
+/* 和 CreatorView 的 BANNER 一致 */
+const BANNER = 150
+
+/*
+ * 头图跟着滚动：往上滚时头图比内容慢（视差）并慢慢变淡；iOS 在顶部往下拉（回弹）时头图从底边往上放大，
+ * 填满拉出来的空白。CreatorView 在滚动时调（每帧最多一次），直接改样式，不触发重新渲染。
+ */
+const bg = ref(null)
+function parallax(top) {
+  const el = bg.value
+  if (!el) return
+  if (top < 0) {
+    el.style.transform = `scale(${1 + -top / BANNER})`
+    el.style.opacity = ''
+  } else if (top < BANNER) {
+    el.style.transform = top ? `translate3d(0, ${top * 0.4}px, 0)` : ''
+    el.style.opacity = top ? String(1 - (top / BANNER) * 0.6) : ''
+  }
+}
+defineExpose({ parallax })
 
 const banner = computed(() => (props.creator?.banner || []).filter(Boolean).slice(0, 3))
 
@@ -34,7 +60,7 @@ const stats = computed(() => {
   if (!c) return []
   return [
     c.handle ? { text: '@' + c.handle } : null,
-    { num: formatCount(props.followers), text: '粉丝' },
+    { num: formatCount(props.followers), n: props.followers, text: '粉丝' },
     { num: formatCount(c.videoCount), text: '视频' },
     { num: formatCount(c.postCount), text: '帖子' },
     c.lastActive ? { text: '最后更新 ' + c.lastActive } : null
@@ -44,26 +70,24 @@ const stats = computed(() => {
 
 <template>
   <header class="cr-hd" :aria-busy="!creator">
-    <div class="cr-banner" :class="{ sk: !creator }" :style="creator && !banner.length ? { backgroundImage: generated } : undefined">
-      <div v-if="banner.length" class="tiles">
-        <Cover v-for="(c, i) in banner" :key="i" v-bind="c" eager />
+    <div class="cr-banner" :class="{ sk: !creator }">
+      <!-- 头图单独一层：视差、回弹放大都只动这一层 -->
+      <div ref="bg" class="cr-bg" :style="creator && !banner.length ? { backgroundImage: generated } : undefined">
+        <div v-if="banner.length" v-rise="calm ? false : { y: 0, scale: 1.06 }" class="tiles">
+          <Cover v-for="(c, i) in banner" :key="i" v-bind="c" eager />
+        </div>
       </div>
     </div>
 
     <template v-if="creator">
-      <div class="cr-row">
+      <div v-rise="!calm" class="cr-row">
         <Cover class="cr-av" v-bind="creator.avatar || {}" eager />
-        <button
-          type="button"
+        <FollowBtn
           class="cr-follow"
-          :class="{ on: following }"
-          :aria-pressed="following"
+          :on="following"
           :aria-label="following ? `已关注 ${creator.name}，点按取消关注` : `关注 ${creator.name}`"
           @click="$emit('follow')"
-        >
-          <template v-if="following">已关注</template>
-          <template v-else><Icon name="plus" />关注</template>
-        </button>
+        />
       </div>
       <h1 class="cr-name">
         <span>{{ creator.name }}</span>
@@ -72,7 +96,8 @@ const stats = computed(() => {
       <!-- 外层裁掉换行后行首的「·」：每一项前面都有一个点，整行向左挪出一个点的宽度 -->
       <div class="cr-stats">
         <div class="in">
-          <span v-for="(s, i) in stats" :key="i" class="s"><b v-if="s.num">{{ s.num }}</b>{{ s.num ? ' ' : '' }}{{ s.text }}</span>
+          <!-- 粉丝数变了（关注 / 取消关注）像里程表一样翻过去 -->
+          <span v-for="(s, i) in stats" :key="i" class="s"><b v-if="s.num"><RollNum v-if="s.n != null" :value="s.num" :n="s.n" /><template v-else>{{ s.num }}</template></b>{{ s.num ? ' ' : '' }}{{ s.text }}</span>
         </div>
       </div>
       <p v-if="creator.bio" class="cr-bio">{{ creator.bio }}</p>
@@ -94,7 +119,12 @@ const stats = computed(() => {
 .cr-hd { position: relative; padding-bottom: 14px; }
 
 /* ---- 头图：最多 3 张并排，压一层渐变，底部融进页面背景 ---- */
-.cr-banner { position: relative; height: 150px; overflow: hidden; background: var(--panel); background-size: cover; }
+/* 不用 overflow 裁：底边照常裁掉（视差往下移时不压住名字），顶边放开（回弹放大时往上长） */
+.cr-banner { position: relative; height: 150px; background: var(--panel); clip-path: inset(-100vh 0 0 0); }
+.cr-bg { position: absolute; inset: 0; overflow: hidden; background-size: cover; transform-origin: 50% 100%; }
+@supports not (clip-path: inset(0px 0px 0px 0px)) {
+  .cr-banner { overflow: hidden; }
+}
 .cr-banner::after {
   content: '';
   position: absolute;
@@ -107,25 +137,20 @@ const stats = computed(() => {
 /* ---- 头像 + 关注 ---- */
 .cr-row { position: relative; z-index: 1; display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; margin-top: -44px; padding: 0 16px; }
 .cr-av { flex: none; width: 84px; height: 84px; border-radius: 50%; background-color: #1a1a1a; box-shadow: 0 0 0 4px var(--bg); filter: var(--media); }
+/* 关注按钮（FollowBtn）：两种文字叠在一格里，宽度不跳 */
 .cr-follow {
-  display: flex;
   flex: none;
-  align-items: center;
-  justify-content: center;
-  gap: 3px;
   min-width: 84px;
   height: 34px;
   margin-bottom: 6px;
-  padding: 0 18px 0 14px;
+  padding: 0 16px;
   border-radius: 17px;
   background: var(--accent);
   color: var(--on-accent);
   font-size: 14px;
   font-weight: 700;
 }
-.cr-follow svg { width: 14px; height: 14px; stroke-width: 3; }
-.cr-follow:active { filter: brightness(.9); }
-.cr-follow.on { padding: 0 16px; background: var(--chip); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .12); color: var(--t2); font-weight: 500; }
+.cr-follow.on { background: var(--chip); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .12); color: var(--t2); }
 
 /* ---- 名字 / 数据 / 简介 ---- */
 /* 名字很长换行时，认证标跟在最后一个字后面（而不是被挤到最右边） */
@@ -138,6 +163,7 @@ const stats = computed(() => {
 .cr-stats .s { white-space: nowrap; }
 .cr-stats .s::before { content: '·'; display: inline-block; width: 15px; color: #575757; text-align: center; }
 .cr-stats b { color: var(--t1); font-weight: 600; font-variant-numeric: tabular-nums; }
+.cr-stats .roll { vertical-align: bottom; }
 
 .cr-bio { margin: 8px 16px 0; color: var(--t3); font-size: 14px; line-height: 21px; overflow-wrap: anywhere; white-space: pre-line; }
 

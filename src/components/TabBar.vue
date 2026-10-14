@@ -1,9 +1,10 @@
 <script setup>
-import { computed } from 'vue'
+import { computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAppStore } from '@/stores/app'
 import { MAIN_TABS, isHomePath } from '@/config/nav'
 import { emitTabRetap } from '@/composables/useTabRetap'
+import { springIcon } from '@/components/motion/press'
 import Icon from './Icon.vue'
 
 const route = useRoute()
@@ -12,6 +13,14 @@ const store = useAppStore()
 const current = computed(() => route.meta.tab)
 /* the home tab returns to whichever home sub-tab was open last */
 const target = t => (t.id === 'home' ? `/home/${store.lastHomeTab}` : t.path)
+
+/*
+ * 选中的图标轻轻弹一下（换成实心图标的同时）：只在用户切换 / 再点一次时，
+ * 打开 App、从子页面返回（导航栏重新出现）都不弹。
+ */
+const icons = {}   // tab id → 图标外层 <span class="tb-ic">
+const pop = id => springIcon(icons[id]?.firstElementChild)
+watch(current, (id, old) => { if (id && old && id !== old) pop(id) }, { flush: 'post' })
 
 /*
  * 返回键先回首页，再按一次才离开（和抖音、B 站一样）：
@@ -23,7 +32,10 @@ const target = t => (t.id === 'home' ? `/home/${store.lastHomeTab}` : t.path)
  */
 function go(t) {
   const to = target(t)
-  if (to === route.fullPath) return emitTabRetap(t.id)
+  if (to === route.fullPath) {
+    pop(t.id)
+    return emitTabRetap(t.id)
+  }
   const back = window.history.state && window.history.state.back
   if (route.meta.tab === 'home') router.push(to)
   else if (back === to || (t.id === 'home' && isHomePath(back))) router.back()
@@ -34,14 +46,15 @@ function go(t) {
 <template>
   <nav class="tabbar">
     <RouterLink v-for="t in MAIN_TABS" :key="t.id" v-slot="{ href }" :to="target(t)" custom>
+      <!-- m-hold：按下时全局按压反馈给它加上 .m-pressed（见 components/motion/press.js），图标跟着缩一下 -->
       <a
         :href="href"
-        class="tb-i"
+        class="tb-i m-hold"
         :class="{ on: current === t.id }"
         :aria-current="current === t.id ? 'page' : undefined"
         @click.prevent="go(t)"
       >
-        <Icon :name="current === t.id ? t.icon + 'On' : t.icon" />
+        <span :ref="el => { icons[t.id] = el }" class="tb-ic"><Icon :name="current === t.id ? t.icon + 'On' : t.icon" /></span>
         <span>{{ t.label }}</span>
       </a>
     </RouterLink>
@@ -73,7 +86,11 @@ function go(t) {
   font-size: 12px;
   line-height: 17px;
   font-weight: 500;
+  transition: color var(--dur-2) var(--ease-out);
 }
-.tb-i svg { width: 22px; height: 22px; }
+.tb-i svg { width: 22px; height: 22px; transform-origin: 50% 50%; }
 .tb-i.on { color: var(--accent); font-weight: 600; }
+/* 按压缩放放在外层，选中时的回弹放在图标本身：两个变换叠在一起，互不打断 */
+.tb-ic { display: block; transition: transform var(--dur-2) var(--ease-spring); }
+.tb-i.m-pressed .tb-ic { transform: scale(var(--press-scale-sm)); transition: transform var(--dur-1) var(--ease-out); }
 </style>

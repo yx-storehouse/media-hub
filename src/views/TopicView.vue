@@ -23,6 +23,8 @@ import { toast } from '@/composables/useToast'
 import { getTopic, getTopicVideos, toggleTopicFav } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 import { rememberVideo } from '@/components/video/preview'
+import { haptic } from '@/utils/motion'
+import { cameBack, useSlider, cover, vRise, pop } from '@/components/home/motion'
 
 /*
  * 专题页（#/topic/:id?sort=1）：头图 + 播放 / 收藏数 +「播放全部」「收藏」，下面是排序标签和两列视频，滚到底自动加载下一页。
@@ -35,6 +37,8 @@ const auth = useAuthStore()
 const route = useRoute()
 const router = useRouter()
 const back = useBack()
+/* 按返回回到专题：恢复出来的头图和列表不播入场 */
+cameBack()
 
 const sortOf = v => {
   const n = Number(v)
@@ -122,6 +126,11 @@ function onScroll() {
 
 /* ---------- 排序 ---------- */
 
+/* 排序胶囊的白底：换排序时滑过去 */
+const sortRow = ref(null)
+const sortBar = ref(null)
+useSlider(sortRow, sortBar, cover('.chip.on'), { key: () => sort.value, deps: () => topic.value })
+
 function syncSort() {
   if (sortOf(route.query.sort) === sort.value) return
   const query = { ...route.query }
@@ -179,12 +188,16 @@ function playAll() {
 /* ---------- 收藏：一次请求（带明确的 on）→ 以返回为准；未登录先登录，登录后补上这次收藏 ---------- */
 
 let favBusy = false
+/* 点了收藏：心形弹一下（收藏时回弹 + 轻震，取消时轻轻一缩） */
+const favIcon = ref(null)
 async function toggleFav() {
   const t = topic.value
   if (!t || favBusy) return
   if (!auth.requireLogin({ then: favAfterLogin })) return
   const before = !!t.faved
   const next = !before
+  pop(favIcon.value?.$el, next)
+  if (next) haptic()
   favBusy = true
   try {
     const res = await toggleTopicFav(t.id, { on: next })
@@ -278,20 +291,21 @@ onBeforeRouteUpdate(to => {
     <div ref="scrollEl" class="scroll" @scroll.passive="onScroll">
       <!-- the hero frame and back button render right away (doubling as the loading skeleton) -->
       <div class="hero">
-        <button type="button" class="back hit-44" aria-label="返回" @click="back"><Icon name="chevL" /></button>
+        <button type="button" class="back hit-44 m-press-sm" aria-label="返回" @click="back"><Icon name="chevL" /></button>
         <template v-if="topic">
-          <div class="mos">
+          <!-- 专题信息到了：封面一张张淡入并从微微放大落回原位，标题和按钮浮上来 -->
+          <div v-rise="{ y: 0, scale: 1.08 }" class="mos">
             <Cover v-for="(c, i) in topic.covers" :key="i" v-bind="c" eager />
           </div>
-          <div class="info">
+          <div v-rise.self="{ delay: 80 }" class="info">
             <div class="ti">
               <h1>{{ topic.name }}</h1>
               <div class="st">{{ stats }}</div>
             </div>
             <div class="btns">
-              <button type="button" class="b-play" @click="playAll"><Icon name="play" />播放全部</button>
-              <button type="button" class="b-fav" :class="{ on: faved }" :aria-pressed="faved" @click="toggleFav">
-                <Icon name="heart" /><span>{{ faved ? '已收藏' : '收藏' }}</span>
+              <button type="button" class="b-play m-press" @click="playAll"><Icon name="play" />播放全部</button>
+              <button type="button" class="b-fav m-press" :class="{ on: faved }" :aria-pressed="faved" @click="toggleFav">
+                <Icon ref="favIcon" name="heart" /><span>{{ faved ? '已收藏' : '收藏' }}</span>
               </button>
             </div>
           </div>
@@ -307,33 +321,37 @@ onBeforeRouteUpdate(to => {
       <template v-else>
         <div ref="listEl" class="vtitle">视频 ({{ videoCount }})</div>
         <!-- 排序吸顶：滚到下面也能换排序；再点当前排序回到列表开头 -->
-        <div class="chips hs tp-chips">
+        <div ref="sortRow" class="chips hs tp-chips">
+          <span ref="sortBar" class="m-bar tp-bar" aria-hidden="true" />
           <button
             v-for="(s, i) in topic.sorts"
             :key="s"
             type="button"
-            class="chip"
+            class="chip m-off"
             :class="{ on: sort === i }"
             :aria-pressed="sort === i"
             @click="changeSort(i)"
           >
-            {{ s }}
+            <span class="lb">{{ s }}</span>
           </button>
         </div>
-        <template v-if="videos.total === null">
-          <div v-if="videos.error" class="empty">
-            加载失败，请检查网络
-            <button type="button" class="retry" @click="videos.more()">重试</button>
-          </div>
-          <SkeletonGrid v-else :count="6" gap="g11" />
-        </template>
-        <div v-else-if="!videos.list.length" class="empty">专题里还没有视频</div>
-        <template v-else>
-          <div :key="sortKey" v-fade-in="sortKey > 0" class="grid g11">
-            <VideoCard v-for="(v, i) in videos.list" :key="v.id" :video="v" :to="videoTo(v, i)" />
-          </div>
-          <ListFoot :feed="videos" />
-        </template>
+        <!-- 换排序：旧列表原地淡出，骨架接上，新列表错峰浮现 -->
+        <div class="m-swap">
+          <Transition name="m-skel">
+            <div v-if="videos.total === null && videos.error" class="empty">
+              加载失败，请检查网络
+              <button type="button" class="retry" @click="videos.more()">重试</button>
+            </div>
+            <SkeletonGrid v-else-if="videos.total === null" :count="6" gap="g11" />
+            <div v-else-if="!videos.list.length" v-rise.self class="empty">专题里还没有视频</div>
+            <div v-else :key="`list${sortKey}`">
+              <div v-rise class="grid g11">
+                <VideoCard v-for="(v, i) in videos.list" :key="v.id" :video="v" :to="videoTo(v, i)" />
+              </div>
+              <ListFoot :feed="videos" />
+            </div>
+          </Transition>
+        </div>
       </template>
       <div class="pad-b" />
     </div>
@@ -388,14 +406,23 @@ onBeforeRouteUpdate(to => {
   backdrop-filter: blur(6px);
   color: #fff;
   font-size: 12px;
+  transition: border-color var(--dur-2) var(--ease-out);
 }
-.b-fav svg { width: 13px; height: 13px; }
+/* 填充用 fill-opacity 过渡（fill 从 none 到颜色没法渐变） */
+.b-fav svg { width: 13px; height: 13px; fill: var(--accent); fill-opacity: 0; transition: fill-opacity var(--dur-1) var(--ease-out); }
 .b-fav.on { border-color: rgba(255, 255, 255, .75); }
-.b-fav.on svg { fill: var(--accent); }
+.b-fav.on svg { fill-opacity: 1; }
 
 /* ---- list ---- */
 .vtitle { margin: 0 12px; padding: 13px 2px 0; border-top: 1px solid var(--line); font-size: 16px; font-weight: 500; line-height: 22px; }
 .tp-chips { position: sticky; top: 0; z-index: 4; background: var(--bg); }
+/* 选中排序的白底（useSlider 滑动）：压在灰底上面、文字下面（吸顶栏自己有层级，滑块和文字的层级只在它里面比） */
+.tp-bar { top: 12px; z-index: 1; height: 27.5px; border-radius: 14px; background: var(--accent); }
+.tp-chips .chip { transition: color var(--dur-2) var(--ease-in-out), background-color var(--dur-2) var(--ease-in-out); }
+.tp-chips[data-slider] > .chip.on { background: transparent; }
+.tp-chips .chip .lb { position: relative; z-index: 2; transition: opacity var(--dur-1) var(--ease-out); }
+/* 胶囊不缩放（m-off）：缩放会让文字跑到白底下面去，按下时只把字调暗 */
+.tp-chips .chip:active .lb { opacity: .6; }
 /* 专题信息还没回来：骨架接在头图下面，位置和真列表差不多 */
 .tp-sk { padding-top: 88px; }
 </style>

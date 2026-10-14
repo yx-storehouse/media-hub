@@ -21,8 +21,9 @@ function confirm() {
   <BottomSheet v-model:open="open" :title="name ? `不再关注「${name}」？` : '不再关注这位创作者？'">
     <p class="uf-text">之后社区「关注」里不再显示 TA 的新帖子，随时可以重新关注。</p>
     <div class="uf-btns">
-      <button type="button" class="uf-ok" @click="confirm">不再关注</button>
-      <button type="button" class="uf-no" @click="open = false">取消</button>
+      <!-- m-press：按下缩一点、松手弹回（components/motion/press.js） -->
+      <button type="button" class="uf-ok m-press" @click="confirm">不再关注</button>
+      <button type="button" class="uf-no m-press" @click="open = false">取消</button>
     </div>
   </BottomSheet>
 </template>
@@ -33,5 +34,6 @@ function confirm() {
 .uf-btns button { height: 46px; border-radius: 10px; font-size: 15px; }
 .uf-ok { background: var(--chip); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .06); color: #ff7a7a; font-weight: 600; }
 .uf-no { background: var(--chip); color: var(--t1); }
+.uf-btns button { transition: filter var(--dur-1) var(--ease-out); }
 .uf-btns button:active { filter: brightness(.9); }
 </style>

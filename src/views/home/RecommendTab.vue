@@ -36,20 +36,25 @@ load()
 <template>
   <div>
     <div ref="scroller" class="scroll">
-      <div v-if="failed" class="empty">
-        加载失败，请稍后重试
-        <button type="button" class="retry" @click="load()">重试</button>
-      </div>
-      <template v-else-if="sections">
-        <RecommendSection v-for="s in sections" ref="secRefs" :key="s.id" :section="s" />
-      </template>
-      <!-- 分区标题 + 卡片 + 按钮的骨架，和真分区一样的尺寸 -->
-      <div v-else aria-hidden="true">
-        <section v-for="i in 2" :key="i" class="sec-sk">
-          <div class="hd"><span class="sk t" /></div>
-          <SkeletonGrid :count="i === 1 ? 5 : 4" :big="i === 1" />
-          <div class="btns"><span class="sk" /><span class="sk" /></div>
-        </section>
+      <!-- 骨架原地淡出，分区接着出现（分区自己的卡片到了再浮现） -->
+      <div class="m-swap">
+        <Transition name="m-skel">
+          <div v-if="failed" class="empty">
+            加载失败，请稍后重试
+            <button type="button" class="retry" @click="load()">重试</button>
+          </div>
+          <div v-else-if="sections">
+            <RecommendSection v-for="s in sections" ref="secRefs" :key="s.id" :section="s" />
+          </div>
+          <div v-else aria-hidden="true">
+            <!-- 分区标题 + 卡片 + 按钮的骨架，和真分区一样的尺寸 -->
+            <section v-for="i in 2" :key="i" class="sec-sk">
+              <div class="hd"><span class="sk t" /></div>
+              <SkeletonGrid :count="i === 1 ? 5 : 4" :big="i === 1" />
+              <div class="btns"><span class="sk" /><span class="sk" /></div>
+            </section>
+          </div>
+        </Transition>
       </div>
       <div class="pad-b" />
     </div>
