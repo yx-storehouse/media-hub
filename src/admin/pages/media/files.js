@@ -6,7 +6,9 @@
 export const VIDEO_EXTS = ['mp4', 'm4v', 'webm', 'mov', 'mkv', 'ogv', 'm3u8', 'ts']
 export const IMAGE_EXTS = ['jpg', 'jpeg', 'png', 'webp', 'gif', 'avif']
 export const EXTRA_EXTS = ['vtt', 'srt']
-export const ALLOWED_EXTS = [...VIDEO_EXTS, ...IMAGE_EXTS, ...EXTRA_EXTS]
+/* 安卓安装包：上传到 app/reel.apk，「我的」页在安卓浏览器里显示「下载安卓 App」（见 src/utils/shell.js） */
+export const DOWNLOAD_EXTS = ['apk']
+export const ALLOWED_EXTS = [...VIDEO_EXTS, ...IMAGE_EXTS, ...EXTRA_EXTS, ...DOWNLOAD_EXTS]
 export const ACCEPT_ATTR = ALLOWED_EXTS.map(e => '.' + e).join(',')
 
 export const extOf = name => (/\.([^./]+)$/.exec(String(name || '').toLowerCase()) || [])[1] || ''

@@ -58,7 +58,7 @@ export function createUploadQueue({ concurrency = 3, onDone } = {}) {
       })
       if (!isAllowed(file.name)) {
         item.state = 'fail'
-        item.error = `不支持的文件类型（.${extOf(file.name) || '无扩展名'}），只能上传视频、图片或字幕`
+        item.error = `不支持的文件类型（.${extOf(file.name) || '无扩展名'}），只能上传视频、图片、字幕或安卓安装包（.apk）`
         item.final = true
       } else if (!file.size) {
         item.state = 'fail'

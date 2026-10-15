@@ -5,6 +5,7 @@
 #
 # 需要能用 SSH 密钥免密登录服务器，服务器上装好 Docker + Compose。
 # 只上传纳入版本管理的文件（.gitignore 忽略的不传），不会碰服务器上的 data/ 和 media/。
+# 手机 App 的外壳工程 mobile/、GitHub Actions 的配置 .github/ 和服务器无关，不上传。
 set -euo pipefail
 
 : "${DEPLOY_HOST:?请设置 DEPLOY_HOST，例如 root@192.168.1.10}"
@@ -14,7 +15,7 @@ cd "$(dirname "$0")/.."
 
 echo "→ 上传代码到 $DEPLOY_HOST:$DEPLOY_DIR"
 ssh -o BatchMode=yes "$DEPLOY_HOST" "mkdir -p '$DEPLOY_DIR'"
-git ls-files -co --exclude-standard -z | tar --null -T - -cf - | ssh -o BatchMode=yes "$DEPLOY_HOST" "cd '$DEPLOY_DIR' && tar -xf -"
+git ls-files -co --exclude-standard -z -- . ':(exclude)mobile' ':(exclude).github' | tar --null -T - -cf - | ssh -o BatchMode=yes "$DEPLOY_HOST" "cd '$DEPLOY_DIR' && tar -xf -"
 
 echo "→ 备份数据库、重建容器"
 ssh -o BatchMode=yes "$DEPLOY_HOST" "cd '$DEPLOY_DIR' && sh -s" <<EOF

@@ -10,6 +10,7 @@ import Cover from '@/components/Cover.vue'
 import Icon from '@/components/Icon.vue'
 import ConfirmSheet from '@/components/me/ConfirmSheet.vue'
 import { countUp } from '@/components/home/motion'
+import { inApp, openServerSettings, hasAndroidApk, APK_URL } from '@/utils/shell'
 
 defineOptions({ name: 'MeView' })
 
@@ -93,6 +94,12 @@ function open(cell) {
   if (cell.to) go(cell.to)
   else toast('功能即将上线')
 }
+
+/* ---------- App 相关：App 里可以换服务器；安卓浏览器里服务器上有安装包时可以下载 App ---------- */
+
+const serverHost = location.host
+const showApk = ref(false)
+hasAndroidApk().then(ok => { showApk.value = ok })
 
 /* ---------- 退出登录：先确认 ---------- */
 
@@ -267,6 +274,21 @@ onActivated(() => {
         </button>
       </div>
 
+      <!-- App 里：回到 App 的启动页换服务器地址；安卓浏览器里：下载安卓 App（服务器上有安装包时） -->
+      <div v-if="inApp || showApk" class="me-list">
+        <button v-if="inApp" class="me-cell" @click="openServerSettings">
+          <Icon name="refresh" />
+          <span>切换服务器</span>
+          <em class="me-sub">{{ serverHost }}</em>
+          <Icon name="chevR" class="go" />
+        </button>
+        <a v-else class="me-cell" :href="APK_URL" download="Reel.apk">
+          <Icon name="iDownload" />
+          <span>下载安卓 App</span>
+          <Icon name="chevR" class="go" />
+        </a>
+      </div>
+
       <!-- 账号相关：管理入口、修改密码；退出登录单独放在最下面，点了先确认，避免误触 -->
       <template v-if="auth.loggedIn">
         <div class="me-list">
@@ -388,6 +410,8 @@ onActivated(() => {
 .me-cell:active .go { transform: translateX(2px); }
 .me-cell:focus-visible { outline-offset: -2px; }
 .me-out { justify-content: center; color: var(--t2); }
+.me-sub { overflow: hidden; min-width: 0; margin-left: auto; color: var(--t2); font-size: 12px; font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
+.me-sub + .go { flex: none; margin-left: 6px; }
 
 /* ---- 改密码 ---- */
 .pwd { padding-bottom: calc(22px + var(--safe-b)); }

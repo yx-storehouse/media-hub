@@ -2,11 +2,12 @@
 
 黑白主题的移动端视频应用：首页（推荐 / 最新 / 分类）、搜索、专题、播放页、短视频、直播、社区、同城、我的。
 
-仓库里有三部分：
+仓库里有四部分：
 
 - **手机端**（`index.html` + `src/`）：给用户看的应用。
 - **管理后台**（`admin.html` + `src/admin/`）：桌面端网页，管理视频、帖子、专题等，支持批量导入。
 - **接口服务**（`server/`）：零依赖的 Node + SQLite 后端，同时托管打包好的前端和素材文件夹 `media/`。详见 [server/README.md](server/README.md)。
+- **手机 App**（`mobile/`）：iOS / 安卓外壳，打开后加载服务器上的手机端网页。详见 [mobile/README.md](mobile/README.md)。
 
 ## 快速开始
 
@@ -84,6 +85,7 @@ admin.html              管理后台入口 HTML（独立打包，不会进手机
 vite.config.js          构建配置（@ 指向 src、目标浏览器、两个入口、拆包）
 server/                 接口服务与数据库（见 server/README.md）
 media/                  素材文件夹（视频、封面，运行时生成，不入库）
+mobile/                 iOS / 安卓 App 外壳（Capacitor，自己的 package.json，见 mobile/README.md）
 public/                 静态资源（favicon、PNG 应用图标、PWA manifest）
 src/
   main.js               应用入口（插件、全局指令、全局错误提示）
@@ -224,19 +226,16 @@ node server/create-admin.mjs admin 你的密码
 - 小图标按钮扩大了可点击区域，视觉上不变。
 - 分享在手机上调用系统分享面板，其他环境复制链接。
 
-## 打包成 iOS / Android App
+## 打包成 iOS / 安卓 App
 
-项目已经适配了刘海屏安全区、`viewport-fit=cover`、hash 路由和相对路径（`base: './'`），可以直接用 [Capacitor](https://capacitorjs.com/) 包成原生 App：
+App 工程在 `mobile/`（Capacitor 8，自己的 `package.json`，详见 [mobile/README.md](mobile/README.md)）。用的是**外壳模式**：App 里只有一个启动页，连上服务器后加载服务器上的网页版，所以**服务器部署后 App 自动是最新的**，不用重新安装；只有启动页、图标、原生代码、版本号变了才要重新打包。
 
-```bash
-npm install @capacitor/core @capacitor/cli
-npx cap init Reel com.example.reel --web-dir dist
-npm run build
-npx cap add android   # 或 ios
-npx cap open android
-```
-
-原生 App 的启动图和图标需要用 Capacitor 的工具单独生成（`public/` 里的 PNG 图标用于网页添加到主屏幕）。
+- 安卓：本机 `cd mobile && npm ci && npm run android:release`，得到签名好的 APK；改名成 `reel.apk`，在管理后台「素材文件」的 `app` 文件夹里上传（已有旧的先删掉，后台上传不覆盖同名文件），安卓浏览器里「我的」就会出现「下载安卓 App」。签名钥匙在仓库外（`~/.reel-keys/`），**务必备份**，丢了就没法给已安装的 App 发更新。
+- 服务器要先部署这一版：`.apk` 上传、「下载安卓 App」和 App 里的「我的 → 切换服务器」都在这一版的服务器 / 网页版里。
+- iOS：在 GitHub Actions 的 macOS 机器上打包（`.github/workflows/mobile-ios.yml`，需要 Apple 开发者账号）。证书、描述文件存在仓库的 GitHub secrets 里，打出 Ad Hoc 安装包（保留 3 天）或上传 TestFlight；没配签名时只编译模拟器版本、跑模拟器冒烟测试。一步步的做法见 [mobile/README.md](mobile/README.md)「iOS」。
+- `.github/workflows/mobile-android.yml` 是安卓的 CI 备份，只编译调试版 APK；正式的安卓包只在本机签名打包，发布钥匙不进 GitHub。
+- 默认服务器地址：本机打包写在 `mobile/.env.local`（`REEL_SERVER=http://内网地址:27381`，不入库），GitHub Actions 里用 secret `REEL_SERVER`；App 里「我的 → 切换服务器」可以随时改，以后换成 HTTPS 域名也一样。
+- 网页版靠 User-Agent 里的 `ReelApp/<版本>` 认出自己在 App 里（`src/utils/shell.js`）。
 
 ## 说明
 

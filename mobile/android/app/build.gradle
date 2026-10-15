@@ -1,0 +1,117 @@
+apply plugin: 'com.android.application'
+
+// 版本号只在 mobile/package.json 里改："version" → versionName，"versionCode" → versionCode（每次发新包 +1）
+def reelPkg = new groovy.json.JsonSlurper().parse(rootProject.file('../package.json'))
+
+/*
+ * 发布签名（不入库）。按顺序找第一个存在的 properties 文件：
+ *   1. 环境变量 REEL_KEYSTORE_PROPERTIES 指向的文件
+ *   2. mobile/android/keystore.properties（可以直接写四项，也可以只写 file=<真正的文件>）
+ *   3. ~/.reel-keys/keystore.properties
+ * 里面要有 storeFile、storePassword、keyAlias、keyPassword。都找不到时 release 包不签名（打包脚本会报错）。
+ * storeFile、file= 写相对路径时，相对于写它的那个 properties 文件所在的文件夹
+ * （比如 ~/.reel-keys/keystore.properties 里写 storeFile=reel-release.jks，换电脑、换用户名都不用改）。
+ */
+def loadProps = { File f ->
+    def p = new Properties()
+    f.withReader('UTF-8') { p.load(it) }
+    return p
+}
+def resolveFrom = { File propsFile, String path ->
+    def f = new File(path)
+    return f.isAbsolute() ? f : new File(propsFile.absoluteFile.parentFile, path)
+}
+def findReleaseSigning = {
+    def candidates = []
+    def fromEnv = System.getenv('REEL_KEYSTORE_PROPERTIES')
+    if (fromEnv) candidates << new File(fromEnv)
+    def local = rootProject.file('keystore.properties')
+    if (local.exists()) {
+        def p = loadProps(local)
+        candidates << (p.getProperty('file') ? resolveFrom(local, p.getProperty('file')) : local)
+    }
+    candidates << new File(System.getProperty('user.home'), '.reel-keys/keystore.properties')
+    for (File f : candidates) {
+        if (f.exists()) {
+            def p = loadProps(f)
+            if (p.getProperty('storeFile') && p.getProperty('storePassword') && p.getProperty('keyAlias')) {
+                p.setProperty('storeFile', resolveFrom(f, p.getProperty('storeFile')).path)
+                return p
+            }
+            logger.warn("签名配置 ${f} 缺少 storeFile / storePassword / keyAlias")
+        }
+    }
+    return null
+}
+def releaseSigning = findReleaseSigning()
+
+android {
+    namespace = "com.yxstorehouse.reel"
+    compileSdk = rootProject.ext.compileSdkVersion
+    defaultConfig {
+        applicationId "com.yxstorehouse.reel"
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        versionCode reelPkg.versionCode as int
+        versionName reelPkg.version
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        aaptOptions {
+             // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
+             // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
+            ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+        }
+    }
+    signingConfigs {
+        if (releaseSigning) {
+            release {
+                storeFile file(releaseSigning.getProperty('storeFile'))
+                storePassword releaseSigning.getProperty('storePassword')
+                keyAlias releaseSigning.getProperty('keyAlias')
+                keyPassword releaseSigning.getProperty('keyPassword') ?: releaseSigning.getProperty('storePassword')
+            }
+        }
+    }
+    // 不上架 Google Play：不往包里写给 Play 看的加密依赖清单。它每次打包都随机加密，
+    // 写进去的话同一份代码打出来的 APK 哈希每次都不一样，没法核对「这个包是不是那份代码打的」
+    dependenciesInfo {
+        includeInApk = false
+        includeInBundle = false
+    }
+    buildTypes {
+        release {
+            if (releaseSigning) signingConfig signingConfigs.release
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+        }
+    }
+}
+
+repositories {
+    flatDir{
+        dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'
+    }
+}
+
+dependencies {
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+    implementation "androidx.activity:activity:$androidxActivityVersion"
+    implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
+    implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
+    implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
+    implementation project(':capacitor-android')
+    testImplementation "junit:junit:$junitVersion"
+    androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
+    androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
+    implementation project(':capacitor-cordova-android-plugins')
+}
+
+apply from: 'capacitor.build.gradle'
+
+try {
+    def servicesJSON = file('google-services.json')
+    if (servicesJSON.text) {
+        apply plugin: 'com.google.gms.google-services'
+    }
+} catch(Exception e) {
+    logger.info("google-services.json not found, google-services plugin not applied. Push Notifications won't work")
+}

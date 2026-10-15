@@ -563,7 +563,7 @@ curl -X POST http://localhost:3000/api/admin/videos/import \
 
 - `GET / HEAD /media/<路径>` 直接访问素材，支持 `Range`（拖进度条、分段加载）。缓存：**图片** `Cache-Control: no-cache`（每次带 `ETag` / `Last-Modified` 向服务器确认，没变就是 304），所以重新截取的封面写回同一个地址（`covers/v<id>.jpg`）App 和后台马上能看到；**视频和其他文件** `public, max-age=300`。
 - **`/media/*` 是公开的，不需要登录**：`<video>` / `<img>` 没法带 Bearer 令牌。内网可以接受；如果素材不能被内网其他人看到，请不要放进 media/，或在前面的 Nginx 上加访问控制。
-- 只允许这些扩展名，上传和访问都卡住（避免上传网页 / 脚本被当成页面执行）：视频 `mp4 m4v webm mov mkv ogv m3u8 ts`，图片 `jpg jpeg png webp gif avif`，字幕 `vtt srt`。
+- 只允许这些扩展名，上传和访问都卡住（避免上传网页 / 脚本被当成页面执行）：视频 `mp4 m4v webm mov mkv ogv m3u8 ts`，图片 `jpg jpeg png webp gif avif`，字幕 `vtt srt`，安卓安装包 `apk`（`application/vnd.android.package-archive`，按附件下载、`no-cache`；放在 `app/reel.apk` 时网页版「我的」在安卓浏览器里显示「下载安卓 App」，见 [mobile/README.md](../mobile/README.md)）。
 - 上传是流式写入 `<文件名>.<随机串>.part`，收完再改名；同名文件默认自动改名为 `name (1).ext`，`overwrite=1` 时覆盖。
   - 「查重名 + 改名」在同一文件夹里串行执行：同时上传的同名文件各自得到不同的名字，不会互相覆盖。
   - 覆盖时先把旧文件挪到隐藏的临时名再换上新文件：旧文件正被播放（Windows 上有读句柄）时也能覆盖。

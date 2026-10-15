@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CAPACITOR_DEBUG</key>
+	<string>$(CAPACITOR_DEBUG)</string>
+	<!-- 网页版是中文的：系统自带的界面（视频播放器、复制粘贴菜单、选文件……）手机是中文时跟着显示中文 -->
+	<key>CFBundleDevelopmentRegion</key>
+	<string>zh-Hans</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>zh-Hans</string>
+		<string>en</string>
+	</array>
+	<key>CFBundleDisplayName</key>
+	<string>Reel</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<!-- 版本号来自 mobile/package.json：version → CFBundleShortVersionString，GitHub Actions 打包时传进来 -->
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<!-- 只用了系统自带的 HTTPS，不涉及出口管制的加密：上传 TestFlight 时不用每次回答加密问题 -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<!--
+	  App Transport Security：Reel 服务器在家里的内网，是 http://（没有证书），
+	  而且地址是用户在启动页里填的，打包时不知道是哪个，没法只给某个域名开例外。
+	    NSAllowsArbitraryLoadsInWebContent  WebView 里的所有请求（启动页检查 /api/health、网页、接口、图片）允许 http://
+	    NSAllowsArbitraryLoadsForMedia      视频（AVFoundation 播放）允许 http://
+	    NSAllowsArbitraryLoads              iOS 10 起只要有上面两个键，这一项就被系统忽略；留着表明意图，App 自己的原生代码也没有别的网络请求
+	  以后服务器换成 HTTPS 域名也不用改这里。
+	-->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+		<key>NSAllowsArbitraryLoadsInWebContent</key>
+		<true/>
+		<key>NSAllowsArbitraryLoadsForMedia</key>
+		<true/>
+	</dict>
+	<!-- iOS 14 起连接局域网里的设备（NAS）要用户同意，第一次连接时系统弹窗显示这句话 -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Reel 需要连接家里局域网中的 Reel 服务器（比如 NAS），才能浏览和播放视频。</string>
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<false/>
+		<key>UISceneConfigurations</key>
+		<dict>
+			<key>UIWindowSceneSessionRoleApplication</key>
+			<array>
+				<dict>
+					<key>UISceneConfigurationName</key>
+					<string>Default Configuration</string>
+					<key>UISceneDelegateClassName</key>
+					<string>$(PRODUCT_MODULE_NAME).SceneDelegate</string>
+				</dict>
+			</array>
+		</dict>
+	</dict>
+	<key>UILaunchStoryboardName</key>
+	<string>LaunchScreen</string>
+	<!-- 状态栏：深色背景配浅色字（启动画面阶段；之后由 SystemBars 插件按 capacitor.config.js 设置） -->
+	<key>UIStatusBarStyle</key>
+	<string>UIStatusBarStyleLightContent</string>
+	<!-- 网页版只有深色：键盘、系统弹窗、菜单也用深色 -->
+	<key>UIUserInterfaceStyle</key>
+	<string>Dark</string>
+	<!-- 横竖屏都支持：横过来看视频（网页版正在播放时横屏会自动全屏） -->
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UIViewControllerBasedStatusBarAppearance</key>
+	<true/>
+</dict>
+</plist>

@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover" />
+    <meta name="theme-color" content="#0a0a0a" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="format-detection" content="telephone=no" />
+    <title>Reel</title>
+    <link rel="stylesheet" href="launcher.css" />
+  </head>
+  <body>
+    <!--
+      Reel App 的启动页（只有这一页打包进 App）：
+      连上服务器 → 整页跳到服务器上的网页版；连不上 → 显示地址和「连接 / 重试」。
+      ?settings 打开地址设置（网页版「我的 → 切换服务器」跳到这里），长按图标也能打开。
+    -->
+    <main id="splash" class="splash" aria-live="polite">
+      <svg id="mark" class="mark" viewBox="0 0 100 70" role="img" aria-label="Reel">
+        <g transform="translate(20 25)">
+          <circle r="19" fill="#fff" stroke="#0a0a0a" stroke-width="3.2" />
+          <circle r="5" fill="#0a0a0a" />
+          <circle cx="0" cy="-11.6" r="3.6" fill="#0a0a0a" />
+          <circle cx="11" cy="-3.6" r="3.6" fill="#0a0a0a" />
+          <circle cx="6.8" cy="9.4" r="3.6" fill="#0a0a0a" />
+          <circle cx="-6.8" cy="9.4" r="3.6" fill="#0a0a0a" />
+          <circle cx="-11" cy="-3.6" r="3.6" fill="#0a0a0a" />
+        </g>
+        <g transform="translate(80 25)">
+          <circle r="19" fill="#fff" stroke="#0a0a0a" stroke-width="3.2" />
+          <circle r="5" fill="#0a0a0a" />
+          <circle cx="0" cy="-11.6" r="3.6" fill="#0a0a0a" />
+          <circle cx="11" cy="-3.6" r="3.6" fill="#0a0a0a" />
+          <circle cx="6.8" cy="9.4" r="3.6" fill="#0a0a0a" />
+          <circle cx="-6.8" cy="9.4" r="3.6" fill="#0a0a0a" />
+          <circle cx="-11" cy="-3.6" r="3.6" fill="#0a0a0a" />
+        </g>
+        <ellipse cx="50" cy="38" rx="27" ry="26" fill="#fff" stroke="#0a0a0a" stroke-width="3.2" />
+        <path d="M36 33q4-4 8 0M56 33q4-4 8 0M44 47q6 4 12 0" stroke="#0a0a0a" stroke-width="2.8" fill="none" stroke-linecap="round" />
+        <circle cx="63" cy="56" r="10.5" fill="#0a0a0a" stroke="#fff" stroke-width="2.2" />
+        <path d="M60.4 51.8v8.4l7.2-4.2z" fill="#fff" />
+      </svg>
+      <div class="brand">Reel</div>
+      <p id="status" class="status"></p>
+      <button id="change" class="link" type="button" hidden>更改服务器</button>
+    </main>
+
+    <section id="panel" class="panel" hidden aria-labelledby="title">
+      <h1 id="title" class="title"></h1>
+      <p id="detail" class="detail"></p>
+      <form id="form" class="form" novalidate>
+        <label class="label" for="addr">服务器地址</label>
+        <input
+          id="addr"
+          class="input"
+          type="url"
+          inputmode="url"
+          autocomplete="off"
+          autocapitalize="off"
+          autocorrect="off"
+          spellcheck="false"
+          enterkeyhint="go"
+          placeholder="例如 http://192.168.1.10:27381"
+          aria-describedby="error hint"
+        />
+        <p id="error" class="error" role="alert"></p>
+        <div class="actions">
+          <button id="connect" class="btn primary" type="submit">连接</button>
+          <button id="retry" class="btn" type="button" hidden>重试</button>
+        </div>
+      </form>
+      <p id="hint" class="hint">家里 Wi-Fi 用内网地址（如 http://192.168.1.10:27381）；在外面需要 HTTPS 域名。</p>
+      <button id="back" class="link back" type="button" hidden>返回</button>
+      <p id="ver" class="ver"></p>
+    </section>
+
+    <!-- config.js 由 scripts/build-www.mjs 生成（默认服务器地址、版本号），不入库；没有它也能用，会让用户自己填地址 -->
+    <script src="config.js"></script>
+    <script src="launcher.js"></script>
+  </body>
+</html>

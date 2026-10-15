@@ -1,0 +1,284 @@
+# iOS App（mobile/ios）在 GitHub 的 macOS 机器上打包。
+#
+#   配好签名 secrets（见 mobile/README.md「iOS」）：Archive → 导出 .ipa（Ad Hoc 或 App Store Connect）
+#     → 上传成本次运行的附件（保留 3 天）→ 可选上传到 TestFlight
+#   没配签名：只编译模拟器版本 + 在模拟器里跑一遍外壳冒烟测试，确认工程没问题（没有可安装的包）
+#
+# 用到的 secrets / 变量（都在仓库 Settings → Secrets and variables → Actions）：
+#   IOS_CERT_P12_BASE64  Apple Distribution 证书 + 私钥（.p12）的 base64      ┐
+#   IOS_CERT_PASSWORD    .p12 的密码                                          │ 前三个都有才打签名包
+#   IOS_PROFILE_BASE64   描述文件（.mobileprovision）的 base64                ┘
+#   IOS_TEAM_ID          10 位 Team ID（没设时从描述文件里读）
+#   KEYCHAIN_PASSWORD    临时钥匙串的密码，随便一串（没设时随机生成）
+#   ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_P8   App Store Connect API 密钥（可选，上传 TestFlight 用）
+#   REEL_SERVER          App 默认连接的服务器地址（推荐放 secret：日志里会被打码）；
+#                        也可以用 Variables 里的 REEL_SERVER，但仓库是公开的，变量的值会出现在公开的运行日志里
+#
+# 仓库是公开的：运行日志、附件（.ipa）任何登录 GitHub 的人都能看到 / 下载，所以附件只保留 3 天，日志里不打印服务器地址。
+
+name: iOS App
+
+on:
+  workflow_dispatch:
+    inputs:
+      export_method:
+        description: 导出方式（auto：按描述文件自动判断，Ad Hoc 描述文件 → ad-hoc，App Store 描述文件 → app-store-connect）
+        type: choice
+        options: [auto, ad-hoc, app-store-connect]
+        default: auto
+      testflight:
+        description: 导出方式是 app-store-connect 且配了 ASC_* 密钥时，上传到 TestFlight
+        type: boolean
+        default: true
+      simulator_test:
+        description: 配了签名也在模拟器里跑一遍冒烟测试（没配签名时总会跑）
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - 'mobile/**'
+      - '!mobile/android/**'
+      - '.github/workflows/mobile-ios.yml'
+
+concurrency:
+  group: mobile-ios-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ios:
+    name: iOS
+    runs-on: macos-26
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+        working-directory: mobile
+    env:
+      HAS_SIGNING: ${{ secrets.IOS_CERT_P12_BASE64 != '' && secrets.IOS_CERT_PASSWORD != '' && secrets.IOS_PROFILE_BASE64 != '' }}
+      HAS_ASC_KEY: ${{ secrets.ASC_KEY_ID != '' && secrets.ASC_ISSUER_ID != '' && secrets.ASC_KEY_P8 != '' }}
+      SIM_TEST: ${{ inputs.simulator_test == true }}
+      PROJECT: ios/App/App.xcodeproj
+      BUNDLE_ID: com.yxstorehouse.reel
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+
+      - name: 提前启动模拟器（后台，和编译同时进行）
+        if: env.HAS_SIGNING != 'true' || env.SIM_TEST == 'true'
+        run: nohup node scripts/ios-sim-test.mjs --boot > "$RUNNER_TEMP/sim-boot.log" 2>&1 &
+
+      - name: Xcode 版本
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: 安装 Capacitor
+        # 开发依赖（@capacitor/assets，生成图标用）在 CI 里用不到
+        run: npm ci --omit=dev --no-audit --no-fund
+
+      - name: 生成启动页配置（默认服务器地址）
+        env:
+          REEL_SERVER: ${{ secrets.REEL_SERVER || vars.REEL_SERVER }}
+        run: node scripts/build-www.mjs
+
+      - name: 同步到 iOS 工程
+        run: npx cap sync ios
+
+      - name: 版本号
+        id: version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          CODE=$(node -p "require('./package.json').versionCode")
+          # build 号 = versionCode.运行序号（重跑时再加 .第几次）：每次打包都比上一次大，TestFlight 要求不能重复
+          BUILD="$CODE.$GITHUB_RUN_NUMBER"
+          if [ "${GITHUB_RUN_ATTEMPT:-1}" != "1" ]; then BUILD="$BUILD.$GITHUB_RUN_ATTEMPT"; fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "build=$BUILD" >> "$GITHUB_OUTPUT"
+          echo "Reel ${VERSION}（build ${BUILD}）"
+
+      # ---------------- 没配签名（或者要求跑测试）：模拟器版本 ----------------
+
+      - name: 编译模拟器版本（不签名）
+        if: env.HAS_SIGNING != 'true' || env.SIM_TEST == 'true'
+        run: |
+          xcodebuild -project "$PROJECT" -scheme App -configuration Release \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/sim" \
+            CODE_SIGNING_ALLOWED=NO \
+            MARKETING_VERSION="${{ steps.version.outputs.version }}" \
+            CURRENT_PROJECT_VERSION="${{ steps.version.outputs.build }}" \
+            -quiet build
+          ls -d "$RUNNER_TEMP/sim/Build/Products/Release-iphonesimulator/App.app"
+
+      - name: 模拟器冒烟测试
+        if: env.HAS_SIGNING != 'true' || env.SIM_TEST == 'true'
+        timeout-minutes: 20
+        run: |
+          cat "$RUNNER_TEMP/sim-boot.log" 2> /dev/null || true
+          node scripts/ios-sim-test.mjs "$RUNNER_TEMP/sim/Build/Products/Release-iphonesimulator/App.app" "$RUNNER_TEMP/sim-test"
+
+      - name: 上传冒烟测试截图
+        if: always() && (env.HAS_SIGNING != 'true' || env.SIM_TEST == 'true')
+        uses: actions/upload-artifact@v7
+        with:
+          name: ios-simulator-test
+          path: ${{ runner.temp }}/sim-test
+          retention-days: 3
+          if-no-files-found: ignore
+
+      # ---------------- 配了签名：Archive → 导出 .ipa ----------------
+
+      - name: 导入证书和描述文件
+        if: env.HAS_SIGNING == 'true'
+        id: signing
+        env:
+          IOS_CERT_P12_BASE64: ${{ secrets.IOS_CERT_P12_BASE64 }}
+          IOS_CERT_PASSWORD: ${{ secrets.IOS_CERT_PASSWORD }}
+          IOS_PROFILE_BASE64: ${{ secrets.IOS_PROFILE_BASE64 }}
+          IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          EXPORT_METHOD: ${{ inputs.export_method || 'auto' }}
+        # 证书进临时钥匙串、装描述文件、检查它们对得上，生成 ios/signing.local.xcconfig（只给 App 目标用）
+        run: bash scripts/ios-ci-signing.sh
+
+      - name: Archive
+        if: env.HAS_SIGNING == 'true'
+        run: |
+          xcodebuild -project "$PROJECT" -scheme App -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/Reel.xcarchive" \
+            -derivedDataPath "$RUNNER_TEMP/device" \
+            MARKETING_VERSION="${{ steps.version.outputs.version }}" \
+            CURRENT_PROJECT_VERSION="${{ steps.version.outputs.build }}" \
+            -quiet archive
+
+      - name: 导出 .ipa
+        if: env.HAS_SIGNING == 'true'
+        id: export
+        env:
+          METHOD: ${{ steps.signing.outputs.method }}
+          TEAM_ID: ${{ steps.signing.outputs.team }}
+          UUID: ${{ steps.signing.outputs.uuid }}
+          IDENTITY: ${{ steps.signing.outputs.identity }}
+          VERSION: ${{ steps.version.outputs.version }}
+          BUILD: ${{ steps.version.outputs.build }}
+        run: |
+          # ExportOptions：method 用 Xcode 15.3 起的新名字（release-testing = Ad Hoc）
+          export_options() { # $1 = method, $2 = destination
+            cat <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>$1</string>
+            <key>destination</key><string>$2</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>teamID</key><string>$TEAM_ID</string>
+            <key>signingCertificate</key><string>$IDENTITY</string>
+            <key>provisioningProfiles</key>
+            <dict><key>$BUNDLE_ID</key><string>$UUID</string></dict>
+            <key>stripSwiftSymbols</key><true/>
+            <key>uploadSymbols</key><true/>
+            <key>manageAppVersionAndBuildNumber</key><false/>
+          </dict>
+          </plist>
+          PLIST
+          }
+          case "$METHOD" in
+            ad-hoc) XC_METHOD=release-testing ;;
+            app-store-connect) XC_METHOD=app-store-connect ;;
+            *) echo "::error::未知的导出方式 $METHOD"; exit 1 ;;
+          esac
+          export_options "$XC_METHOD" export > "$RUNNER_TEMP/ExportOptions.plist"
+          export_options app-store-connect upload > "$RUNNER_TEMP/ExportOptions-upload.plist"
+          plutil -lint "$RUNNER_TEMP/ExportOptions.plist" "$RUNNER_TEMP/ExportOptions-upload.plist"
+
+          xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/Reel.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
+            -exportPath "$RUNNER_TEMP/export"
+          IPA_NAME="Reel-$VERSION-$BUILD-$METHOD.ipa"
+          mkdir -p "$RUNNER_TEMP/ipa"
+          mv "$RUNNER_TEMP/export/"*.ipa "$RUNNER_TEMP/ipa/$IPA_NAME"
+          ls -l "$RUNNER_TEMP/ipa"
+          echo "ipa=$RUNNER_TEMP/ipa/$IPA_NAME" >> "$GITHUB_OUTPUT"
+          echo "name=$IPA_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: 上传 .ipa（保留 3 天）
+        if: env.HAS_SIGNING == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.export.outputs.name }}
+          path: ${{ steps.export.outputs.ipa }}
+          retention-days: 3
+          if-no-files-found: error
+
+      - name: 上传到 TestFlight
+        id: testflight
+        if: >-
+          env.HAS_SIGNING == 'true' && env.HAS_ASC_KEY == 'true' &&
+          steps.signing.outputs.method == 'app-store-connect' &&
+          (github.event_name == 'push' || inputs.testflight == true)
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+        run: |
+          KEY="$RUNNER_TEMP/asc/AuthKey_$ASC_KEY_ID.p8"
+          mkdir -p "$RUNNER_TEMP/asc"
+          # ASC_KEY_P8 放 .p8 文件的原文；也接受 base64
+          if printf '%s' "$ASC_KEY_P8" | grep -q 'BEGIN PRIVATE KEY'; then
+            printf '%s\n' "$ASC_KEY_P8" > "$KEY"
+          else
+            printf '%s' "$ASC_KEY_P8" | tr -d ' \r\n' | base64 --decode > "$KEY"
+          fi
+          # 用 Xcode 自己的上传（和 Organizer 里点 Distribute App 一样）
+          xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/Reel.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions-upload.plist" \
+            -exportPath "$RUNNER_TEMP/upload" \
+            -authenticationKeyPath "$KEY" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+          rm -f "$KEY"
+          echo "uploaded=true" >> "$GITHUB_OUTPUT"
+
+      - name: 清理钥匙串
+        if: always() && steps.signing.outputs.keychain != ''
+        run: |
+          security delete-keychain "${{ steps.signing.outputs.keychain }}" || true
+          rm -f ios/signing.local.xcconfig "$RUNNER_TEMP/profile.mobileprovision" "$RUNNER_TEMP/profile.plist"
+
+      - name: 结果
+        if: always()
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          BUILD: ${{ steps.version.outputs.build }}
+          METHOD: ${{ steps.signing.outputs.method }}
+          IPA: ${{ steps.export.outputs.name }}
+          UPLOADED: ${{ steps.testflight.outputs.uploaded }}
+        run: |
+          {
+            echo "## Reel iOS ${VERSION}（build ${BUILD}）"
+            if [ "$HAS_SIGNING" != "true" ]; then
+              echo "**没有配置签名 secrets**（IOS_CERT_P12_BASE64 / IOS_CERT_PASSWORD / IOS_PROFILE_BASE64），"
+              echo "只编译了模拟器版本、跑了模拟器冒烟测试，**没有可以装到 iPhone 上的安装包**。配置方法见 mobile/README.md「iOS」。"
+            elif [ -n "$IPA" ]; then
+              echo "- 安装包：\`$IPA\`（导出方式 ${METHOD}，在本次运行的 Artifacts 里下载，保留 3 天）"
+              if [ "$UPLOADED" = "true" ]; then
+                echo "- 已上传到 TestFlight：App Store Connect 处理完（一般十几分钟）后在 TestFlight App 里就能装"
+              elif [ "$METHOD" = "app-store-connect" ]; then
+                echo "- 没有上传 TestFlight（没配 ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_P8，或者手动运行时没勾选）"
+              fi
+            else
+              echo "签名打包没有成功，看上面出错的步骤。"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

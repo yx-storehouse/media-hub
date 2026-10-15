@@ -22,3 +22,21 @@ server/db/backups/
 
 # docker compose 的数据目录（数据库）
 /data/
+
+# 手机 App 外壳（mobile/）：本机生成的配置、签名文件不入库（构建产物见 mobile/android/.gitignore）
+# 启动页的默认服务器地址写在 config.js 里，仓库是公开的，不能提交
+mobile/www/config.js
+mobile/android/keystore.properties
+mobile/ios/keystore.properties
+mobile/ios/signing.local.xcconfig
+*.jks
+*.keystore
+*.p12
+*.mobileprovision
+# iOS 证书申请、证书、App Store Connect API 私钥、打出来的安装包（这些都放在仓库外面，这里再兜一层）
+*.certSigningRequest
+*.csr
+*.cer
+*.p8
+*.ipa
+*.xcarchive

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!-- Reel 是纯深色界面：窗口底色、系统栏都是 #0a0a0a（和网页版 theme-color 一致） -->
+    <style name="AppTheme" parent="Theme.AppCompat.NoActionBar">
+        <item name="colorPrimary">@color/reel_bg</item>
+        <item name="colorPrimaryDark">@color/reel_bg</item>
+        <item name="colorAccent">@color/reel_fg</item>
+        <item name="android:windowBackground">@color/reel_bg</item>
+    </style>
+
+    <style name="AppTheme.NoActionBar" parent="Theme.AppCompat.NoActionBar">
+        <item name="windowActionBar">false</item>
+        <item name="windowNoTitle">true</item>
+        <item name="android:background">@null</item>
+        <!-- SystemBars 插件用 windowBackground 给系统栏让出来的边涂色 -->
+        <item name="android:windowBackground">@color/reel_bg</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+
+    <!-- 启动时的主题：安卓 12+ 是系统启动画面（深色底 + 图标），更早的版本铺 splash 图 -->
+    <style name="AppTheme.NoActionBarLaunch" parent="Theme.SplashScreen">
+        <item name="android:background">@drawable/splash</item>
+        <item name="windowSplashScreenBackground">@color/reel_bg</item>
+        <item name="postSplashScreenTheme">@style/AppTheme.NoActionBar</item>
+    </style>
+</resources>

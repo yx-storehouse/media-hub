@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  服务器地址是用户在 App 里填的，家里的 NAS 一般只有 http://（没有证书），所以允许明文 HTTP。
+  以后换成 HTTPS 域名时不用改这里：https 照常校验系统证书。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

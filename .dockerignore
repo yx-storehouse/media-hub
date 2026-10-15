@@ -14,3 +14,4 @@ server/test-*.mjs
 *.log
 .env
 .env.*
+mobile

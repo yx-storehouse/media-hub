@@ -5,7 +5,8 @@
  *                              <video>/<img> 带不了 Bearer 令牌，内网可以接受，README 里写明了
  *   - /api/admin/media*        列目录、流式上传、新建文件夹、删除、扫描入库（仅管理员）
  *
- * 只允许视频 / 图片 / 字幕这几类扩展名，上传和访问都卡住，避免有人传个 .html / .js 当网页执行。
+ * 只允许视频 / 图片 / 字幕这几类扩展名，外加安卓安装包 .apk（「我的 → 下载安卓 App」用，见 src/utils/shell.js），
+ * 上传和访问都卡住，避免有人传个 .html / .js 当网页执行。
  */
 import { createReadStream, createWriteStream, mkdirSync } from 'node:fs'
 import { stat, readdir, mkdir, rename, rm, rmdir, unlink } from 'node:fs/promises'
@@ -34,13 +35,19 @@ const IMAGE_TYPES = {
   '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp', '.gif': 'image/gif', '.avif': 'image/avif'
 }
 const EXTRA_TYPES = { '.vtt': 'text/vtt; charset=utf-8', '.srt': 'text/plain; charset=utf-8' }
-const MIME = { ...VIDEO_TYPES, ...IMAGE_TYPES, ...EXTRA_TYPES }
+/* 安卓安装包：按附件下载（浏览器不会当网页打开） */
+const DOWNLOAD_TYPES = { '.apk': 'application/vnd.android.package-archive' }
+const MIME = { ...VIDEO_TYPES, ...IMAGE_TYPES, ...EXTRA_TYPES, ...DOWNLOAD_TYPES }
 /* 同名封面的优先顺序 */
 const COVER_EXTS = ['.jpg', '.jpeg', '.png', '.webp']
 
 const fail = (message, field) => { throw new InputError(message, field) }
 const extOf = name => extname(name).toLowerCase()
 const kindOf = name => (VIDEO_TYPES[extOf(name)] ? 'video' : IMAGE_TYPES[extOf(name)] ? 'image' : 'other')
+/** 按附件下载的响应头；中文文件名用 filename*，老客户端看 ASCII 的 filename */
+const contentDisposition = name =>
+  `attachment; filename="${name.replace(/[^\x20-\x7e]|["\\]/g, '_')}"; filename*=UTF-8''${
+    encodeURIComponent(name).replace(/['()*]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase())}`
 /** 列表里不显示：隐藏文件、上传中的临时文件 */
 const hidden = name => name.startsWith('.') || name.toLowerCase().endsWith('.part')
 /** 本服务自己的临时文件：上传中的 <名字>.<8 位随机>.part、覆盖时挪开的 <名字>.<8 位随机>.old.part（自动清理只认这两种） */
@@ -223,13 +230,14 @@ export async function serveMedia(req, res, pathname) {
     'content-type': type,
     'accept-ranges': 'bytes',
     // 图片每次都向服务器确认一下（没变就是很便宜的 304）：重新截取的封面写回同一个地址（covers/v<id>.jpg）也能马上看到；
-    // 视频等大文件缓存 5 分钟
-    'cache-control': IMAGE_TYPES[extOf(abs)] ? 'no-cache' : 'public, max-age=300',
+    // 安装包同理：新版本覆盖同名文件后马上能下到新的；视频等大文件缓存 5 分钟
+    'cache-control': IMAGE_TYPES[extOf(abs)] || DOWNLOAD_TYPES[extOf(abs)] ? 'no-cache' : 'public, max-age=300',
     'last-modified': st.mtime.toUTCString(),
     etag,
     'x-content-type-options': 'nosniff',
     'access-control-allow-origin': '*'
   }
+  if (DOWNLOAD_TYPES[extOf(abs)]) headers['content-disposition'] = contentDisposition(basename(abs))
   if (!req.headers.range && notModified(req, etag, st.mtimeMs)) {
     res.writeHead(304, headers)
     return res.end()
@@ -409,7 +417,7 @@ async function moveInto(part, target, overwrite) {
 /** PUT /api/admin/media/upload?path=videos/a.mp4&overwrite=0|1 */
 export async function upload(req, q = {}) {
   const rel = cleanRel(q.path, 'path', { strict: true, required: true })
-  if (!MIME[extOf(rel)]) fail(`不支持的文件类型「${extOf(rel) || '无扩展名'}」，只能上传视频、图片或字幕文件`, 'path')
+  if (!MIME[extOf(rel)]) fail(`不支持的文件类型「${extOf(rel) || '无扩展名'}」，只能上传视频、图片、字幕或安卓安装包（.apk）`, 'path')
   const overwrite = q.overwrite === '1' || q.overwrite === 'true'
   const declared = Number(req.headers['content-length'])
   if (Number.isFinite(declared) && declared > MAX_UPLOAD_BYTES) throw tooLarge()

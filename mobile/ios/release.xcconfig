@@ -1,0 +1,18 @@
+// App 目标 Release 配置（Archive 打包、TestFlight / Ad Hoc 用）的基础设置。
+//
+// 签名信息不写在工程里（仓库是公开的，也因人而异）：
+//   - GitHub Actions 打包时按 secrets 生成 signing.local.xcconfig（见 .github/workflows/mobile-ios.yml）
+//   - 在 Mac 上用 Xcode 自己打包：可以照着写一个 signing.local.xcconfig（已被 .gitignore 忽略），
+//     或者直接在 Xcode 的 Signing & Capabilities 里选自己的 Team
+//
+// signing.local.xcconfig 的例子：
+//   CODE_SIGN_STYLE = Manual
+//   DEVELOPMENT_TEAM = ABCDE12345
+//   CODE_SIGN_IDENTITY = Apple Distribution
+//   PROVISIONING_PROFILE_SPECIFIER = <描述文件的 UUID 或名字>
+//
+// 只作用于 App 这个目标：放在命令行参数里会连 Swift Package 的目标一起改，Xcode 会报「不支持描述文件」。
+
+CODE_SIGN_STYLE = Automatic
+
+#include? "signing.local.xcconfig"

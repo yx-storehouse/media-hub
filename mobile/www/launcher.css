@@ -1,0 +1,132 @@
+/* Reel 启动页：和网页版同一套黑白配色（src/styles/tokens.css） */
+:root {
+  --bg: #0a0a0a;
+  --field: #1a1a1a;
+  --line: #2a2a2a;
+  --t1: #ffffff;
+  --t2: #8c8c8c;
+  --err: #ff8a8a;
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+
+html, body {
+  margin: 0;
+  min-height: 100%;
+  background: var(--bg);
+  color: var(--t1);
+  font: 15px/1.5 var(--font);
+  -webkit-text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  padding:
+    calc(env(safe-area-inset-top, 0px) + 16px)
+    calc(env(safe-area-inset-right, 0px) + 20px)
+    calc(env(safe-area-inset-bottom, 0px) + 16px)
+    calc(env(safe-area-inset-left, 0px) + 20px);
+}
+
+button, input { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus { outline: none; }
+:focus-visible { outline: 2px solid var(--t1); outline-offset: 2px; }
+
+/* ---------- 启动画面 ---------- */
+
+.splash {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+.mark { width: 112px; height: auto; display: block; }
+.brand { margin-top: 14px; font-size: 22px; font-weight: 700; letter-spacing: .5px; }
+.status {
+  margin: 18px 0 0;
+  min-height: 1.5em;
+  max-width: 100%;
+  color: var(--t2);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.status.busy::after {
+  content: "";
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-left: 8px;
+  vertical-align: -2px;
+  border: 2px solid var(--t2);
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.link {
+  background: none;
+  border: 0;
+  padding: 10px 14px;
+  color: var(--t2);
+  font-size: 13px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.splash .link { margin-top: 10px; }
+
+/* ---------- 地址设置 / 连不上 ---------- */
+
+.panel {
+  width: 100%;
+  max-width: 420px;
+  margin: auto;
+  padding: 8px 0 24px;
+}
+.title { margin: 0; font-size: 22px; font-weight: 700; }
+.detail { margin: 8px 0 0; color: var(--t2); font-size: 14px; overflow-wrap: anywhere; white-space: pre-line; }
+
+.form { margin-top: 24px; }
+.label { display: block; margin-bottom: 8px; font-size: 13px; color: var(--t2); }
+.input {
+  width: 100%;
+  height: 48px;
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--field);
+  font-size: 16px; /* 16px 以下 iOS 聚焦时会放大页面 */
+}
+.input:focus { border-color: var(--t1); }
+.error { min-height: 1.5em; margin: 8px 0 0; color: var(--err); font-size: 13px; }
+
+.actions { display: flex; gap: 12px; margin-top: 8px; }
+.btn {
+  flex: 1;
+  height: 48px;
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  background: transparent;
+  font-size: 16px;
+  font-weight: 600;
+}
+.btn.primary { background: var(--t1); border-color: var(--t1); color: var(--bg); }
+.btn:active { opacity: .7; }
+.btn:disabled { opacity: .5; cursor: default; }
+
+.hint { margin: 20px 0 0; color: var(--t2); font-size: 13px; }
+.back { display: block; margin: 16px auto 0; }
+.ver { margin: 28px 0 0; color: #5a5a5a; font-size: 12px; text-align: center; }

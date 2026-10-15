@@ -1319,6 +1319,40 @@ await t('素材静态访问：目录穿越 403 / 类型白名单 / 404', async (
   return 'ok'
 })
 
+await t('素材：安卓安装包 .apk 可上传，按附件下载；白名单只多了 .apk', async () => {
+  const bytes = Buffer.from('PK\u0003\u0004fake-apk')
+  const d = okData(await upload('app/reel.apk', bytes))
+  must(d.path === 'app/reel.apk' && d.url === '/media/app/reel.apk', JSON.stringify(d))
+  const r = await req('GET', '/media/app/reel.apk', { token: null })
+  must(r.status === 200 && r.buf.equals(bytes), 'GET ' + r.status)
+  must(r.headers.get('content-type') === 'application/vnd.android.package-archive', 'content-type ' + r.headers.get('content-type'))
+  must(r.headers.get('content-disposition') === `attachment; filename="reel.apk"; filename*=UTF-8''reel.apk`, 'content-disposition ' + r.headers.get('content-disposition'))
+  must(r.headers.get('cache-control') === 'no-cache' && r.headers.get('x-content-type-options') === 'nosniff', 'cache-control ' + r.headers.get('cache-control'))
+  // 「我的」页用 HEAD 判断服务器上有没有安装包
+  const head = await req('HEAD', '/media/app/reel.apk', { token: null })
+  must(head.status === 200 && Number(head.headers.get('content-length')) === bytes.length && head.buf.length === 0, 'HEAD ' + head.status)
+  // 发新版本 = 覆盖同名文件；ETag 变了，客户端不会拿到旧包
+  const v2 = okData(await upload('app/reel.apk', Buffer.from('PK-v2'), { overwrite: true }))
+  must(v2.path === 'app/reel.apk' && v2.size === 5, JSON.stringify(v2))
+  const r2 = await req('GET', '/media/app/reel.apk', { token: null, headers: { 'if-none-match': r.headers.get('etag') } })
+  must(r2.status === 200 && r2.buf.toString() === 'PK-v2', '覆盖后应返回新包 ' + r2.status)
+  // 中文文件名：filename 退成 ASCII，filename* 带原名
+  okData(await upload('app/安装包 v2.apk', bytes))
+  const zh = await req('GET', '/media/app/' + encodeURIComponent('安装包 v2.apk'), { token: null })
+  must(zh.headers.get('content-disposition') === `attachment; filename="___ v2.apk"; filename*=UTF-8''${encodeURIComponent('安装包 v2.apk')}`, zh.headers.get('content-disposition'))
+  const list = await get('/api/admin/media?dir=app')
+  must(list.entries.some(e => e.name === 'reel.apk' && e.type === 'other' && e.url === '/media/app/reel.apk'), JSON.stringify(list.entries))
+  // 其他可执行 / 安装包格式照样拒绝：上传 400，放进文件夹的也访问不到
+  for (const p of ['app/a.exe', 'app/a.aab', 'app/a.apks', 'app/a.xapk', 'app/a.ipa', 'app/a.bat', 'app/a.sh', 'app/a.jar', 'app/a.apk.part']) {
+    mustFail(await upload(p, Buffer.from('x')), 'path')
+  }
+  writeFileSync(join(MEDIA_DIR, 'app', 'x.exe'), 'MZ')
+  must((await req('GET', '/media/app/x.exe', { token: null })).status === 403, '.exe 不应被访问')
+  // 只有安装包按附件下载，视频照常在页面里播放
+  must(!(await req('GET', UP.url, { token: null })).headers.get('content-disposition'), '视频不应带 content-disposition')
+  return 'ok'
+})
+
 await t('静态：/admin 跳转 + 前端目录穿越 403', async () => {
   for (const p of ['/admin', '/admin/']) {
     const r = await fetch(base + p, { redirect: 'manual' })

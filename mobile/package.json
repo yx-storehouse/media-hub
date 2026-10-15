@@ -1,0 +1,32 @@
+{
+  "name": "reel-mobile",
+  "private": true,
+  "version": "1.0.0",
+  "versionCode": 1,
+  "description": "Reel 的 iOS / 安卓外壳（Capacitor）：App 里只有一个启动页，连上服务器后加载服务器上的网页版",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build:www": "node scripts/build-www.mjs",
+    "assets": "node scripts/make-icon-sources.mjs && capacitor-assets generate --android && node scripts/ios-assets.mjs",
+    "sync": "node scripts/build-www.mjs && cap sync",
+    "android:sync": "node scripts/build-www.mjs && cap sync android",
+    "android:open": "cap open android",
+    "android:release": "node scripts/android-release.mjs",
+    "ios:sync": "node scripts/build-www.mjs && cap sync ios",
+    "ios:open": "cap open ios"
+  },
+  "dependencies": {
+    "@capacitor/android": "8.5.3",
+    "@capacitor/cli": "8.5.3",
+    "@capacitor/core": "8.5.3",
+    "@capacitor/ios": "8.5.3"
+  },
+  "devDependencies": {
+    "@capacitor/assets": "3.0.5"
+  },
+  "allowScripts": {
+    "sharp@0.32.6": true
+  }
+}
