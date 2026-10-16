@@ -12,28 +12,31 @@ const SNAPSHOT_MAX = 6
 <script setup>
 import { ref, shallowRef, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter, onBeforeRouteUpdate } from 'vue-router'
-import { getCreator, getCreatorVideos, getCreatorPosts, toggleFollow } from '@/api'
+import { getCreator, getCreatorVideos, getCreatorPosts, getCreatorMedia, toggleFollow } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 import { useBack } from '@/composables/useBack'
 import { toast } from '@/composables/useToast'
 import Icon from '@/components/Icon.vue'
 import VideoCard from '@/components/VideoCard.vue'
+import ImageViewer from '@/components/ImageViewer.vue'
 import PostCard from '@/components/community/PostCard.vue'
 import PostSkeleton from '@/components/community/PostSkeleton.vue'
 import CreatorHeader from '@/components/creator/CreatorHeader.vue'
+import MediaGrid from '@/components/creator/MediaGrid.vue'
 import UnfollowSheet from '@/components/creator/UnfollowSheet.vue'
 import { createFeed, PAGE } from '@/components/creator/feed'
 import { haptic } from '@/utils/motion'
 import { cameBack, useSlider, cover, vRise, fadeIn } from '@/components/home/motion'
 
 /*
- * 创作者主页（#/creator/:id?tab=videos|posts）：头图 + 头像 + 关注 + 数据行，下面是吸顶的「视频 / 帖子」标签。
- * 视频：最新 / 最热 + 两列卡片；帖子：社区卡片列表。两个列表都是滚到底自动加载下一页。
- * 标签记在地址栏（replace，不多一条历史），刷新 / 返回还是同一个标签；没指定时默认「视频」，没有视频而有帖子时默认「帖子」。
+ * 创作者主页（#/creator/:id?tab=videos|posts|media）：头图 + 头像 + 关注 + 数据行，下面是吸顶的「视频 / 帖子 / 媒体」标签。
+ * 视频：最新 / 最热 + 两列卡片；帖子：社区卡片列表；媒体：他发过的所有图（视频封面 + 帖子的图）拼成的三列照片墙，
+ * 点图片全屏看大图（左右滑看这一墙已加载的所有图片），点视频进播放页。三个列表都是滚到底自动加载下一页。
+ * 标签记在地址栏（replace，不多一条历史），刷新 / 返回还是同一个标签；没指定时按「视频 → 帖子 → 媒体」取第一个有内容的。
  */
 defineOptions({ name: 'CreatorView' })
 
-const TABS = [{ key: 'videos', label: '视频' }, { key: 'posts', label: '帖子' }]
+const TABS = [{ key: 'videos', label: '视频' }, { key: 'posts', label: '帖子' }, { key: 'media', label: '媒体' }]
 const SORTS = ['最新', '最热']
 /* 顶栏（返回键那一行）高度；标签栏吸顶在它下面。和样式里的 48px 保持一致 */
 const TOP_BAR = 48
@@ -63,22 +66,28 @@ const sortKey = ref(0)
 const collapsed = ref(false)
 /* 取消关注前的确认 */
 const unfollowAsk = ref(false)
+/* 「媒体」里看大图：{ items: 这一墙已加载的图片格, index }；视频格不进图集（用法见下面「媒体」一节） */
+const viewer = shallowRef(null)
 
 let currentId = null
 const videos = createFeed(page => getCreatorVideos(currentId, sort.value, page))
 const posts = createFeed(page => getCreatorPosts(currentId, page))
-const feeds = { videos, posts }
+const media = createFeed(page => getCreatorMedia(currentId, page))
+const feeds = { videos, posts, media }
 const feed = computed(() => feeds[tab.value])
 
-const queryTab = v => (v === 'videos' || v === 'posts' ? v : null)
+const queryTab = v => (TABS.some(t => t.key === v) ? v : null)
+/* 头部给的计数（列表还没取时标签上先显示它） */
+const HEADER_COUNT = { videos: 'videoCount', posts: 'postCount', media: 'mediaCount' }
+const headerCount = (c, key) => c?.[HEADER_COUNT[key]] ?? 0
 /* 标签上的数字：列表取过就用列表的 total（更新），否则用头部的计数 */
-const count = key => feeds[key].total ?? (key === 'videos' ? creator.value?.videoCount : creator.value?.postCount) ?? 0
+const count = key => feeds[key].total ?? headerCount(creator.value, key)
 
 /* ---------- 加载 ---------- */
 
 let loadSeq = 0
 let lastTop = 0
-const savedTop = { videos: 0, posts: 0 }
+const savedTop = { videos: 0, posts: 0, media: 0 }
 
 function resetView() {
   creator.value = null
@@ -86,10 +95,11 @@ function resetView() {
   following.value = false
   followers.value = 0
   sort.value = 0
-  videos.reset()
-  posts.reset()
+  viewer.value = null
+  for (const f of Object.values(feeds)) f.reset()
   collapsed.value = false
-  lastTop = savedTop.videos = savedTop.posts = 0
+  lastTop = 0
+  for (const k of Object.keys(savedTop)) savedTop[k] = 0
   if (scroller.value) scroller.value.scrollTop = 0
 }
 
@@ -104,13 +114,13 @@ async function load(id) {
     const c = await getCreator(id)
     if (token !== loadSeq) return
     applyHeader(c)
-    if (!want && !c.videoCount && c.postCount) tab.value = 'posts'
+    // 没指定标签：按「视频 → 帖子 → 媒体」取第一个有内容的（都没有就停在视频）
+    if (!want) tab.value = TABS.find(t => headerCount(c, t.key) > 0)?.key || 'videos'
     await nextTick()
     checkMore()
   } catch (e) {
     if (token !== loadSeq) return
-    videos.reset()
-    posts.reset()
+    for (const f of Object.values(feeds)) f.reset()
     const missing = e?.status >= 400 && e?.status < 500 && e?.status !== 401
     failed.value = missing
       ? { message: (e.status === 400 && e.message) || '创作者不存在', retry: false }
@@ -172,7 +182,7 @@ const stickTop = () => Math.max(0, (header.value?.$el?.offsetHeight ?? 0) - TOP_
 /* 标签下的指示条（跟着文字宽度）、排序胶囊的白底：选中项变了滑过去 */
 const tabRow = ref(null)
 const tabBar = ref(null)
-useSlider(tabRow, tabBar, cover('.cr-tab.on .lb', 2), { key: () => tab.value, deps: () => [creator.value, count('videos'), count('posts')] })
+useSlider(tabRow, tabBar, cover('.cr-tab.on .lb', 2), { key: () => tab.value, deps: () => [creator.value, ...TABS.map(t => count(t.key))] })
 const sortRow = ref(null)
 const sortBar = ref(null)
 useSlider(sortRow, sortBar, cover('.chip.on'), { key: () => sort.value })
@@ -207,7 +217,7 @@ function selectTab(key) {
   })
 }
 
-/* 方向键在两个标签之间切换（只有选中的标签能 Tab 进入） */
+/* 方向键在标签之间切换（首尾相接；只有选中的标签能 Tab 进入） */
 function onTabKey(e) {
   if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
   e.preventDefault()
@@ -226,6 +236,21 @@ function changeSort(i) {
   const stick = stickTop()
   if (el && el.scrollTop > stick) el.scrollTop = stick
   videos.more()
+}
+
+/* ---------- 媒体：点图片全屏看大图 ---------- */
+
+const mediaGrid = ref(null)
+const viewerImages = computed(() => (viewer.value?.items || []).map(m => m.cover || {}))
+function openImage(item) {
+  const items = media.list.filter(m => m.kind === 'image')
+  const index = items.findIndex(m => m.id === item.id)
+  if (index >= 0) viewer.value = { items, index }
+}
+/* 大图从点的那一格放大出来、关掉时缩回当前这张对应的格子 */
+const imageEl = i => {
+  const m = viewer.value?.items[i]
+  return (m && mediaGrid.value?.tile(m.id)) || null
 }
 
 /* ---------- 关注：乐观更新 → 一次请求（带明确的 on）→ 以返回为准，失败回滚并提示 ---------- */
@@ -315,7 +340,8 @@ function saveSnapshot() {
     top: lastTop,
     savedTop: { ...savedTop },
     videos: videos.snapshot(),
-    posts: posts.snapshot()
+    posts: posts.snapshot(),
+    media: media.snapshot()
   })
   while (snapshots.size > SNAPSHOT_MAX) snapshots.delete(snapshots.keys().next().value)
 }
@@ -332,6 +358,7 @@ function restoreSnapshot(id) {
   sort.value = s.sort
   videos.restore(s.videos)
   posts.restore(s.posts)
+  media.restore(s.media)
   Object.assign(savedTop, s.savedTop)
   lastTop = s.top
   return true
@@ -472,11 +499,45 @@ onBeforeRouteUpdate(to => {
             </Transition>
           </div>
         </section>
+
+        <!-- 媒体：三列照片墙（视频封面 + 帖子的图），点图片看大图、点视频进播放页 -->
+        <section
+          v-show="tab === 'media'"
+          id="cr-pane-media"
+          :ref="el => { panes.media = el }"
+          class="cr-pane cr-media"
+          role="tabpanel"
+          aria-labelledby="cr-tab-media"
+        >
+          <div class="m-swap">
+            <Transition name="m-skel">
+              <div v-if="media.total === null && !media.error" class="cr-mg-sk" aria-hidden="true">
+                <div v-for="i in 12" :key="i" class="sk" />
+              </div>
+              <div v-else-if="media.total === null" class="empty">
+                加载失败，请检查网络
+                <button type="button" class="retry" @click="media.more()">重试</button>
+              </div>
+              <div v-else-if="!media.list.length" v-rise.self class="empty">还没有发布图片</div>
+              <div v-else>
+                <!-- 照片墙一格一格浮现（只缩放、不上下错位：格子之间只有 2px，错位会叠到下一行上） -->
+                <MediaGrid ref="mediaGrid" v-rise="{ y: 0, scale: .94, max: 12 }" :items="media.list" @open="openImage" />
+                <div class="cr-foot">
+                  <span v-if="media.loading">加载中…</span>
+                  <button v-else-if="media.error" type="button" class="cr-more" @click="media.more()">加载失败，点击重试</button>
+                  <span v-else-if="media.done">没有更多了</span>
+                </div>
+              </div>
+            </Transition>
+          </div>
+        </section>
       </template>
       <div class="pad-b" />
     </div>
 
     <UnfollowSheet v-model:open="unfollowAsk" :name="creator?.name || ''" @confirm="setFollow(false)" />
+    <!-- 看大图：从点的那一格放大出来，关掉时缩回当前这张对应的格子 -->
+    <ImageViewer v-if="viewer" :images="viewerImages" :index="viewer.index" :origin="imageEl" @close="viewer = null" />
   </div>
 </template>
 
@@ -555,6 +616,11 @@ onBeforeRouteUpdate(to => {
 
 .cr-foot { display: grid; place-items: center; height: 52px; color: var(--t2); font-size: 13px; }
 .cr-more { height: 32px; padding: 0 14px; color: var(--t1); font-size: 13px; }
+
+/* ---- 媒体：照片墙左右贴边（不留页边距），和标签栏之间留 2px 缝 ---- */
+.cr-media { padding-top: 2px; }
+.cr-mg-sk { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2px; }
+.cr-mg-sk > .sk { padding-top: 100%; border-radius: 0; }
 
 /* ---- 骨架 ---- */
 .cr-sk.pt { padding-top: 14px; }

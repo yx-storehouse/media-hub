@@ -837,6 +837,8 @@ export function clock(sec) {
  *   title = posts.text（社区卡片上的那一句），content = 详情正文
  *   图片：视频帖 + 关联视频已上架 + 有主图 → 主图当视频封面，images 只放配图；
  *         其余情况 images = [主图, ...配图]，视频封面用视频自己的封面
+ *   video.frames：视频块左右拼图用的 1～2 张图 = [帖子主图（有的话）, 视频自己的封面]，同一张只留一张；
+ *         只有 1 张时 App 照旧显示一整张封面（video.cover）
  *   next：社区「最新」顺序（published_at DESC, id DESC）里的下一篇，也就是更早发布的那一篇
  */
 export function postDetail(id, userId = null) {
@@ -845,9 +847,11 @@ export function postDetail(id, userId = null) {
   if (!r) return null
   const kind = POST_KINDS[r.media_kind] || 'image'
   const v = r.video_live ? get('SELECT id, title, cover_src, cover_fallback, len FROM v_videos WHERE id = ?', r.video_id) : null
-  const video = v ? { id: v.id, title: v.title, cover: toCover(v.cover_src, v.cover_fallback), dur: clock(v.len), len: v.len } : null
+  const video = v ? { id: v.id, title: v.title, cover: toCover(v.cover_src, v.cover_fallback), dur: clock(v.len), len: v.len, frames: [] } : null
   const media = postMedia(r.id)
   const thumbs = media.thumbs.filter(Boolean)
+  // 视频块的拼图：帖子主图（有的话）+ 视频自己的封面，同一张图（src 相同）只留一张 → 1～2 张
+  if (video) video.frames = distinctCovers([media.main, video.cover])
   let images
   if (kind === 'video' && video && media.main) {
     video.cover = media.main
@@ -879,6 +883,17 @@ export function postDetail(id, userId = null) {
     time: relativeTime(r.published_at),
     next: nextPost(r)
   }
+}
+
+/** 去掉空的和重复的图（按 src 比；只有占位图的按占位图比），保持原来的顺序 */
+function distinctCovers(list) {
+  const seen = new Set()
+  return list.filter(c => {
+    const key = c && (c.src || c.fallback)
+    if (!key || seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
 }
 
 /** 「下一篇」：走 idx_posts_pub(status, published_at DESC)；缩略图取主图，没有就取第一张配图 */
@@ -956,6 +971,8 @@ export function creatorProfile(id, userId = null) {
     followers: c.follower_count,
     videoCount: v.n,
     postCount: p.n,
+    // 「媒体」标签的条数，和 creatorMedia().total 同一个口径
+    mediaCount: get(`SELECT COUNT(*) c FROM (${CREATOR_MEDIA})`, id, id).c,
     lastActiveAt,
     lastActive: relativeTime(lastActiveAt),
     following: !!userId && isFollowing(userId, id),
@@ -1000,6 +1017,41 @@ export function creatorPosts(id, { limit = 20, offset = 0 } = {}) {
   const rows = all(`SELECT ${POST_COLS} FROM v_posts p ${POST_VIDEO} WHERE p.creator_id = ?
                     ORDER BY p.published_at DESC, p.id DESC LIMIT ? OFFSET ?`, id, limit, offset)
   return { total, list: rows.map(r => ({ ...toPost(r), media: postMedia(r.id) })) }
+}
+
+/*
+ * 主页「媒体」：他发过的所有图拼成的照片墙 —— 已发布视频的封面 + 已发布帖子的图（主图和配图）。
+ *   - 帖子的图只要真有图片地址的（只有生成占位图的不算）；文档帖的配图是文档页（media_type 2），不要；
+ *   - 和他某条已发布视频的封面是同一张的帖子图不再单独出现（视频帖常拿视频封面当主图，墙上已经有那条视频了）；
+ *   - 草稿 / 下架的视频和帖子都不算。
+ * 两个参数都是创作者 id（视频、帖子各一个）。
+ * 列：k 0 视频 / 1 帖子图，owner 视频或帖子的 id，role 0 主图 / 1 配图，so 配图顺序，mid post_media.id。
+ */
+const CREATOR_MEDIA = `
+  SELECT 0 AS k, v.id AS owner, NULL AS mid, v.title AS title, v.cover_url AS src, v.cover_fallback AS fallback,
+         v.duration_sec AS len, v.published_at AS t, 0 AS role, 0 AS so
+    FROM videos v
+   WHERE v.creator_id = ? AND v.status = 1
+  UNION ALL
+  SELECT 1, p.id, m.id, p.text, m.url, m.fallback, NULL, p.published_at, m.role, m.sort_order
+    FROM posts p JOIN post_media m ON m.post_id = p.id
+   WHERE p.creator_id = ? AND p.status = 1
+     AND m.url IS NOT NULL AND m.media_type != 2 AND (m.role = 0 OR p.media_kind != 2)
+     AND NOT EXISTS (SELECT 1 FROM videos cv WHERE cv.creator_id = p.creator_id AND cv.status = 1 AND cv.cover_url = m.url)`
+
+/*
+ * 顺序：发布时间倒序；同一时间视频在前，再按视频 / 帖子 id 倒序；同一帖子里主图在前、配图按顺序。
+ * 这是全序（最后落到 post_media.id），翻页不重复也不遗漏。
+ */
+export function creatorMedia(id, { limit = 20, offset = 0 } = {}) {
+  const total = get(`SELECT COUNT(*) c FROM (${CREATOR_MEDIA})`, id, id).c
+  const rows = all(`SELECT * FROM (${CREATOR_MEDIA}) ORDER BY t DESC, k, owner DESC, role, so, mid LIMIT ? OFFSET ?`, id, id, limit, offset)
+  return {
+    total,
+    list: rows.map(r => r.k === 0
+      ? { id: 'v' + r.owner, kind: 'video', cover: toCover(r.src, r.fallback), title: r.title, postId: null, videoId: r.owner, dur: r.len > 0 ? clock(r.len) : null, publishedAt: r.t }
+      : { id: 'i' + r.mid, kind: 'image', cover: toCover(r.src, r.fallback), title: r.title, postId: r.owner, videoId: null, dur: null, publishedAt: r.t })
+  }
 }
 
 /* ---------------- 直播 / 同城 ---------------- */

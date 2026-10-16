@@ -31,6 +31,11 @@ const props = defineProps({
   /** VideoDetail：{ id, src, cover, len, quality } */
   video: { type: Object, required: true },
   autoplay: { type: Boolean, default: true },
+  /**
+   * 先别开播（封面正从列表飞进来、播放器还藏着，见 components/motion/hero.js）：照常加载、缓冲好第一段，
+   * 变回 false（落地露出来）的那一刻再自动播放——不会先出声音、也不会被看不见的那 0.3 秒吃掉开头
+   */
+  hold: { type: Boolean, default: false },
   /** 从第几秒开始（断点续播） */
   start: { type: Number, default: 0 },
   /** 播完后的下一个：{ video: { id, title, cover }, hint }，没有为 null */
@@ -57,6 +62,8 @@ const QUALITY = { sd: '标清', hd: '高清', fhd: '超清' }
 const AUTO_NEXT_SEC = 5
 /** 播放中每隔这么多秒往本机记一次进度 */
 const TICK_SEC = 5
+/** 没有片源时封面上那层遮罩的深浅（和下面 .nosrc .shade 的 rgba(0, 0, 0, .52) 一致，hero 返回时用） */
+const NOSRC_DIM = 0.52
 
 const store = useAppStore()
 const box = ref(null)
@@ -109,7 +116,26 @@ function markStarted() {
   emit('started', props.video.id)
 }
 
+/* 挂上时 hold 着的自动播放：等 hold 放开再播；用户在这之前自己点过播放 / 暂停就不再替他播 */
+let autoplayHeld = false
+/* 自动播放还没有结果（等着 hold 放开、或者 play() 还没回来）：先不显示大播放键，开播前不会闪一下「暂停着」的样子 */
+const autoStarting = ref(props.autoplay && hasSource.value)
+watch(() => props.hold, h => {
+  if (h || !autoplayHeld) return
+  autoplayHeld = false
+  play()
+})
+
 async function play() {
+  autoplayHeld = false
+  try {
+    await startPlayback()
+  } finally {
+    autoStarting.value = false
+  }
+}
+
+async function startPlayback() {
   const v = el.value
   if (!hasSource.value || !v) return
   clearEnd()
@@ -252,6 +278,26 @@ function onTime(e) {
 function onPlay() {
   playing.value = true
   clearEnd()
+}
+
+/* 封面层：视频的第一帧真的送上屏幕了再淡出（有 requestVideoFrameCallback 就等它，另外最多等 250ms） */
+const posterOn = ref(true)
+let posterTimer = 0
+function hidePoster(e) {
+  if (!posterOn.value) return
+  const v = e?.target
+  const off = () => {
+    clearTimeout(posterTimer)
+    posterOn.value = false
+  }
+  if (v?.requestVideoFrameCallback) v.requestVideoFrameCallback(off)
+  else requestAnimationFrame(off)
+  clearTimeout(posterTimer)
+  posterTimer = setTimeout(off, 250)
+}
+function onPlaying(e) {
+  waiting.value = false
+  hidePoster(e)
 }
 function onError(e) {
   waiting.value = false
@@ -491,7 +537,23 @@ onMounted(() => {
   carryFullscreenAt = 0
   if (!hasSource.value) return
   if (carry) enterFullscreen()
-  if (props.autoplay) play()
+  if (!props.autoplay) return
+  // 播放器还藏着（封面在飞）：先缓冲，露出来再播
+  if (props.hold) autoplayHeld = true
+  else play()
+})
+
+/*
+ * 共享元素过渡（返回时播放器缩回列表里的卡片，components/motion/hero.js）要的东西：
+ * 外框、<video>，以及画面上此刻是视频画面（播过、或者拖过进度）而不是封面 / 黑屏。
+ */
+defineExpose({
+  heroSource: () => {
+    const v = el.value
+    const showsVideo = !!v && hasSource.value && !posterOn.value && v.readyState >= 2
+    // 没有片源时封面上压着 .nosrc .shade（rgba(0,0,0,.52)）
+    return { el: box.value, video: v || null, showsVideo, dim: hasSource.value ? 0 : NOSRC_DIM }
+  }
 })
 
 onBeforeUnmount(() => {
@@ -501,6 +563,7 @@ onBeforeUnmount(() => {
   clearTimeout(hideTimer)
   clearTimeout(tipTimer)
   clearTimeout(chipTimer)
+  clearTimeout(posterTimer)
   document.removeEventListener('fullscreenchange', onFullscreenChange)
   document.removeEventListener('webkitfullscreenchange', onFullscreenChange)
   document.removeEventListener('visibilitychange', onVisibility)
@@ -536,10 +599,9 @@ onBeforeUnmount(() => {
       ref="el"
       class="media"
       :src="video.src"
-      :poster="video.cover?.src || undefined"
       playsinline
       webkit-playsinline
-      preload="metadata"
+      :preload="hold ? 'auto' : 'metadata'"
       :muted="muted"
       :loop="loop"
       @loadedmetadata="onMeta"
@@ -550,9 +612,15 @@ onBeforeUnmount(() => {
       @pause="playing = false"
       @ended="onEnded"
       @waiting="waiting = true"
-      @playing="waiting = false"
+      @playing="onPlaying"
+      @seeked="hidePoster"
       @error="onError"
     />
+    <!--
+      封面：开播（或跳到续播的位置）以前盖在画面上，和列表里的封面一样铺满（原生 poster 是 contain，会留黑边，封面加载失败时是黑的），
+      视频真正出画面以后淡出。从列表飞进来的封面（hero.js）落地时和它一模一样。
+    -->
+    <Cover v-if="hasSource" class="media poster-l" :class="{ off: !posterOn }" v-bind="video.cover || {}" eager />
     <Cover v-else class="media poster" v-bind="video.cover" eager />
 
     <div class="shade" />
@@ -572,7 +640,7 @@ onBeforeUnmount(() => {
     <template v-else>
       <!-- 暂停时播放键从略大轻轻落到位；开始播放时放大淡出 -->
       <Transition name="bp">
-        <button v-show="!playing && !ended" type="button" class="big-play" :aria-label="failed ? '重新加载' : '播放'" @click.stop="play">
+        <button v-show="!playing && !ended && !autoStarting" type="button" class="big-play" :aria-label="failed ? '重新加载' : '播放'" @click.stop="play">
           <Icon :name="failed ? 'refresh' : 'play'" :class="{ retry: failed }" />
         </button>
       </Transition>
@@ -712,6 +780,9 @@ onBeforeUnmount(() => {
 /* 伪全屏：铺满整个屏幕（跳出 480 宽的应用栏），在页面之上、底部弹层和提示之下 */
 .player.pseudo { position: fixed; inset: 0; z-index: 50; width: auto; height: auto; }
 .media { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; filter: var(--media); }
+/* 开播前的封面层（盖在 <video> 上面、控制栏下面）：出画面后淡出 */
+.poster-l { pointer-events: none; transition: opacity var(--dur-2) var(--ease-out); }
+.poster-l.off { opacity: 0; }
 
 /* 上下渐暗，只在控制栏显示时出现 */
 .shade {
@@ -865,8 +936,10 @@ onBeforeUnmount(() => {
   border: 3px solid rgba(255, 255, 255, .25);
   border-top-color: #fff;
   border-radius: 50%;
-  animation: rot .8s linear infinite;
+  /* 卡顿一下就好的（开播、拖完进度）不闪转圈：等 0.25 秒还在缓冲才淡入 */
+  animation: rot .8s linear infinite, spin-in var(--dur-2) var(--ease-out) .25s backwards;
 }
+@keyframes spin-in { from { opacity: 0; } }
 
 /* ---------- 续播提示 ---------- */
 /* 控制栏显示时往上让出控制栏的高度（用 transform 跟着控制栏一起滑，不改 bottom） */

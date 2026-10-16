@@ -10,7 +10,7 @@ import { useSheetDrag } from '@/components/motion/sheetDrag'
  * Content can use the shared classes .opts / .opt / .opt.on / .row2 / .sw / .sw.on (styles/common.css).
  * Closes on mask tap, Escape, the back button / gesture (only the sheet, the page stays),
  * dragging it down (components/motion/sheetDrag.js), route change and when its page is deactivated (KeepAlive).
- * 升起用减速曲线，收起更快；遮罩同时淡入淡出（样式在下面，LoginSheet 共用）。
+ * 升起、收起都是 smooth 弹簧（几乎不过冲）；拖动松手接着手指的速度走；遮罩同时淡入淡出（样式在下面，LoginSheet 共用）。
  */
 const open = defineModel('open', { type: Boolean, default: false })
 useBackDismiss(open)
@@ -68,7 +68,7 @@ onDeactivated(() => { open.value = false })
 .mask {
   position: absolute;
   inset: 0;
-  z-index: 60;
+  z-index: var(--z-mask);
   background: rgba(0, 0, 0, .55);
 }
 .sheet {
@@ -76,23 +76,31 @@ onDeactivated(() => { open.value = false })
   left: 0;
   right: 0;
   bottom: 0;
-  z-index: 61;
+  z-index: var(--z-sheet);
   max-height: 72%;
   overflow: auto;
   overscroll-behavior: contain;
   padding: 6px 14px calc(18px + var(--safe-b));
   border-radius: 16px 16px 0 0;
   background: #151515;
+  /* 往下延伸一截同色的底：弹簧回弹时弹层会略微越过原位，底下不会露出一道缝（阴影不受自身 overflow 裁剪） */
+  box-shadow: 0 64px 0 #151515;
   outline: 0;
 }
 .sheet .grab { width: 36px; height: 4px; margin: 4px auto 12px; border-radius: 2px; background: #333; }
 .sheet h4 { margin-bottom: 12px; font-size: 15px; font-weight: 600; }
 
-/* 进场：减速停下（--dur-3）；离场：加速离开，时长约 2/3（--dur-2） */
+/*
+ * 升起：smooth 弹簧从屏幕下沿升到原位。
+ * 收起：同一根弹簧，目标是屏幕下沿再往下 64px（就是上面那截同色的底）：看得见的部分在弹簧最快的那段里就出了屏，
+ * 收尾那段慢的发生在屏幕外面，不会有一道边在底部磨蹭。
+ * 收起中的弹层和遮罩不接手指：关的同时就可以点下面的页面。
+ */
 .sheet-mask-enter-active { transition: opacity var(--dur-3) var(--ease-out); }
-.sheet-mask-leave-active { transition: opacity var(--dur-2) var(--ease-in); }
+.sheet-mask-leave-active { transition: opacity var(--dur-3) var(--ease-out); pointer-events: none; }
 .sheet-mask-enter-from, .sheet-mask-leave-to { opacity: 0; }
-.sheet-enter-active { transition: transform var(--dur-3) var(--ease-out); }
-.sheet-leave-active { transition: transform var(--dur-2) var(--ease-in); }
-.sheet-enter-from, .sheet-leave-to { transform: translate3d(0, 100%, 0); }
+.sheet-enter-active { transition: transform var(--dur-spring-smooth) var(--spring-smooth); }
+.sheet-leave-active { transition: transform var(--dur-spring-smooth) var(--spring-smooth); pointer-events: none; }
+.sheet-enter-from { transform: translate3d(0, 100%, 0); }
+.sheet-leave-to { transform: translate3d(0, calc(100% + 64px), 0); }
 </style>

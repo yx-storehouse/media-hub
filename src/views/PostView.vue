@@ -354,7 +354,13 @@ onBeforeRouteUpdate(to => {
 
               <!-- 视频帖：视频紧跟标题，点了去播放页（不用先翻过正文和所有配图） -->
               <RouterLink v-if="post.video" class="pd-video m-hold" :to="videoTo(post.video)" @click="rememberVideo(post.video)" :aria-label="`播放视频：${post.video.title || post.title}`">
-                <Cover class="pd-vcv" v-bind="post.video.cover">
+                <!-- 有两张图（帖子主图 + 视频封面）时左右拼成一张：中间一道细缝，播放键压在缝上 -->
+                <div v-if="post.video.frames?.length === 2" class="pd-vcv pd-split">
+                  <Cover v-for="(f, i) in post.video.frames" :key="i" class="pd-half" :class="i ? 'r' : 'l'" v-bind="f" />
+                  <span class="pl"><Icon name="play" /></span>
+                  <span v-if="post.video.dur" class="dur">{{ post.video.dur }}</span>
+                </div>
+                <Cover v-else class="pd-vcv" v-bind="post.video.cover">
                   <span class="pl"><Icon name="play" /></span>
                   <span v-if="post.video.dur" class="dur">{{ post.video.dur }}</span>
                 </Cover>
@@ -486,6 +492,14 @@ onBeforeRouteUpdate(to => {
 .pd-video { display: block; margin-top: 14px; border-radius: 12px; }
 .pd-vcv { aspect-ratio: 16 / 9; border-radius: 12px; filter: var(--media); transition: opacity var(--dur-2) var(--ease-out); }
 .pd-video.m-pressed .pd-vcv { opacity: .85; transition-duration: var(--dur-1); }
+/* 左右拼图：两半各自 cover 铺满，中间露出 1px 底色当作缝；高度用 padding 撑（iOS 14 不认 aspect-ratio） */
+.pd-split { position: relative; overflow: hidden; aspect-ratio: auto; background: var(--bg); }
+.pd-split::before { content: ''; display: block; padding-top: 56.25%; }
+.pd-half { position: absolute; top: 0; bottom: 0; width: calc(50% - .5px); }
+.pd-half.l { left: 0; }
+.pd-half.r { right: 0; }
+.pd-split .pl { z-index: 1; }
+.pd-split .dur { z-index: 1; }
 .pd-vcv .pl {
   position: absolute;
   left: 50%;

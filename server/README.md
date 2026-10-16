@@ -127,6 +127,7 @@ server/
 | GET | `/api/creators/:id` | `getCreator()`：创作者主页头部（见下面「创作者主页」） |
 | GET | `/api/creators/:id/videos?sort=&limit=&offset=` | `getCreatorVideos()`：他的视频，`sort` 0 最新 / 1 最热 |
 | GET | `/api/creators/:id/posts?limit=&offset=` | `getCreatorPosts()`：他的帖子，结构同社区列表 |
+| GET | `/api/creators/:id/media?limit=&offset=` | `getCreatorMedia()`：「媒体」照片墙，视频封面 + 帖子的图（见下面「创作者主页」） |
 | POST | `/api/videos/:id/fav` `/like` `/dislike` | 对应 toggle |
 | POST | `/api/topics/:id/fav` | `toggleTopicFav()` |
 | GET | `/api/live?tab=` | `getLives()` |
@@ -160,7 +161,7 @@ server/
   following,            // 当前用户是否关注了作者
   tags,                 // ['旅行', '川西']，不带 #
   images,               // Cover[]，规则见下
-  video,                // { id, title, cover: Cover, dur: '07:42' | '1:02:05', len: 秒 } | null（只认已上架的关联视频）
+  video,                // { id, title, cover: Cover, dur: '07:42' | '1:02:05', len: 秒, frames: Cover[] } | null（只认已上架的关联视频）
   read, fav, faved,
   publishedAt, time,    // time 是「21分钟前」这类相对时间，和列表一致
   next                  // { id, title, thumb: Cover | null } | null
@@ -169,6 +170,8 @@ server/
 
 - **图片**：视频帖（`kind === 'video'`）有已上架的关联视频、并且有主图时，主图就是视频封面（`video.cover`），`images` 只放配图；
   其余情况 `images = [主图（有的话）, ...配图]`，`video.cover` 用关联视频自己的封面。
+- **视频块拼图**：`video.frames` 是 1～2 张图 = [帖子主图（有的话）, 关联视频自己的封面]，同一张（同一个地址，没有地址时同一张占位图）只留一张；
+  有 2 张时详情页把视频块显示成左右两半的拼图，只有 1 张时照旧显示 `video.cover`。
 - **下一篇**：社区「最新」顺序（`published_at DESC, id DESC`）里比它更早的那一篇，只算已发布的；缩略图取它的主图，没有主图取第一张配图，都没有为 `null`。
 - 帖子不存在、草稿或已下架：`400 { code: 1, message: '帖子不存在或已下架' }`（不会 500）。
 
@@ -186,6 +189,7 @@ server/
   verified, official, bio,
   followers,                  // 粉丝数（creators.follower_count，关注 / 取消关注由触发器维护）
   videoCount, postCount,      // 只算已发布的视频 / 帖子
+  mediaCount,                 // 「媒体」的条数，和 /media 的 total 同一个口径
   lastActiveAt, lastActive,   // 最近一条已发布视频 / 帖子的时间（秒）和「1小时前」这类相对时间；什么都没发过时为 null / ''
   following,
   banner                      // Cover[]，最多 3 张，新的在前；可能为空
@@ -197,6 +201,11 @@ server/
 - `GET /api/creators/:id/videos?sort=0|1&limit=&offset=` → `{ total, list }`：只含已发布的视频，`sort` 0 = 发布时间倒序（默认，其他值也按它）、1 = 播放数倒序；
   同值再按发布时间、id 排，翻页不重复不遗漏。列表带当前用户的 `liked` / `faved`。
 - `GET /api/creators/:id/posts?limit=&offset=` → `{ total, list }`：和社区列表（`/api/community/posts`）每条的结构完全一样（含 `media`、`time`、`faved`），按发布时间倒序。
+- `GET /api/creators/:id/media?limit=&offset=` → `{ total, list }`：「媒体」照片墙，新的在前。每条
+  `{ id, kind: 'image' | 'video', cover: Cover, title, postId, videoId, dur, publishedAt }`，`id` 是这一格的唯一键（`v<视频 id>` / `i<图片 id>`）：
+  - `video`：已发布视频的封面（没有封面地址时用占位图），`videoId` 是点进去播放的视频，`dur` 是「01:15」「1:02:05」（没有时长为 `null`）；
+  - `image`：已发布帖子的主图和配图，只算有地址的；文档帖的文档页不算，和他某个已发布视频封面同一张的图也不重复算；`postId` 是所属帖子。
+  - 排序：发布时间倒序，同一时间视频在前，再按所属内容、图的顺序排（全序，翻页不重复不遗漏）。
 - 分页：`limit` 1～50（默认 20），`offset` 从 0 起，非法值按默认处理。
 - 创作者不存在、已停用，或 id 不是正整数（如演示数据的账号 `aijc`）：三个接口都回 `400 { code: 1, message: '创作者不存在' }`（不会 500）。
 - 社区列表 / 搜索帖子的每条多了 `creatorId`（发布者 id，创作者被删除时为 `null`），App 的帖子卡片据此把头像和名字链到主页。

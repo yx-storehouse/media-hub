@@ -8,7 +8,7 @@ const shownRelated = new Set()
 
 <script setup>
 import { ref, shallowRef, computed, watch, nextTick, reactive, onMounted, onBeforeUnmount } from 'vue'
-import { useRoute, useRouter, onBeforeRouteUpdate } from 'vue-router'
+import { useRoute, useRouter, onBeforeRouteUpdate, onBeforeRouteLeave } from 'vue-router'
 import {
   getVideo, getRelatedVideos, getCreator, toggleVideoLike, toggleVideoDislike, toggleVideoFav, toggleFollow, addHistory, isDemoId
 } from '@/api'
@@ -27,6 +27,7 @@ import RollNum from '@/components/video/RollNum.vue'
 import { pickResume, setResume } from '@/components/video/resume'
 import { peekVideo, rememberVideo } from '@/components/video/preview'
 import { parseList, nextInList } from '@/components/video/playlist'
+import { claimHero, claimRelatedHero, armHeroBack } from '@/components/motion/hero'
 
 /*
  * 播放页：播放器 → 标题、数据、作者（关注）、简介、热门榜 / 所属专题、标签 → 相似推荐，底部赞 / 不喜欢 / 收藏 / 分享。
@@ -168,7 +169,40 @@ async function shuffle() {
 
 load(route.params.id)
 onBeforeRouteUpdate(to => {
-  if (to.params.id !== route.params.id) load(to.params.id, to.query)
+  if (to.params.id === route.params.id) return
+  // 封面还在往播放器飞就换了视频：浮层原地淡出
+  inbound?.abort()
+  // 点相似推荐过来的：缩略图正飞向播放器，新视频的播放器先藏着，落地时露出来
+  const hop = claimRelatedHero(to.params.id)
+  if (hop) {
+    heroHold.value = true
+    hop.land(() => { heroHold.value = false })
+  }
+  load(to.params.id, to.query)
+})
+
+/* ---------- 共享元素过渡：从列表卡片飞进来、返回时缩回去（components/motion/hero.js） ---------- */
+
+const root = ref(null)
+const playerRef = ref(null)
+/* 这一页是从卡片飞进来的：飞行期间播放器先藏着（照常挂载、加载、缓冲），落地时露出来并从头开播（:hold） */
+const inbound = claimHero(route.params.id)
+const heroHold = ref(!!inbound)
+/* 从哪张卡片来的：返回到那一页、还是同一个视频时，播放器缩回那张卡片 */
+const heroOrigin = inbound?.origin || null
+onMounted(() => {
+  inbound?.land(root.value?.firstElementChild, () => { heroHold.value = false })
+})
+/* 起飞那一刻的播放器：有画面就带上此刻的画面；还在加载就是占位的封面 */
+function heroSource() {
+  const p = playerRef.value?.heroSource?.()
+  if (p?.el) return { ...p, cover: video.value?.cover || preview.value?.cover }
+  const el = root.value?.firstElementChild
+  // 加载中的占位：封面上压着 .ph-cv::after 的 rgba(0,0,0,.35)
+  return el ? { el, cover: preview.value?.cover, dim: preview.value?.cover ? 0.35 : 0 } : null
+}
+onBeforeRouteLeave(to => {
+  armHeroBack(router, to, heroOrigin, heroSource, video.value?.id ?? route.params.id)
 })
 
 /* ---------- 播完：下一个（替换当前记录） ---------- */
@@ -433,13 +467,15 @@ const noop = () => {}
 </script>
 
 <template>
-  <div class="page video" @touchstart.passive="noop">
+  <div ref="root" class="page video" :class="{ 'hero-hold': heroHold }" @touchstart.passive="noop">
     <VideoPlayer
       v-if="video"
+      ref="playerRef"
       :key="video.id"
       :video="video"
       :start="startSec"
       :next="nextItem"
+      :hold="heroHold"
       @back="back"
       @started="onStarted"
       @progress="onProgress"
@@ -591,6 +627,8 @@ const noop = () => {}
 
 <style scoped>
 .page.video { background: var(--bg); }
+/* 封面正从列表飞过来：播放器（或加载中的占位）先藏着，落地时由浮层原样接上 */
+.video.hero-hold > .player, .video.hero-hold > .player-ph { opacity: 0; }
 
 .player-ph { position: relative; flex: none; width: 100%; aspect-ratio: 16 / 9; overflow: hidden; background: #000; }
 .ph-cv { position: absolute; inset: 0; filter: var(--media); }

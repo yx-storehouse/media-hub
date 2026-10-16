@@ -25,8 +25,8 @@ onBeforeUnmount(() => {
 })
 
 /*
- * 显示中的提示：最多一条。新提示来了，旧的往上淡出、新的从下面浮上来（像叠上去一样），
- * 不是原地换字；到时间了往上淡出。
+ * 显示中的提示：最多一条。新提示来了，新的从下面弹上来（snappy 弹簧），旧的被它往上顶开一格再淡掉
+ * （像一摞卡片往上叠，顶部样式时方向反过来），不是原地换字；到时间了原地缩小淡出。
  */
 const items = ref([]) // [{ id, text }]
 let seq = 0
@@ -35,8 +35,11 @@ watch(() => [toastState.visible, toastState.text], ([visible, text]) => {
   const cur = items.value[items.value.length - 1]
   if (!cur || cur.text !== text) items.value = [{ id: ++seq, text }]
 }, { immediate: true })
-/* 正在离开的那条不再算「显示中」 */
-const leaving = el => el.classList.remove('show')
+/* 正在离开的那条不再算「显示中」；有新的一条顶上来时（不是到时间）走「被顶开」的离场 */
+const leaving = el => {
+  el.classList.remove('show')
+  if (items.value.length) el.classList.add('pushed')
+}
 </script>
 
 <template>
@@ -57,11 +60,12 @@ const leaving = el => el.classList.remove('show')
   left: 0;
   right: 0;
   bottom: calc(var(--tabbar-h) + var(--safe-b) + 40px);
-  z-index: 80;
+  z-index: var(--z-toast);
   height: 0;
   pointer-events: none;
+  --toast-dir: 1; /* 新提示从哪边来：1 从下面浮上来（旧的往上让），-1 从上面落下来（顶部样式） */
 }
-.toasts.top { top: calc(var(--safe-t) + 62px); bottom: auto; }
+.toasts.top { top: calc(var(--safe-t) + 62px); bottom: auto; --toast-dir: -1; }
 .toast {
   position: absolute;
   left: 0;
@@ -80,9 +84,15 @@ const leaving = el => el.classList.remove('show')
 }
 .toasts.top .toast { top: 0; bottom: auto; }
 
-/* 从稍下方放大浮现；离开时往上淡出，比出现快 */
-.toast-enter-active { transition: opacity var(--dur-3) var(--ease-out), transform var(--dur-3) var(--ease-out); }
+/*
+ * 出现：从来的那一侧带着缩小弹出来（snappy 弹簧，落定时有一点点「顶」的感觉），透明度很快到位。
+ * 到时间：原地缩小淡出，比出现快。
+ * 被新的一条顶开：往外让出自己一格的高度（smooth 弹簧）再淡掉，两条短暂地叠在一起，看得出是新的盖上来了。
+ */
+.toast-enter-active { transition: opacity var(--dur-2) var(--ease-out), transform var(--dur-spring-snappy) var(--spring-snappy); }
+.toast-enter-from { opacity: 0; transform: translate3d(0, calc(var(--toast-dir) * 16px), 0) scale(.88); }
 .toast-leave-active { transition: opacity var(--dur-2) var(--ease-in), transform var(--dur-2) var(--ease-in); }
-.toast-enter-from { opacity: 0; transform: translate3d(0, var(--rise), 0) scale(.94); }
-.toast-leave-to { opacity: 0; transform: translate3d(0, calc(var(--rise) * -1), 0) scale(.98); }
+.toast-leave-to { opacity: 0; transform: scale(.92); }
+.toast.pushed.toast-leave-active { transition: opacity var(--dur-3) var(--ease-in), transform var(--dur-spring-smooth) var(--spring-smooth); }
+.toast.pushed.toast-leave-to { opacity: 0; transform: translate3d(0, calc(var(--toast-dir) * (-100% - 8px)), 0) scale(.94); }
 </style>

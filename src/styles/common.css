@@ -122,10 +122,26 @@
 .opt.on { background: var(--accent); color: var(--on-accent); font-weight: 600; }
 .row2 { display: flex; align-items: center; justify-content: space-between; height: 46px; border-bottom: 1px solid var(--line); font-size: 14px; }
 .row2:last-child { border: 0; }
-.sw { position: relative; width: 42px; height: 24px; border-radius: 12px; background: #333; transition: .2s; cursor: pointer; }
-.sw::after { content: ''; position: absolute; left: 2px; top: 2px; width: 20px; height: 20px; border-radius: 50%; background: #fff; transition: .2s; }
+/*
+ * 开关：圆点用 transform 滑过去（snappy 弹簧，落定时轻轻一顶）；按住时圆点朝要去的方向拉长一点（iOS 开关的手感），
+ * 拉长时贴着的那一边不动（位移补偿，缩放原点始终在中心，状态之间怎么切都不会跳）
+ */
+.sw { position: relative; width: 42px; height: 24px; border-radius: 12px; background: #333; transition: background-color var(--dur-2) var(--ease-out); cursor: pointer; }
+.sw::after {
+  content: '';
+  position: absolute;
+  left: 2px;
+  top: 2px;
+  width: 20px;
+  height: 20px;
+  border-radius: 10px;
+  background: #fff;
+  transition: transform var(--dur-spring-snappy) var(--spring-snappy), background-color var(--dur-2) var(--ease-out);
+}
 .sw.on { background: var(--accent); }
-.sw.on::after { left: 20px; background: var(--on-accent); }
+.sw.on::after { transform: translate3d(18px, 0, 0); background: var(--on-accent); }
+.sw:active::after { transform: translate3d(2px, 0, 0) scaleX(1.2); transition-duration: var(--dur-1), var(--dur-2); }
+.sw.on:active::after { transform: translate3d(16px, 0, 0) scaleX(1.2); }
 
 /* empty / error state with an optional retry button */
 .empty { padding: 70px 0; color: var(--t2); font-size: 13px; text-align: center; }

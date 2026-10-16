@@ -277,6 +277,14 @@ export function getCreatorPosts(rawId, opts = {}, userId = null) {
   return Promise.resolve({ total, list: q.attachPostState(list, userId) })
 }
 
+/**
+ * 主页「媒体」：已发布视频的封面 + 已发布帖子的图，新的在前（规则见 db/index.mjs 的 creatorMedia）
+ * → { total, list: [{ id, kind: 'image' | 'video', cover, title, postId, videoId, dur, publishedAt }] }
+ */
+export function getCreatorMedia(rawId, opts = {}) {
+  return Promise.resolve(q.creatorMedia(requireCreator(rawId), pageOf(opts)))
+}
+
 /* ---------------- 直播 / 同城 ---------------- */
 
 export const getLiveTabs = () => Promise.resolve(q.liveTabs())

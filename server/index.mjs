@@ -33,6 +33,7 @@
  *   GET  /api/creators/:id              创作者主页头部（登录时带 following）
  *   GET  /api/creators/:id/videos       创作者的视频（?sort=0 最新 | 1 最热&limit=&offset=）→ { total, list }
  *   GET  /api/creators/:id/posts        创作者的帖子（?limit=&offset=，结构同社区列表）→ { total, list }
+ *   GET  /api/creators/:id/media        创作者的照片墙：视频封面 + 帖子的图，新的在前（?limit=&offset=）→ { total, list }
  *   GET  /api/live/tabs                 直播 tab
  *   GET  /api/live                      直播列表（?tab=0）
  *   GET  /api/nearby/filters            同城筛选项
@@ -139,6 +140,7 @@ const routes = [
   ['GET', /^\/api\/creators\/([^/]+)$/, (m, q, b, c) => api.getCreator(m[1], c.userId)],
   ['GET', /^\/api\/creators\/([^/]+)\/videos$/, (m, q, b, c) => api.getCreatorVideos(m[1], q.sort, { limit: q.limit, offset: q.offset }, c.userId)],
   ['GET', /^\/api\/creators\/([^/]+)\/posts$/, (m, q, b, c) => api.getCreatorPosts(m[1], { limit: q.limit, offset: q.offset }, c.userId)],
+  ['GET', /^\/api\/creators\/([^/]+)\/media$/, (m, q) => api.getCreatorMedia(m[1], { limit: q.limit, offset: q.offset })],
 
   ['GET', /^\/api\/live\/tabs$/, () => api.getLiveTabs()],
   ['GET', /^\/api\/live$/, (m, q) => api.getLives({ tab: +(q.tab || 0), limit: +(q.limit || 20), offset: +(q.offset || 0) })],

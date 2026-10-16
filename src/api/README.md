@@ -142,7 +142,8 @@ clearSearchHistory(keyword?)         // 不传 = 清空，传了只删这一个�
   following,                                // 当前用户是否关注作者（未登录为 false）
   tags,                                     // 不带 #
   images,                                   // Cover[]；视频帖有关联视频时主图当视频封面，这里只放配图
-  video,                                    // { id, title, cover, dur, len } | null（只有已上架的关联视频）
+  video,                                    // { id, title, cover, dur, len, frames } | null（只有已上架的关联视频）
+                                            //   frames：1～2 张图 [帖子主图, 视频封面]，2 张时视频块显示成左右拼图
   read, fav, faved, publishedAt, time,
   next }                                    // 社区「最新」顺序里的下一篇 { id, title, thumb } | null
 ```
@@ -152,15 +153,18 @@ clearSearchHistory(keyword?)         // 不传 = 清空，传了只删这一个�
 
 ## 创作者主页
 
-`#/creator/:id`（`views/CreatorView.vue`）用三个接口：
+`#/creator/:id`（`views/CreatorView.vue`）用四个接口：
 
 ```js
 getCreator(id)                 // { id, name, handle, avatar, verified, official, bio, followers, videoCount, postCount,
-                               //   lastActiveAt, lastActive, following, banner: Cover[] }
+                               //   mediaCount, lastActiveAt, lastActive, following, banner: Cover[] }
 getCreatorVideos(id, sort, { limit, offset })   // sort 0 最新 / 1 最热 → { total, list: Video[] }
 getCreatorPosts(id, { limit, offset })          // → { total, list: Post[] }，和 getPosts() 每条结构一样
+getCreatorMedia(id, { limit, offset })          // → { total, list: MediaItem[] }：「媒体」照片墙，新的在前
+                               // MediaItem = { id: 'v12' | 'i34', kind: 'image' | 'video', cover, title, postId, videoId, dur, publishedAt }
 ```
 
+- 「媒体」：视频格是已发布视频的封面（点了进播放页），图片格是已发布帖子的主图 / 配图（文档帖的文档页不算，点了全屏看大图）；`mediaCount` 和它的 `total` 一致。
 - 计数只算已发布的内容；`banner` 是最近作品的图（最多 3 张，可能为空，页面用按 id 生成的灰色渐变代替）。
 - 创作者不存在或已停用：接口回 400「创作者不存在」，页面显示提示和「返回」，不给重试；网络问题显示「重试」。
 - 帖子列表的每条有 `creatorId`，帖子卡片（`PostCard`）的头像和名字据此链到主页；创作者主页里的卡片传 `author-link="false"`。

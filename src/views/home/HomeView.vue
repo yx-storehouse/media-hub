@@ -7,6 +7,7 @@ import Icon from '@/components/Icon.vue'
 import BottomSheet from '@/components/BottomSheet.vue'
 import { useTabRetap } from '@/composables/useTabRetap'
 import { useSlider, under, fadeIn } from '@/components/home/motion'
+import { useScrollEdge } from '@/components/motion/scrollEdge'
 import RecommendTab from './RecommendTab.vue'
 import LatestTab from './LatestTab.vue'
 import CategoryTab from './CategoryTab.vue'
@@ -49,6 +50,18 @@ const activeTab = computed(() => CATEGORY_VIEWS[tab.value] || CategoryTab)
 const body = ref(null)
 useTabRetap('home', () => body.value?.retap?.())
 
+/*
+ * 分类标签栏跟着滚动变化：内容往上滚过去时底边细线变亮、下面一道淡阴影（components/motion/scrollEdge.js）。
+ * 只看紧贴在标签栏下面的滚动容器（分类页最上面就是 .scroll）；「最新」上面还有一条不动的日期栏，不算。
+ */
+const tabsEl = ref(null)
+const edge = useScrollEdge(tabsEl, () => {
+  const el = body.value?.$el
+  const first = el instanceof Element ? el.firstElementChild : null
+  return first && first.classList.contains('scroll') ? first : null
+})
+watch(tab, () => edge.refresh(), { flush: 'post' })
+
 /* 换分类时新的分类页从切换的方向淡入一点（切回首页、KeepAlive 切回来时不动） */
 const tabIndex = id => HOME_TABS.findIndex(t => t.id === id)
 watch(tab, (now, before) => {
@@ -72,7 +85,7 @@ function chooseTab(id) {
       <button class="hi m-hold" @click="router.push('/library')"><Icon name="library" />片库</button>
     </header>
 
-    <nav class="tabs">
+    <nav ref="tabsEl" class="tabs m-edge">
       <div ref="tabRow" class="row hs">
         <span ref="tabBar" class="m-bar tab-bar" aria-hidden="true" />
         <!-- replace: top tabs page within home like a pager, so back leaves home instead of walking the tabs -->

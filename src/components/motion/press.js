@@ -1,11 +1,11 @@
-import { reducedMotion, cssDuration, cssEasing } from '@/utils/motion'
+import { reducedMotion, cssDuration, cssEasing, spring } from '@/utils/motion'
 
 /*
- * 按压反馈：手指一按下就缩一点，松手弹回（和 iOS / 抖音的卡片、按钮一样）。
+ * 按压反馈：手指一按下就缩一点，松手用弹簧弹回（和 iOS / 抖音的卡片、按钮一样）。
  * 整个 App 只有一组委托在 document 上的监听（main.js 里 installPress()），列表再长也不给每张卡片挂监听。
  *
- *   class="m-press"      卡片、按钮：缩到 --press-scale（.96）
- *   class="m-press-sm"   小图标按钮：缩到 --press-scale-sm（.88），松手带一点回弹
+ *   class="m-press"      卡片、按钮：缩到 --press-scale（.96），松手 snappy 弹簧（几乎看不出过冲，只是落定得很「实」）
+ *   class="m-press-sm"   小图标按钮：缩到 --press-scale-sm（.88），松手 bouncy 弹簧，看得出轻轻弹一下
  *   class="m-hold"       不缩放，只在按住时加 .m-pressed，由组件自己写样式（底部导航让图标缩一下）
  *   class="m-off"        临时关掉（比如卡片里正在拖动的东西）
  *   v-press              卡片的键盘支持 + m-press（v-press.sm → m-press-sm，v-press.plain 不加缩放）
@@ -16,6 +16,7 @@ import { reducedMotion, cssDuration, cssEasing } from '@/utils/motion'
  * 细节
  *  - pointerdown 立刻开始缩放；开始滚动（pointercancel / scroll）、手指移开超过 10px 时立刻弹回，不和滚动抢；
  *  - 很快的一点也会完整地缩一下再弹回（缩放用 Web Animations 跑，不占用元素自己的 transition）；
+ *  - 弹回途中又按下：从当前看到的大小接着缩，不会先跳回原样再缩（不抖）；
  *  - 不拦截、不延迟点击：跳转和操作照常立刻发生；
  *  - 元素本来有 transform 的会保留（缩放叠在它后面）；disabled / aria-disabled 的不动；
  *  - 「减少动态效果」时不缩放，只加 .m-pressed。
@@ -39,23 +40,29 @@ function tokens() {
     card: num('--press-scale', 0.96),
     small: num('--press-scale-sm', 0.88),
     d1: cssDuration('--dur-1', 120),
-    d2: cssDuration('--dur-2', 200),
-    d3: cssDuration('--dur-3', 280),
-    out: cssEasing('--ease-out'),
-    spring: cssEasing('--ease-spring', 'cubic-bezier(.34, 1.56, .64, 1)')
+    out: cssEasing('--ease-out')
   }
   return T
 }
 
 const held = new Map()          // 按住中的元素 → { anim, pre, scale, small, x, y, id }
-const releasing = new WeakMap() // 正在弹回的元素 → 弹回动画
+const releasing = new WeakMap() // 正在弹回 / 等着弹回的元素 → { anim, scaleNow() 现在看到的缩放 }
+
+/* 动画此刻缓动后的进度（弹簧过冲时会大于 1）：再按下时用它算出现在看到的缩放 */
+const progress = a => {
+  const c = a.effect?.getComputedTiming?.()
+  return c && typeof c.progress === 'number' ? c.progress : 1
+}
 
 function press(el, e) {
   if (held.has(el)) return
-  // 上一次的弹回还没放完就又按下：先停掉它，读到的才是元素自己的 transform
-  releasing.get(el)?.cancel()
+  // 上一次的弹回还没放完就又按下：记下它现在弹到的大小，从这里接着缩；先停掉它，读到的才是元素自己的 transform
+  const prev = releasing.get(el)
+  const from = prev ? prev.scaleNow() : 1
+  prev?.anim.cancel()
+  releasing.delete(el)
   el.classList.add('m-pressed')
-  const h = { anim: null, pre: '', scale: 1, small: false, x: e.clientX, y: e.clientY, id: e.pointerId, t0: performance.now() }
+  const h = { anim: null, pre: '', from, scale: 1, small: false, x: e.clientX, y: e.clientY, id: e.pointerId, t0: performance.now() }
   const small = el.matches(SMALL)
   if ((small || el.matches(CARD)) && el.animate && !reducedMotion()) {
     const t = tokens()
@@ -65,7 +72,7 @@ function press(el, e) {
     h.small = small
     h.scale = small ? t.small : t.card
     h.anim = el.animate(
-      [{ transform: `${h.pre}scale(1)` }, { transform: `${h.pre}scale(${h.scale})` }],
+      [{ transform: `${h.pre}scale(${from})` }, { transform: `${h.pre}scale(${h.scale})` }],
       { duration: t.d1, easing: t.out, fill: 'forwards' }
     )
   }
@@ -73,7 +80,20 @@ function press(el, e) {
   if (held.size === 1) document.addEventListener('pointermove', onMove, { capture: true, passive: true })
 }
 
-/** cancel：滚动、移开、被系统打断——立刻原路弹回；否则（正常点按）等按下的动画放完再弹回，保证看得见 */
+/* 按下的动画此刻的缩放 */
+const pressedNow = h => h.from + (h.scale - h.from) * progress(h.anim)
+
+/* 从 fromScale 弹回原样：卡片 snappy、小图标 bouncy（和 CSS 的 --spring-* 同一组弹簧）；被打断时一律 snappy */
+function springBack(el, h, fromScale, name) {
+  const b = el.animate(
+    [{ transform: `${h.pre}scale(${fromScale})` }, { transform: `${h.pre}scale(1)` }],
+    spring(name)
+  )
+  b.onfinish = () => { b.cancel(); if (releasing.get(el)?.anim === b) releasing.delete(el) }
+  releasing.set(el, { anim: b, scaleNow: () => fromScale + (1 - fromScale) * progress(b) })
+}
+
+/** cancel：滚动、移开、被系统打断——从当前大小立刻弹回；否则（正常点按）等按下的动画放完再弹回，保证看得见 */
 function release(el, cancel) {
   const h = held.get(el)
   if (!h) return
@@ -89,27 +109,21 @@ function release(el, cancel) {
   }
   if (cancel) {
     el.classList.remove('m-pressed')
-    a.reverse()
-    a.onfinish = () => a.cancel()
-    releasing.set(el, a)
+    const now = pressedNow(h)
+    a.cancel()
+    springBack(el, h, now, 'snappy')
     return
   }
   const back = () => {
     el.classList.remove('m-pressed')
-    const t = tokens()
-    const b = el.animate(
-      [{ transform: `${h.pre}scale(${h.scale})` }, { transform: `${h.pre}scale(1)` }],
-      // 小图标回弹和各处 CSS 写的 :active / .m-pressed 松手（--dur-2 + --ease-spring）一致
-      h.small ? { duration: t.d2, easing: t.spring } : { duration: t.d2, easing: t.out }
-    )
     a.cancel()
-    b.onfinish = () => b.cancel()
-    releasing.set(el, b)
+    springBack(el, h, h.scale, h.small ? 'bouncy' : 'snappy')
   }
   if (a.playState === 'finished') back()
   else {
     a.onfinish = back
-    releasing.set(el, a) // 等的时候又按下了：press() 会先停掉它（之后不会再触发 back）
+    // 等的时候又按下了：press() 会先停掉它（之后不会再触发 back）
+    releasing.set(el, { anim: a, scaleNow: () => pressedNow(h) })
   }
 }
 
@@ -150,11 +164,11 @@ export function installPress() {
 }
 
 /**
- * 小图标「被选中」时的轻弹（底部导航的图标、点赞后的图标等）：从按下的大小弹回原样，带一点回弹。
+ * 小图标「被选中」时的轻弹（底部导航的图标、点赞后的图标等）：从按下的大小用 bouncy 弹簧弹回原样。
  * 只动 transform；元素上不要同时有 transform 的 transition（会盖住这段动画），需要的话包一层。
+ * 返回动画（减少动态效果时为 null）。
  */
 export function springIcon(el) {
-  if (!el || !el.animate || reducedMotion()) return
-  const t = tokens()
-  el.animate([{ transform: `scale(${t.small})` }, { transform: 'scale(1)' }], { duration: t.d3, easing: t.spring })
+  if (!el || !el.animate || reducedMotion()) return null
+  return el.animate([{ transform: `scale(${tokens().small})` }, { transform: 'scale(1)' }], spring('bouncy'))
 }

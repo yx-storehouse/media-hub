@@ -1,21 +1,34 @@
 <script setup>
 import { computed } from 'vue'
+import { useRouter } from 'vue-router'
 import { formatCount } from '@/utils/format'
 import Cover from '@/components/Cover.vue'
 import Icon from '@/components/Icon.vue'
+import { heroRelated } from '@/components/motion/hero'
 import { rememberVideo } from './preview'
 
-/* 播放页「相似推荐」的一行：左封面，右标题 + 标签 + 播放 / 收藏数；点进去时先记下封面和标题，新页面加载时先显示 */
+/*
+ * 播放页「相似推荐」的一行：左封面，右标题 + 标签 + 播放 / 收藏数；点进去时先记下封面和标题，新页面加载时先显示。
+ * 点下去缩略图飞进上面的播放器（components/motion/hero.js 的 heroRelated）。
+ */
 const props = defineProps({
   /** Video + { tags, playCount, favCount } */
   video: { type: Object, required: true }
 })
 
+const router = useRouter()
+const to = computed(() => `/video/${encodeURIComponent(props.video.id)}`)
 const tags = computed(() => (props.video.tags || []).slice(0, 3).map(t => String(t).replace(/^#/, '')))
+
+/* RouterLink 自己的点击处理先跑（真的跳了才会 preventDefault） */
+function onClick(e) {
+  rememberVideo(props.video)
+  heroRelated(e, e.currentTarget?.querySelector(':scope > .rv-cv'), props.video, router, to.value)
+}
 </script>
 
 <template>
-  <RouterLink :to="`/video/${encodeURIComponent(video.id)}`" class="rv" @click="rememberVideo(video)">
+  <RouterLink :to="to" class="rv" @click="onClick">
     <Cover class="rv-cv" v-bind="video.cover"><span class="dur">{{ video.dur }}</span></Cover>
     <div class="rv-bd">
       <div class="rv-tt">{{ video.title }}</div>

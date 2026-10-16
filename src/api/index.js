@@ -20,7 +20,8 @@
  *   Video  { id, code, title, dur, len, cover, likes, liked, faved, ... }
  *   Post   { id, creatorId, name, handle, verified, time, avatar, text, tags, kind: 'image'|'video'|'doc', dur, more, videoId, media: { main, thumbs } }
  *   PostDetail { id, title, content, kind, author: { id, name, handle, verified, avatar }, following, tags, images: Cover[],
- *                video: { id, title, cover, dur, len } | null, read, fav, faved, publishedAt, time, next: { id, title, thumb } | null }
+ *                video: { id, title, cover, dur, len, frames: Cover[] } | null, read, fav, faved, publishedAt, time, next: { id, title, thumb } | null }
+ *   MediaItem  { id, kind: 'image'|'video', cover, title, postId, videoId, dur, publishedAt }（创作者主页「媒体」的一格）
  * 页面里的列表都用 shallowRef 存放（整体替换，不做原地修改）。
  */
 import { request, get, post, del, ApiError } from './http'
@@ -228,6 +229,8 @@ export const getPosts = (tab = 0, opts = {}) =>
 /**
  * 帖子详情（#/post/:id）：PostDetail。title 就是列表里的 text，content 是正文（纯文本，保留换行）。
  * 视频帖关联了已上架的视频时，主图当视频封面（video.cover），images 只放配图；否则 images = [主图, ...配图]。
+ * video.frames：视频块左右拼图用的 1～2 张图 = [帖子主图（有的话）, 视频自己的封面]，同一张只留一张；
+ * 有 2 张时详情页显示左右两半的拼图，只有 1 张时照旧显示一整张 video.cover。
  * next：社区「最新」顺序里的下一篇（更早发布的），没有时为 null。
  * 帖子不存在或已下架时接口回 400「帖子不存在或已下架」。
  */
@@ -267,9 +270,10 @@ export const toggleFollow = (creatorId, { on }) =>
 /* ---------------- 创作者主页（#/creator/:id） ---------------- */
 
 /**
- * 主页头部：{ id, name, handle, avatar, verified, official, bio, followers, videoCount, postCount,
+ * 主页头部：{ id, name, handle, avatar, verified, official, bio, followers, videoCount, postCount, mediaCount,
  *            lastActiveAt, lastActive, following, banner: Cover[] }
- * 视频数 / 帖子数只算已发布的；banner 是最近作品的图（最多 3 张，可能为空）。
+ * 视频数 / 帖子数只算已发布的；mediaCount 是「媒体」的条数（和 getCreatorMedia 的 total 一致）；
+ * banner 是最近作品的图（最多 3 张，可能为空）。
  * 创作者不存在或已停用时接口回 400「创作者不存在」。
  */
 export const getCreator = id =>
@@ -289,6 +293,19 @@ export const getCreatorPosts = (id, opts = {}) =>
     query: { limit: opts.limit ?? 20, offset: opts.offset ?? 0 },
     ids: [id],
     mock: () => mockApi().then(m => m.getCreatorPosts(id, opts))
+  })
+
+/**
+ * 主页「媒体」（照片墙）：他发过的所有图，新的在前 → { total, list: MediaItem[] }
+ *   kind 'video'：已发布视频的封面，videoId 是点进去播放的视频，dur 是「01:15」「1:02:05」（没有时长为 null）
+ *   kind 'image'：已发布帖子的主图 / 配图（文档帖的文档页不算），postId 是所属帖子
+ * title：视频标题 / 帖子标题（读屏、播放页加载前先显示用）。id 是这一格的唯一键（'v12'、'i34'）。
+ */
+export const getCreatorMedia = (id, opts = {}) =>
+  call(`/api/creators/${encodeURIComponent(id)}/media`, {
+    query: { limit: opts.limit ?? 20, offset: opts.offset ?? 0 },
+    ids: [id],
+    mock: () => mockApi().then(m => m.getCreatorMedia(id, opts))
   })
 
 /* ---------------- 直播 / 同城 ---------------- */

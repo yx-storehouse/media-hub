@@ -1,13 +1,18 @@
 import { ref } from 'vue'
 import { START_LOCATION } from 'vue-router'
-import { reducedMotion } from '@/utils/motion'
+import { MAIN_TABS } from '@/config/nav'
+import { reducedMotion, Z } from '@/utils/motion'
 
 /*
  * 页面切换用哪种动效（App.vue 的路由出口和底部导航用同一个名字，样式在 styles/motion.css）：
- *   pg-fwd   进入子页面（压栈、浏览器前进）
- *   pg-back  返回（返回键、安卓返回手势、浏览器后退，以及「替换」回到底部 Tab，比如没有上一页时的返回）
- *   pg-fade  底部 Tab 之间（不管是压栈、替换还是退回首页）
- *   ''       不做动画：刚打开 App、系统开了「减少动态效果」、浏览器自己已经做过滑动（iOS Safari 边缘右滑返回）
+ *   pg-fwd        进入子页面（压栈、浏览器前进）：新页从右边滑进来，上一页往左让、变暗（iOS 式视差）
+ *   pg-back       返回（返回键、安卓返回手势、浏览器后退，以及「替换」回到底部 Tab，比如没有上一页时的返回）
+ *   pg-tab        底部 Tab 之间（不管是压栈、替换还是退回首页）：新页从切换的方向滑进来一点并淡入，
+ *                 方向看 MAIN_TABS 的顺序（往右的 Tab 为 1、往左为 -1，记在 pageMotion.dir，
+ *                 App.vue 用 beforePageEnter 写到新页的 --pg-dir 上）
+ *   pg-hero       共享元素放大进详情（只由 overrideNextTransition 指定，见下）
+ *   pg-hero-back  从详情缩回列表（同上）
+ *   ''            不做动画：刚打开 App、系统开了「减少动态效果」、浏览器自己已经做过滑动（iOS Safari 边缘右滑返回）
  *
  * 方向看 history.state.position（路由每压一条 +1，替换不变，后退时变小）：
  *   - 返回键 / 手势 / 浏览器前进后退：路由的 history.listen 直接给出 delta；
@@ -16,11 +21,44 @@ import { reducedMotion } from '@/utils/motion'
  * 由页面自己处理内容的更替。
  */
 
-/** 最近一次页面切换：列表入场动效（v-rise）用它判断「这是返回时恢复出来的内容」，不再播入场动画 */
+/** 最近一次页面切换：列表入场动效（v-rise）、共享元素过渡等用它判断这一次是怎么切过来的 */
 export const pageMotion = {
-  name: '',
-  at: 0,          // performance.now()
+  name: '',        // 这一次实际用的动效名（见上面的列表）
+  dir: 1,          // pg-tab 的方向：1 往右边的 Tab，-1 往左边的 Tab
+  at: 0,           // performance.now()
   rendering: false // 跳转后新页面首次渲染的这一轮（同一个任务内）
+}
+
+/** 共享元素过渡浮层的层级（和 motion.css 的 --z-hero 一致）：hero 代理把飞行中的元素放在这一层 */
+export const HERO_Z = Z.hero
+
+/*
+ * ---- 共享元素过渡的契约（给 hero 代理用）----
+ *
+ *   import { overrideNextTransition, pageMotion } from '@/components/motion/pageTransition'
+ *   overrideNextTransition('pg-hero')          // 点卡片：先记下封面的位置，再指定下一次跳转的动效
+ *   await router.push(`/video/${id}`)
+ *   if (pageMotion.name === 'pg-hero') { …把封面从卡片飞到播放器… }   // 实际用上了才飞
+ *
+ * - 只认 'pg-hero' / 'pg-hero-back'，别的名字忽略（返回 false）；
+ * - 一次性：被下一次「完成」的跳转（router.afterEach）用掉；那次跳转失败（被守卫拦下、重复跳转）也作废；
+ *   1.5 秒内没有跳转就自动作废，不会留到之后某次不相干的跳转上；
+ * - 系统开了「减少动态效果」、或者浏览器自己已经滑过（iOS 边缘右滑返回）时不用它，照常规则（这两种都是 ''）；
+ * - 跳转完成后看 pageMotion.name 才知道实际用的是什么；样式见 styles/motion.css 的「共享元素过渡」。
+ */
+const HERO_NAMES = ['pg-hero', 'pg-hero-back']
+const OVERRIDE_TTL = 1500
+let override = ''
+let overrideTimer = 0
+
+/** 指定下一次页面切换的动效（一次性），返回是否接受 */
+export function overrideNextTransition(name) {
+  clearTimeout(overrideTimer)
+  override = ''
+  if (!HERO_NAMES.includes(name) || reducedMotion()) return false
+  override = name
+  overrideTimer = setTimeout(() => { override = '' }, OVERRIDE_TTL)
+  return true
 }
 
 const IOS = typeof navigator !== 'undefined'
@@ -44,6 +82,7 @@ if (IOS) {
 }
 
 const posOf = state => (state && typeof state.position === 'number' ? state.position : null)
+const tabIndex = r => MAIN_TABS.findIndex(t => t.id === r.meta.tab)
 
 /**
  * App.vue 里调一次。返回页面切换的名字（ref）。
@@ -67,15 +106,22 @@ export function usePageTransition(router) {
   router.afterEach((to, from, failure) => {
     const delta = popDelta
     const ua = uaSlide
+    const forced = override
     popDelta = null
     uaSlide = false
+    // 指定的动效只给下一次跳转用：成功失败都用掉
+    override = ''
+    clearTimeout(overrideTimer)
     if (failure) return
 
     const isTab = r => !!r.meta.tabbar
     let n = ''
     if (from === START_LOCATION || ua || reducedMotion()) n = ''
-    else if (isTab(to) && isTab(from)) n = 'pg-fade'
-    else {
+    else if (forced) n = forced
+    else if (isTab(to) && isTab(from)) {
+      n = 'pg-tab'
+      pageMotion.dir = tabIndex(to) < tabIndex(from) ? -1 : 1
+    } else {
       let d = delta
       if (d === null) {
         const p = posOf(window.history.state)
@@ -94,4 +140,12 @@ export function usePageTransition(router) {
   })
 
   return name
+}
+
+/**
+ * 路由出口 <Transition @before-enter>：把 Tab 切换的方向写到进来的那一页上（--pg-dir）。
+ * 写在新页自己身上，而不是根元素：新页本来就要整棵算样式，改根元素上的变量会让整个文档重算一遍。
+ */
+export function beforePageEnter(el) {
+  if (el instanceof HTMLElement && pageMotion.name === 'pg-tab') el.style.setProperty('--pg-dir', String(pageMotion.dir))
 }

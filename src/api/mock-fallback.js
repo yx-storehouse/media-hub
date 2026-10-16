@@ -300,6 +300,23 @@ const followed = new Set()
 const postIndex = id => POSTS.findIndex(p => p.id === demoId(rawId(id)))
 const notFound = () => Promise.reject(new ApiError('帖子不存在或已下架', { status: 400, code: 1 }))
 const durSec = dur => String(dur || '').split(':').reduce((s, x) => s * 60 + (Number(x) || 0), 0)
+/** 秒 → 「01:15」「1:02:05」（和接口的写法一致） */
+const clock = sec => {
+  const s = Math.max(0, Math.round(Number(sec) || 0))
+  const p = n => String(n).padStart(2, '0')
+  const h = Math.floor(s / 3600)
+  return h ? `${h}:${p(Math.floor((s % 3600) / 60))}:${p(s % 60)}` : `${p(Math.floor(s / 60))}:${p(s % 60)}`
+}
+/** 去掉空的和重复的图（按 src，没有 src 按占位图） */
+const distinctCovers = list => {
+  const seen = new Set()
+  return list.filter(c => {
+    const key = c && (c.src || c.fallback)
+    if (!key || seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
 
 export const getPost = id => {
   const i = postIndex(id)
@@ -307,7 +324,10 @@ export const getPost = id => {
   const p = POSTS[i], n = POSTS[i + 1]
   // 详情页的图是全宽大图：同一张图取两倍尺寸（同一个种子 = 同一张照片）
   const thumbs = p.kind === 'doc' ? p.media.thumbs : [0, 1, 2].map(k => cover(`post${i}t${k}`, { kind: (i + k + 1) % 6, w: 720, h: 640 }))
-  const video = p.videoId ? { id: p.videoId, title: p.text, cover: p.media.main, dur: p.dur, len: durSec(p.dur) } : null
+  // 视频块拼图：[帖子主图, 关联视频自己的封面]（和接口一样，同一张只留一张）
+  const video = p.videoId
+    ? { id: p.videoId, title: p.text, cover: p.media.main, dur: p.dur, len: durSec(p.dur), frames: distinctCovers([p.media.main, videoById(p.videoId).cover]) }
+    : null
   return ok({
     id: p.id,
     title: p.text,
@@ -376,6 +396,24 @@ function mockCreatorVideos(c, sort) {
   return sort === 1 ? list.slice().sort((a, b) => b.playCount - a.playCount) : list
 }
 
+/*
+ * 「媒体」照片墙：视频封面 + 帖子的主图和配图（文档帖的文档页不算），按发布时间倒序。
+ * 帖子的发布时间和详情页一样（第 i 篇是 (i + 1) 个半小时前）。
+ */
+function mockCreatorMedia(c) {
+  const now = Math.floor(Date.now() / 1000)
+  const videos = mockCreatorVideos(c, 0).map(v => ({
+    id: 'v' + v.id, kind: 'video', cover: v.cover, title: v.title, postId: null, videoId: v.id, dur: clock(v.len), publishedAt: v.publishedAt
+  }))
+  const images = c.posts.flatMap(p => {
+    const at = now - (POSTS.indexOf(p) + 1) * 1800
+    const pics = [p.media.main, ...(p.kind === 'doc' ? [] : p.media.thumbs)].filter(Boolean)
+    return pics.map((pic, k) => ({ id: `i${p.id}:${k}`, kind: 'image', cover: pic, title: p.text, postId: p.id, videoId: null, dur: null, publishedAt: at }))
+  })
+  // 稳定排序：同一时间保持视频在前、帖子里的图按顺序
+  return [...videos, ...images].sort((a, b) => b.publishedAt - a.publishedAt)
+}
+
 export const getCreator = id => {
   const c = mockCreator(id)
   if (!c) return noCreator()
@@ -394,6 +432,7 @@ export const getCreator = id => {
     followers: mockFollowers(c),
     videoCount: c.videoCount,
     postCount: c.posts.length,
+    mediaCount: mockCreatorMedia(c).length,
     lastActiveAt,
     lastActive: !has ? '' : c.posts.length ? c.posts[0].time : c.ageSec < 86400 ? Math.floor(c.ageSec / 3600) + '小时前' : Math.floor(c.ageSec / 86400) + '天前',
     following: followed.has(c.id),
@@ -411,6 +450,13 @@ export const getCreatorPosts = (id, opts = {}) => {
   const c = mockCreator(id)
   if (!c) return noCreator()
   return ok({ total: c.posts.length, list: slice(c.posts, opts) })
+}
+
+export const getCreatorMedia = (id, opts = {}) => {
+  const c = mockCreator(id)
+  if (!c) return noCreator()
+  const all = mockCreatorMedia(c)
+  return ok({ total: all.length, list: slice(all, opts) })
 }
 export const togglePostFav = (id, on) => {
   const p = POSTS[postIndex(id)]
@@ -474,6 +520,6 @@ export default {
   getCategoryFilters, getCategoryVideos, getHotWords, getCreators, getRecentSearches, searchVideos, searchPosts,
   getTopic, getTopicVideos, getLibrary, getVideo, getRelatedVideos, getShorts, getCommunityTabs, getPosts,
   getPost, viewPost, toggleFollow, togglePostFav, toggleVideoFav, toggleVideoLike, toggleVideoDislike, toggleTopicFav,
-  getCreator, getCreatorVideos, getCreatorPosts,
+  getCreator, getCreatorVideos, getCreatorPosts, getCreatorMedia,
   getLiveTabs, getLives, getNearbyFilters, getNearby, getProfile
 }

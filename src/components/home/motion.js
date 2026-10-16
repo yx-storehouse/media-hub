@@ -1,5 +1,5 @@
 import { watch, onMounted, onActivated, onBeforeUnmount } from 'vue'
-import { reducedMotion } from '@/utils/motion'
+import { reducedMotion, parseMs } from '@/utils/motion'
 
 /*
  * 内容页（首页、社区、帖子、创作者、搜索、专题、我的）共用的动效小工具，时长 / 缓动都取 src/styles/motion.css 的令牌。
@@ -53,10 +53,9 @@ function tokens() {
   const t = {}
   for (const [name, fallback] of Object.entries(TOKENS)) {
     const v = cs.getPropertyValue(name).trim()
-    if (typeof fallback === 'number') {
-      const n = parseFloat(v)
-      t[name] = Number.isFinite(n) ? n : fallback
-    } else t[name] = v || fallback
+    // 时长按单位换算（打包后的 CSS 里 120ms 会被压成 .12s）；--rise 是 px，parseMs 原样给出数字
+    if (typeof fallback === 'number') t[name] = parseMs(v, fallback)
+    else t[name] = v || fallback
   }
   if (!reducedMotion()) cached = t
   return t

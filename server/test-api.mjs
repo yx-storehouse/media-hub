@@ -371,6 +371,11 @@ await check('帖子详情：结构与列表一致', async () => {
     must(d.read === lp.read && d.fav === lp.fav && d.publishedAt === lp.publishedAt && typeof d.time === 'string' && d.time, `${tag} 计数 / 时间`)
     if (lp.videoId != null) {
       must(d.video && d.video.id === lp.videoId && typeof d.video.title === 'string' && isCover(d.video.cover) && DUR_RE.test(d.video.dur) && Number.isInteger(d.video.len), `${tag} video ${json(d.video)}`)
+      // 视频块拼图：1～2 张、都是有效的图、互不重复；有主图时第一张就是主图
+      const fr = d.video.frames
+      must(Array.isArray(fr) && fr.length >= 1 && fr.length <= 2 && fr.every(isCover) && new Set(fr.map(f => f.src || f.fallback)).size === fr.length,
+        `${tag} frames ${json(fr?.map(f => f.src))}`)
+      if (lp.media.main) must(json(fr[0]) === json(lp.media.main), `${tag} frames[0] 应是帖子主图`)
     } else must(d.video === null, `${tag} 没有已上架的关联视频，video 应为 null`)
   }
   return `${list.length} 条，字段 ${POST_KEYS.split(',').length} 个`
@@ -655,7 +660,7 @@ adminCheck('帖子详情：草稿 / 下架返回 400，同一时间按 id 排下
  * ---- 创作者主页（GET /api/creators/:id、/videos、/posts）----
  * 每个用例自己建创作者 / 视频 / 帖子，结束时删掉（删创作者会连带删他的帖子）。
  */
-const PROFILE_KEYS = 'id,name,handle,avatar,verified,official,bio,followers,videoCount,postCount,lastActiveAt,lastActive,following,banner'
+const PROFILE_KEYS = 'id,name,handle,avatar,verified,official,bio,followers,videoCount,postCount,mediaCount,lastActiveAt,lastActive,following,banner'
 /** 建一个只给这个用例用的创作者，fn 结束后连同他的视频、帖子一起删掉 */
 async function withCreator(body, fn) {
   const c = await data('POST', '/api/admin/creators', body)
@@ -691,6 +696,8 @@ adminCheck('创作者主页：结构、计数只算已发布、最后更新、�
     must(d.id === c.id && d.name === '主页测试' && d.handle === 'profile_t1' && d.verified === true && d.official === false && d.bio === '一句简介', '基本字段 ' + json(d).slice(0, 160))
     must(isCover(d.avatar), '头像应有占位图')
     must(d.videoCount === 3 && d.postCount === 3, `计数只算已发布：视频 ${d.videoCount} / 帖子 ${d.postCount}`)
+    // 媒体：3 张视频封面 + 有主图的帖子 2 张 + 只有配图的帖子 2 张（文档页、草稿不算）
+    must(d.mediaCount === 7, `媒体计数 ${d.mediaCount}`)
     must(d.lastActiveAt === T - 600 && d.lastActive === '10分钟前', `最后更新 ${d.lastActiveAt} ${d.lastActive}（草稿不算）`)
     // 头图：新的在前，最多 3 张；帖子取主图（没有就取第一张配图），文档帖和草稿 / 下架的不要
     must(d.banner.map(b => b.src).join() === '/m/p1.jpg,/m/p2a.jpg,/m/va.jpg', '头图 ' + d.banner.map(b => b.src).join())
@@ -702,10 +709,11 @@ adminCheck('创作者主页：结构、计数只算已发布、最后更新、�
 adminCheck('创作者主页：没有作品时头图为空、不显示最后更新', async () =>
   withCreator({ name: '空主页', handle: 'profile_t2' }, async c => {
     const d = await data('GET', `/api/creators/${c.id}`)
-    must(d.videoCount === 0 && d.postCount === 0 && d.banner.length === 0 && d.lastActiveAt === null && d.lastActive === '', json(d).slice(0, 200))
+    must(d.videoCount === 0 && d.postCount === 0 && d.mediaCount === 0 && d.banner.length === 0 && d.lastActiveAt === null && d.lastActive === '', json(d).slice(0, 200))
     const v = await data('GET', `/api/creators/${c.id}/videos`)
     const p = await data('GET', `/api/creators/${c.id}/posts`)
-    must(v.total === 0 && v.list.length === 0 && p.total === 0 && p.list.length === 0, '空列表')
+    const m = await data('GET', `/api/creators/${c.id}/media`)
+    must(v.total === 0 && v.list.length === 0 && p.total === 0 && p.list.length === 0 && m.total === 0 && m.list.length === 0, '空列表')
     return 'banner []，lastActive \'\''
   }))
 
@@ -733,12 +741,12 @@ adminCheck('创作者主页：不存在 / 已停用返回 400', async () =>
     await mkPost({ text: '停用作者的帖子' })
     await data('POST', `/api/creators/${c.id}/follow`, { on: true })
     await data('PATCH', `/api/admin/creators/${c.id}`, { status: 0 })
-    for (const sub of ['', '/videos', '/posts']) await expect400(`/api/creators/${c.id}${sub}`)
+    for (const sub of ['', '/videos', '/posts', '/media']) await expect400(`/api/creators/${c.id}${sub}`)
     // 已停用的不能再关注，但可以取消关注
     await data('POST', `/api/creators/${c.id}/follow`, { on: false })
     await expect400(`/api/creators/${c.id}/follow`, 'POST', { on: true })
     for (const path of ['/api/creators/99999999', '/api/creators/0', '/api/creators/abc', '/api/creators/99999999999999999999', '/api/creators/1.5',
-      '/api/creators/99999999/videos', '/api/creators/abc/posts']) await expect400(path)
+      '/api/creators/99999999/videos', '/api/creators/abc/posts', '/api/creators/99999999/media', '/api/creators/abc/media']) await expect400(path)
     await expect400('/api/creators/99999999/follow', 'POST', { on: true })
     await data('PATCH', `/api/admin/creators/${c.id}`, { status: 1 })
     must((await data('GET', `/api/creators/${c.id}`)).videoCount === 1, '重新启用后能打开')
@@ -806,6 +814,111 @@ adminCheck('创作者主页：帖子与社区列表同结构，翻页、收藏�
     must(faved.faved === true && faved.fav === 1 && anonP.faved === false, '收藏状态 ' + json({ faved: faved.faved, fav: faved.fav, anon: anonP.faved }))
     return `4 条（草稿不算），字段与社区列表逐条相同：${Object.keys(res.list[0]).join(',')}`
   })
+})
+
+const MEDIA_KEYS = 'id,kind,cover,title,postId,videoId,dur,publishedAt'
+adminCheck('创作者主页「媒体」：视频封面 + 帖子的图，新的在前、翻页、只算已发布、去重', async () => {
+  const T = Math.floor(Date.now() / 1000)
+  return withCreator({ name: '媒体测试', handle: 'profile_t7' }, async (c, { mkVideo, mkPost }) => {
+    const va = await mkVideo({ title: '媒体视频 A', publishedAt: T - 3600, coverUrl: '/m/wa.jpg', durationSec: 75 })
+    const vb = await mkVideo({ title: '媒体视频 B', publishedAt: T - 3 * 3600 })   // 没有封面图（只有占位图）、没有时长
+    const vc = await mkVideo({ title: '媒体视频 C', publishedAt: T - 2 * 3600, coverUrl: '/m/wc.jpg', durationSec: 3725 })
+    await mkVideo({ title: '媒体草稿视频', status: 0, publishedAt: T, coverUrl: '/m/wdraft.jpg' })
+    await mkVideo({ title: '媒体下架视频', status: 2, publishedAt: T, coverUrl: '/m/woff.jpg' })
+    const p1 = await mkPost({ text: '三张图的图文帖', mainImage: '/m/w1.jpg', images: ['/m/w1a.jpg', '/m/w1b.jpg'], publishedAt: T - 1800 })
+    // 和视频 C 同一时间：视频在前；主图就是视频 A 的封面，不再单独出现
+    const p2 = await mkPost({ text: '视频帖拿视频封面当主图', mediaKind: 1, videoId: va.id, mainImage: '/m/wa.jpg', images: ['/m/w2a.jpg'], publishedAt: T - 2 * 3600 })
+    // 文档帖：主图算，配图是文档页、不算
+    const p3 = await mkPost({ text: '文档帖', mediaKind: 2, mainImage: '/m/w3.jpg', images: ['/m/w3doc1.jpg', '/m/w3doc2.jpg'], publishedAt: T - 600 })
+    await mkPost({ text: '没有图的帖子', publishedAt: T - 300 })
+    await mkPost({ text: '草稿帖', status: 0, mainImage: '/m/wpdraft.jpg', publishedAt: T })
+    await mkPost({ text: '下架帖', status: 2, images: ['/m/wpoff.jpg'], publishedAt: T })
+
+    const all = await data('GET', `/api/creators/${c.id}/media?limit=50`)
+    const srcs = list => list.map(m => m.cover?.src ?? '-').join()
+    const expSrcs = '/m/w3.jpg,/m/w1.jpg,/m/w1a.jpg,/m/w1b.jpg,/m/wa.jpg,/m/wc.jpg,/m/w2a.jpg,-'
+    must(all.total === 8 && all.list.length === 8 && srcs(all.list) === expSrcs, `顺序 ${srcs(all.list)}（total ${all.total}），期望 ${expSrcs}`)
+    must(all.list.map(m => m.kind).join() === 'image,image,image,image,video,video,image,video', '类型 ' + all.list.map(m => m.kind).join())
+    must(all.list.every(m => Object.keys(m).join() === MEDIA_KEYS && isCover(m.cover)), '字段 ' + Object.keys(all.list[0]).join())
+    must(new Set(all.list.map(m => m.id)).size === 8, 'id 不重复')
+    must(all.list.every((m, i, a) => !i || a[i - 1].publishedAt >= m.publishedAt), '发布时间倒序')
+    const [doc, img] = all.list
+    must(doc.postId === p3.id && doc.videoId === null && doc.dur === null && doc.title === '文档帖' && doc.publishedAt === T - 600, '文档帖主图 ' + json({ ...doc, cover: undefined }))
+    must(img.postId === p1.id && all.list[2].postId === p1.id && all.list[3].postId === p1.id, '同一帖子：主图在前、配图按顺序')
+    const byVideo = id => all.list.find(m => m.videoId === id)
+    const a = byVideo(va.id), b = byVideo(vb.id), cc = byVideo(vc.id)
+    must(a.postId === null && a.dur === '01:15' && a.title === '媒体视频 A' && a.publishedAt === T - 3600, '视频 A ' + json({ ...a, cover: undefined }))
+    must(cc.dur === '1:02:05' && b.dur === null && b.cover.src === null && !!b.cover.fallback, '时长写法 / 没有封面图的视频用占位图 ' + json([cc.dur, b.dur, b.cover.src]))
+    must(all.list[6].postId === p2.id, '视频帖的配图还在 ' + json(all.list[6].postId))
+    must((await data('GET', `/api/creators/${c.id}`)).mediaCount === 8, '头部 mediaCount 和 total 一致')
+
+    // 翻页：3 条一页拼起来和一次取完全一样
+    const pages = []
+    for (let off = 0; off < 9; off += 3) {
+      const pg = await data('GET', `/api/creators/${c.id}/media?limit=3&offset=${off}`)
+      must(pg.total === 8, '每页 total 一样')
+      pages.push(...pg.list)
+    }
+    must(pages.map(m => m.id).join() === all.list.map(m => m.id).join(), '分页 ' + pages.map(m => m.id).join())
+    must((await data('GET', `/api/creators/${c.id}/media?limit=999`)).list.length === 8, 'limit 上限')
+    must((await data('GET', `/api/creators/${c.id}/media?limit=0&offset=-5`)).list.length === 8, 'limit 0 → 默认 20、offset 负数 → 0')
+    must((await data('GET', `/api/creators/${c.id}/media?offset=8`)).list.length === 0, '翻过头是空页')
+
+    // 下架帖子 / 视频后马上少掉，重新上架回来
+    await data('PATCH', `/api/admin/posts/${p1.id}`, { status: 2 })
+    await data('PATCH', `/api/admin/videos/${vc.id}`, { status: 2 })
+    const less = await data('GET', `/api/creators/${c.id}/media?limit=50`)
+    must(less.total === 4 && srcs(less.list) === '/m/w3.jpg,/m/wa.jpg,/m/w2a.jpg,-', '下架后 ' + srcs(less.list))
+    await data('PATCH', `/api/admin/posts/${p1.id}`, { status: 1 })
+    await data('PATCH', `/api/admin/videos/${vc.id}`, { status: 1 })
+    must((await data('GET', `/api/creators/${c.id}/media?limit=50`)).total === 8, '重新上架后 8 条')
+    // 未登录也能看（公开接口）
+    const anon = await anonCall('GET', `/api/creators/${c.id}/media`)
+    must(anon.status === 200 && anon.json.data.total === 8, '未登录 ' + anon.status)
+    return `8 条：${all.list.map(m => m.kind[0]).join('')}，3 条一页翻页一致，草稿 / 下架 / 文档页 / 重复封面不算`
+  })
+})
+
+adminCheck('帖子详情：视频块 frames（帖子主图 + 视频封面，同一张只留一张）', async () => {
+  const creators = (await data('GET', '/api/admin/creators?pageSize=100')).list
+  const cid = creators.find(c => c.handle === 'trip').id
+  const v1 = await data('POST', '/api/admin/videos', { title: 'frames 视频', status: 1, durationSec: 90, coverUrl: '/media/covers/f1.jpg' })
+  const v2 = await data('POST', '/api/admin/videos', { title: 'frames 没封面图的视频', status: 1, durationSec: 90 })
+  const mk = body => data('POST', '/api/admin/posts', { creatorId: cid, text: 'frames 测试', ...body })
+  const made = []
+  const detail = async body => {
+    const p = await mk(body)
+    made.push(p.id)
+    return data('GET', `/api/community/posts/${p.id}`)
+  }
+  const fsrc = d => d.video.frames.map(f => f.src ?? '-').join()
+  const isrc = d => d.images.map(c => c.src).join()
+  try {
+    // 视频帖 + 主图：[主图, 视频封面]；video.cover 仍是主图，images 只有配图（原规则不变）
+    let d = await detail({ mediaKind: 1, videoId: v1.id, mainImage: '/m/fa.jpg', images: ['/m/fa1.jpg'] })
+    must(fsrc(d) === '/m/fa.jpg,/media/covers/f1.jpg' && d.video.frames.every(isCover), '视频帖 ' + fsrc(d))
+    must(d.video.cover.src === '/m/fa.jpg' && isrc(d) === '/m/fa1.jpg', '封面 / 配图规则没变 ' + json([d.video.cover.src, isrc(d)]))
+    must(Object.keys(d.video).join() === 'id,title,cover,dur,len,frames', 'video 字段 ' + Object.keys(d.video).join())
+    // 主图就是视频封面：只留一张（App 显示一整张）
+    d = await detail({ mediaKind: 1, videoId: v1.id, mainImage: '/media/covers/f1.jpg' })
+    must(fsrc(d) === '/media/covers/f1.jpg', '同一张 ' + fsrc(d))
+    // 没有主图：只有视频封面
+    d = await detail({ mediaKind: 1, videoId: v1.id, images: ['/m/fc1.jpg'] })
+    must(fsrc(d) === '/media/covers/f1.jpg' && isrc(d) === '/m/fc1.jpg', '没有主图 ' + fsrc(d))
+    // 图文帖关联视频：主图照旧在 images 里，frames 也带上它
+    d = await detail({ mediaKind: 0, videoId: v1.id, mainImage: '/m/fe.jpg', images: ['/m/fe1.jpg'] })
+    must(fsrc(d) === '/m/fe.jpg,/media/covers/f1.jpg' && isrc(d) === '/m/fe.jpg,/m/fe1.jpg' && d.video.cover.src === '/media/covers/f1.jpg', '图文帖 ' + json([fsrc(d), isrc(d)]))
+    // 视频没有封面图：它的占位图也算一张
+    d = await detail({ mediaKind: 1, videoId: v2.id, mainImage: '/m/fg.jpg' })
+    must(fsrc(d) === '/m/fg.jpg,-' && !!d.video.frames[1].fallback, '占位封面 ' + fsrc(d))
+    // 没有关联视频：video 为 null
+    d = await detail({ mediaKind: 1, mainImage: '/m/fh.jpg' })
+    must(d.video === null, 'video 应为 null')
+    return '[主图, 视频封面] / 同一张 1 张 / 没主图 1 张 / 图文帖 2 张 / 占位封面也算'
+  } finally {
+    for (const id of made) await data('DELETE', `/api/admin/posts/${id}`).catch(() => {})
+    for (const v of [v1, v2]) await data('DELETE', `/api/admin/videos/${v.id}`).catch(() => {})
+  }
 })
 
 /* ---- 「我的」、搜索记录、帖子搜索、短视频排序、最新、专题、压缩与缓存 ---- */

@@ -5,12 +5,14 @@ import { useAuthStore } from '@/stores/auth'
 import { toast } from '@/composables/useToast'
 import { useBackDismiss } from '@/composables/useBackDismiss'
 import { useSheetDrag } from '@/components/motion/sheetDrag'
+import { shake, haptic } from '@/utils/motion'
 import Icon from '@/components/Icon.vue'
 
 /*
  * 登录弹层：底部升起，和 App 其他弹层风格一致（动效、下拉关闭和 BottomSheet 共用）。
  * 未登录时点「点赞 / 收藏 / 我的」都会打开它（见 stores/auth.js 的 requireLogin，登录后补做那次操作）。
  * 返回键 / 返回手势只关登录框；换页面时自动关掉，不会留到下一个页面上。
+ * 没填、登录失败时表单左右摇一下（像 iOS 输错密码），错误信息从上面落下来。
  */
 const auth = useAuthStore()
 const open = computed(() => auth.loginOpen)
@@ -27,6 +29,14 @@ const uidInput = useTemplateRef('uidInput')
 const pwdInput = useTemplateRef('pwdInput')
 const sheetEl = useTemplateRef('sheetEl')
 const maskEl = useTemplateRef('maskEl')
+const formEl = useTemplateRef('formEl')
+
+/* 出错：显示信息，表单摇一下，轻轻震一下（震动只有支持的安卓设备有） */
+function fail(msg) {
+  error.value = msg
+  shake(formEl.value)
+  haptic(12)
+}
 
 /*
  * 聚焦输入框，但不让浏览器去「滚到它」：这时弹层还在屏幕下面（升起动画的起点），浏览器会把整个 #app
@@ -54,14 +64,14 @@ watch(open, isOpen => {
 /* 账号框回车：跳到密码框，而不是提交 */
 function nextField() {
   if (uid.value.trim()) pwdInput.value?.focus()
-  else error.value = '请输入账号'
+  else fail('请输入账号')
 }
 
 async function submit() {
   if (busy.value) return
   const name = uid.value.trim()
-  if (!name) { error.value = '请输入账号'; return }
-  if (!password.value) { error.value = '请输入密码'; return }
+  if (!name) { fail('请输入账号'); return }
+  if (!password.value) { fail('请输入密码'); return }
   busy.value = true
   error.value = ''
   try {
@@ -70,7 +80,7 @@ async function submit() {
     uid.value = ''
     password.value = ''
   } catch (e) {
-    error.value = e.message || '登录失败'
+    fail(e.message || '登录失败')
   } finally {
     busy.value = false
   }
@@ -103,7 +113,7 @@ const drag = useSheetDrag(sheetEl, maskEl, close)
         <div class="grab" />
         <h4 id="login-title">登录</h4>
 
-        <form class="form" @submit.prevent="submit">
+        <form ref="formEl" class="form" @submit.prevent="submit">
           <label class="field">
             <Icon name="tMe" />
             <input
@@ -174,7 +184,7 @@ const drag = useSheetDrag(sheetEl, maskEl, close)
 .field input::placeholder { color: #6e6e6e; }
 .field input:disabled { opacity: .6; }
 
-.err { color: #ff8080; font-size: 12.5px; line-height: 18px; }
+.err { color: #ff8080; font-size: 12.5px; line-height: 18px; animation: m-rise var(--dur-2) var(--ease-out); --rise: -4px; }
 
 .submit {
   height: 44px;

@@ -1,31 +1,98 @@
 /*
- * 动效规范：全 App 共用一套时长和缓动，动起来才是同一种手感。
+ * 动效规范：全 App 共用一套时长、缓动、弹簧和层级，动起来才是同一种手感（「优美灵动」：手指碰到的地方有弹性，
+ * 大面积的面顺滑连续，东西从哪来、到哪去看得出来）。
  *
  * 原则
- *  - 只动 transform / opacity（必要时 filter），不动宽高和位置，保证 60 帧。
- *  - 进场用减速曲线（--ease-out），离场更快（--ease-in，时长取进场的 2/3 左右）。
- *  - 回弹（--ease-spring）只用在「被用户点了」的小元素上：点赞、按钮、图标，不用在大面积上。
- *  - 动效不能拖住操作：点下去立刻有反馈，页面切换期间也能继续点。
- *  - 系统开了「减少动态效果」时，下面统一收敛成几乎无动画。
+ *  - 只动 transform / opacity（必要时 filter），不动宽高和位置，保证 60 帧；will-change 只在动的时候加。
+ *  - 手指一按下，同一帧内就有反馈；入场不超过约 450ms；任何时候都能打断，打断后停在正确的状态。
+ *  - 动效不能拖住操作：页面切换、弹层收起的过程中照样可以点（离开中的东西不接手指）。
+ *  - 只用黑白灰（白色 / 灰色 / 透明度），不用彩色。
+ *  - 系统开了「减少动态效果」时，文件末尾统一收敛成几乎无动画（状态照样切换）。
+ *
+ * 用哪条曲线
+ *  - --ease-out        进场、减速停下（最常用）；离场用 --ease-in，时长取进场的 2/3 左右。
+ *  - --ease-fluid      iOS 式的「流体」减速：起步快、收尾很长很柔。页面推入 / 返回用它。
+ *  - --spring-snappy   手指碰到的 UI 反馈（按压松手、开关、指示条、小位移），过冲约 4%，配 --dur-spring-snappy。
+ *  - --spring-smooth   大面积的面（底部弹层、提示条、Tab 内容滑入），几乎不过冲，配 --dur-spring-smooth。
+ *  - --spring-bouncy   小的「庆祝」元素（点赞、选中的图标、角标），过冲约 14%、再轻轻回一下，配 --dur-spring-bouncy。
+ *  - --ease-spring     旧名字，和 --spring-bouncy 同一个形状；可以配任意时长（越短越「硬」），老代码继续能用。
+ *  弹簧要和自己的时长配对：--spring-X 的时长就是这根弹簧停稳所需的时间，换别的时长等于换了一根更硬 / 更软的弹簧。
+ *
+ * 弹簧怎么来的
+ *  阻尼弹簧（质量 1）在 0→1 上的真实曲线，用 CSS linear() 逐点描出来（src/utils/motion.js 的 SPRINGS / springLinear）：
+ *    snappy  stiffness 700, damping 38（ζ≈0.72）  停稳 283ms
+ *    smooth  stiffness 400, damping 38（ζ≈0.95）  停稳 358ms
+ *    bouncy  stiffness 600, damping 26（ζ≈0.53）  停稳 382ms
+ *  不支持 linear() 的浏览器（iOS 17.2 / Chrome 113 以前）用前面 :root 里拟合出来的 cubic-bezier 和时长兜底，
+ *  形状接近，只是弹不出第二下。改参数：改 SPRINGS，再把
+ *    node --input-type=module -e "import('./src/utils/motion.js').then(m => console.log(m.springCss()))"
+ *  的输出贴进下面的 @supports 段（兜底的 cubic-bezier 同步改 SPRINGS 里的 fallback）。
+ *  JS 里用 spring('snappy') / springEasing() / springFrom()（带初速度，松手接着手指的速度走），见 utils/motion.js。
+ *
+ * 层级（z-index，JS 里用 utils/motion.js 的 Z）
+ *    页面本身        不设（auto）
+ *    --z-tabbar      30  底部导航
+ *    --z-page-top    40  转场中盖在上面的那一页（压过底部导航）
+ *    --z-hero        45  共享元素过渡的浮层（hero 代理放飞行中的封面）
+ *    --z-fullscreen  50  播放器的页面内「伪全屏」
+ *    --z-mask / --z-sheet  60 / 61  弹层遮罩 / 底部弹层
+ *    --z-viewer      70  看大图
+ *    --z-toast       80  提示条
  */
 :root {
   /* 时长 */
   --dur-1: 120ms;   /* 按压、颜色、图标状态 */
   --dur-2: 200ms;   /* 小元素进出、提示条、指示条 */
   --dur-3: 280ms;   /* 弹层、卡片入场、图片淡入 */
-  --dur-4: 380ms;   /* 页面切换、大面积过渡 */
+  --dur-4: 380ms;   /* 大面积过渡 */
+  --dur-push: 440ms; /* 进子页面（流体曲线收尾很长，看起来约 250ms 就到位） */
+  --dur-pop: 380ms;  /* 返回：比进入快一点 */
 
   /* 缓动 */
   --ease-out: cubic-bezier(.22, 1, .36, 1);        /* 进场 / 减速停下：最常用 */
   --ease-in: cubic-bezier(.55, 0, 1, .45);         /* 离场 / 加速离开 */
   --ease-in-out: cubic-bezier(.65, 0, .35, 1);     /* 位置互换、指示条滑动 */
-  --ease-spring: cubic-bezier(.34, 1.56, .64, 1);  /* 轻微回弹：点赞、按钮弹起 */
+  --ease-fluid: cubic-bezier(.32, .72, 0, 1);      /* iOS 式流体减速：页面推入 / 返回 */
+  --ease-spring: cubic-bezier(.34, 1.56, .64, 1);  /* 轻微回弹：点赞、按钮弹起（支持 linear() 时换成真弹簧，见下） */
+
+  /* 弹簧：先写兜底（拟合的 cubic-bezier + 对应时长），支持 linear() 的浏览器在下面的 @supports 里换成真弹簧 */
+  --spring-snappy: cubic-bezier(.29, .32, .11, 1.26);
+  --dur-spring-snappy: 270ms;
+  --spring-smooth: cubic-bezier(.23, .15, .18, 1.02);
+  --dur-spring-smooth: 320ms;
+  --spring-bouncy: cubic-bezier(.45, 1.2, .01, 1.19);
+  --dur-spring-bouncy: 360ms;
 
   /* 交互参数 */
   --press-scale: .96;       /* 卡片、按钮按下时的缩放 */
   --press-scale-sm: .88;    /* 小图标按钮按下时的缩放 */
   --stagger: 40ms;          /* 列表错峰入场的间隔（最多错峰前 8 个） */
   --rise: 10px;             /* 入场时从下往上的位移 */
+  --tab-shift: 20px;        /* 底部 Tab 切换：新页从切换方向滑进来的距离 */
+
+  /* 层级（说明见开头） */
+  --z-tabbar: 30;
+  --z-page-top: 40;
+  --z-hero: 45;
+  --z-fullscreen: 50;
+  --z-mask: 60;
+  --z-sheet: 61;
+  --z-viewer: 70;
+  --z-toast: 80;
+}
+
+/* 真弹簧（stiffness / damping 见开头；由 utils/motion.js 的 springCss() 生成，不要手改数字） */
+@supports (transition-timing-function: linear(0, 1)) {
+  :root {
+    --spring-snappy: linear(0, 0.0014 0.71%, 0.0053 1.41%, 0.0117 2.12%, 0.0253 3.18%, 0.0368 3.89%, 0.0573 4.95%, 0.0812 6.01%, 0.1079 7.07%, 0.1578 8.83%, 0.2124 10.6%, 0.2818 12.72%, 0.4599 18.02%, 0.5172 19.79%, 0.5723 21.55%, 0.6246 23.32%, 0.6739 25.09%, 0.7198 26.86%, 0.754 28.27%, 0.786 29.68%, 0.8227 31.45%, 0.8496 32.86%, 0.88 34.63%, 0.9019 36.04%, 0.9264 37.81%, 0.9438 39.22%, 0.9629 40.99%, 0.9793 42.76%, 0.9957 44.88%, 1.0068 46.64%, 1.0176 48.76%, 1.0257 50.88%, 1.0316 53%, 1.0361 55.48%, 1.0384 57.95%, 1.0388 61.84%, 1.0361 66.08%, 1.013 85.16%, 1.0066 92.23%, 1.0021 99.65%, 1);
+    --dur-spring-snappy: 283ms;
+    --spring-smooth: linear(0, 0.0008 0.56%, 0.0047 1.4%, 0.0116 2.23%, 0.0211 3.07%, 0.0329 3.91%, 0.0467 4.75%, 0.0854 6.7%, 0.1239 8.38%, 0.1731 10.34%, 0.376 17.88%, 0.4689 21.51%, 0.5157 23.46%, 0.5537 25.14%, 0.5955 27.09%, 0.6291 28.77%, 0.6607 30.45%, 0.6901 32.12%, 0.7176 33.8%, 0.7471 35.75%, 0.7704 37.43%, 0.7953 39.39%, 0.8179 41.34%, 0.8383 43.3%, 0.8593 45.53%, 0.8778 47.77%, 0.8961 50.28%, 0.9119 52.79%, 0.9256 55.31%, 0.9385 58.1%, 0.9504 61.17%, 0.9602 64.25%, 0.9752 70.67%, 0.9862 78.21%, 0.9938 87.71%, 0.998 99.72%, 1);
+    --dur-spring-smooth: 358ms;
+    --spring-bouncy: linear(0, 0.0012 0.52%, 0.0072 1.31%, 0.0179 2.09%, 0.0329 2.88%, 0.0518 3.66%, 0.0742 4.45%, 0.0997 5.24%, 0.138 6.28%, 0.2028 7.85%, 0.2741 9.42%, 0.3496 10.99%, 0.569 15.45%, 0.6311 16.75%, 0.6909 18.06%, 0.7477 19.37%, 0.8011 20.68%, 0.8508 21.99%, 0.8966 23.3%, 0.9382 24.61%, 0.9685 25.65%, 1.0025 26.96%, 1.0324 28.27%, 1.0533 29.32%, 1.0759 30.63%, 1.0946 31.94%, 1.1098 33.25%, 1.1195 34.29%, 1.1271 35.34%, 1.1328 36.39%, 1.1374 37.7%, 1.1397 40.05%, 1.1347 42.67%, 1.1263 44.76%, 1.1136 47.12%, 1.0471 57.07%, 1.02 61.78%, 1.0079 64.4%, 0.9991 66.75%, 0.9914 69.37%, 0.986 71.99%, 0.9809 76.96%, 0.9814 82.72%, 0.996 99.74%, 1);
+    --dur-spring-bouncy: 382ms;
+    /* 旧的回弹令牌也换成真弹簧（同 bouncy 的形状） */
+    --ease-spring: var(--spring-bouncy);
+  }
 }
 
 /* ---- 通用入场 / 骨架闪光 ---- */
@@ -35,35 +102,99 @@
 @keyframes m-shimmer { from { background-position: 150% 0; } to { background-position: -50% 0; } }
 
 /*
- * ---- 页面切换（App.vue 给路由出口和底部导航套的 <Transition :name>，方向见 components/motion/pageTransition.js）----
- *  pg-fwd   进子页面：新页从右边滑进来盖住上一页，上一页往左让一点、变暗
- *  pg-back  返回：反过来，盖在上面的页面滑出去，下面那页回到原位、变亮（比进入快一点）
- *  pg-fade  底部 Tab 之间：新页快速淡入，旧页原样垫在下面（两页不会同时半透明、透出黑底）
- * 离开中的页面不接手指：转场期间点到的总是新页面，可以接着点、接着返回。
+ * ---- 页面切换（App.vue 给路由出口和底部导航套的 <Transition :name>，用哪种见 components/motion/pageTransition.js）----
+ *  pg-fwd   进子页面：新页从右边沿流体曲线滑进来盖住上一页；上一页往左让出 30%（视差）、变暗
+ *  pg-back  返回：反过来，盖在上面的页面滑出去，下面那页从左边回到原位、变亮（比进入快一点）
+ *  pg-tab   底部 Tab 之间：新页从切换的方向（--pg-dir：往右的 Tab 为 1、往左为 -1，App.vue 写在新页上）
+ *           滑进来 --tab-shift 并淡入；旧页原样垫在下面，不会透出黑底
+ *  pg-hero / pg-hero-back  共享元素过渡（overrideNextTransition() 指定，契约见下面和 pageTransition.js）
+ *
+ * 离开中的页面不接手指，转场期间点到的总是新页面（可以接着点、接着返回）：
+ *  - 返回（pg-back）：离开的页面在上面，给它 pointer-events: none，点击落到下面的新页；
+ *  - 推入（pg-fwd）：离开的页面在下面，露出来的那一截由新页向左伸出的一块透明挡板（::before）接住。
+ *    不给旧页加 pointer-events：它会继承，整棵子树的样式都要重算，社区这种长列表在低端机上多出一截卡顿；
+ *  - Tab 之间：新页（z-index 2）整页盖在旧页上面，点到的本来就是新页，同样不给旧页加。
  */
 .pg-fwd-enter-active, .pg-fwd-leave-active {
-  transition: transform var(--dur-4) var(--ease-out), opacity var(--dur-4) var(--ease-out);
+  transition: transform var(--dur-push) var(--ease-fluid), opacity var(--dur-push) var(--ease-fluid);
+  will-change: transform;
 }
 .pg-back-enter-active, .pg-back-leave-active {
-  transition: transform var(--dur-3) var(--ease-out), opacity var(--dur-3) var(--ease-out);
+  transition: transform var(--dur-pop) var(--ease-fluid), opacity var(--dur-pop) var(--ease-fluid);
+  will-change: transform;
 }
 .pg-fwd-enter-from, .pg-back-leave-to { transform: translate3d(100%, 0, 0); }
-.pg-fwd-leave-to, .pg-back-enter-from { transform: translate3d(-24%, 0, 0); opacity: .62; }
-/* 盖在上面的那一页压过底部导航（z-index 30），左边缘一道柔和的阴影把两页分开 */
-.page.pg-fwd-enter-active, .page.pg-back-leave-active { z-index: 40; box-shadow: -12px 0 32px rgba(0, 0, 0, .5); }
+.pg-fwd-leave-to, .pg-back-enter-from { transform: translate3d(-30%, 0, 0); opacity: .5; }
+/*
+ * 盖在上面的那一页压过底部导航；左边缘一道很细的亮线 + 柔和的阴影，把两页分开（深色主题下光靠阴影看不出边）
+ */
+.page.pg-fwd-enter-active, .page.pg-back-leave-active {
+  z-index: var(--z-page-top);
+  box-shadow: -1px 0 0 rgba(255, 255, 255, .07), -16px 0 40px rgba(0, 0, 0, .6);
+}
+/* 推入时的挡板：贴着新页左边缘往左伸出一屏宽，盖住还露在外面的旧页，接住转场途中落在旧页上的点按 */
+.page.pg-fwd-enter-active::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 100%;
+  width: 100vw;
+}
+/* 新页带底部导航（让出了导航栏的位置）时，挡板往下多伸一截，旧页最下面那一条也盖住 */
+.page.with-tabbar.pg-fwd-enter-active::before { bottom: calc(-1 * (var(--tabbar-h) + var(--safe-b))); }
+.pg-back-leave-active { pointer-events: none; }
 
-.pg-fade-enter-active { transition: opacity var(--dur-2) var(--ease-out); }
-.pg-fade-enter-from { opacity: 0; }
-/* 旧页不变，只是在新页完全显出之前留在下面（这条 transition 只用来撑住时长） */
-.pg-fade-leave-active { transition: opacity var(--dur-2) linear; }
-.page.pg-fade-enter-active { z-index: 2; }
-.page.pg-fade-leave-active { z-index: 1; }
+.pg-tab-enter-active {
+  transition: transform var(--dur-spring-smooth) var(--spring-smooth), opacity var(--dur-2) var(--ease-out);
+  will-change: transform, opacity;
+}
+.pg-tab-enter-from { opacity: 0; transform: translate3d(calc(var(--pg-dir, 1) * var(--tab-shift)), 0, 0); }
+/* 旧页不变，只是在新页完全到位之前留在下面（这条 transition 只用来撑住时长，和新页的位移一样长） */
+.pg-tab-leave-active { transition: opacity var(--dur-spring-smooth) linear; }
+/*
+ * 新页在转场中压在上面；旧页不设层级：新页在文档里总排在旧页后面，转场类名去掉以后也还是新页在上。
+ * （旧页如果也设了层级，新页先收尾、旧页的计时器晚一毫秒才到的那一帧，旧页会闪到上面来。）
+ */
+.page.pg-tab-enter-active { z-index: 2; }
 
 /*
- * Tab 之间不用写：新页（z-index 2）整页盖在旧页上面，点到的本来就是新页。
- * 给旧页加 pointer-events（会继承）要把它整棵子树的样式重算一遍，社区这种长列表在低端机上多出一截卡顿。
+ * ---- 共享元素过渡（hero，契约）----
+ * 页面代码在跳转前调 overrideNextTransition('pg-hero' | 'pg-hero-back')（components/motion/pageTransition.js），
+ * 下一次完成的跳转就用这个名字（减少动态效果、浏览器自己滑过时不用，照常规则；跳转失败或 1.5 秒内没跳就作废）。
+ * 飞行中的元素由 hero 代理放在 --z-hero（45）的浮层里，盖过下面这些页面。
+ *  pg-hero       新页（详情）盖在上面（--z-page-top）快速淡入、轻轻上浮一点；旧页原地不动、完全可见，
+ *                陪着新页的进场一直挂着（同样长），不会提前消失露出黑底
+ *  pg-hero-back  离开的页面（详情）盖在上面淡出；回来的页面立刻出现在下面，不做位移
+ *  底部导航      pg-hero 离开时往下滑走并淡出；pg-hero-back 回来时从下面弹上来（snappy 弹簧）
  */
-.pg-fwd-leave-active, .pg-back-leave-active { pointer-events: none; }
+.page.pg-hero-enter-active {
+  z-index: var(--z-page-top);
+  transition: opacity var(--dur-3) var(--ease-out), transform var(--dur-3) var(--ease-out);
+  will-change: opacity, transform;
+}
+.page.pg-hero-enter-from { opacity: 0; transform: translate3d(0, 8px, 0); }
+.page.pg-hero-leave-active { transition: opacity var(--dur-3) linear; } /* 撑住时长，不动 */
+
+.page.pg-hero-back-leave-active {
+  z-index: var(--z-page-top);
+  pointer-events: none;
+  transition: opacity var(--dur-3) var(--ease-out);
+  will-change: opacity;
+}
+.page.pg-hero-back-leave-to { opacity: 0; }
+.page.pg-hero-back-enter-active { transition: none; }
+
+.tabbar.pg-hero-leave-active, .tabbar.pg-hero-back-leave-active {
+  transition: transform var(--dur-3) var(--ease-in), opacity var(--dur-2) var(--ease-in);
+}
+.tabbar.pg-hero-leave-to, .tabbar.pg-hero-back-leave-to { transform: translate3d(0, 100%, 0); opacity: 0; }
+.tabbar.pg-hero-enter-active, .tabbar.pg-hero-back-enter-active {
+  /* 盖过正在淡出的详情页：回来的页面的导航栏先到 */
+  z-index: calc(var(--z-page-top) + 1);
+  transition: transform var(--dur-spring-snappy) var(--spring-snappy), opacity var(--dur-2) var(--ease-out);
+}
+.tabbar.pg-hero-enter-from, .tabbar.pg-hero-back-enter-from { transform: translate3d(0, 100%, 0); opacity: 0; }
 
 /*
  * ---- 骨架屏闪光：<div class="m-shimmer" /> ----
@@ -79,11 +210,35 @@
   animation: m-shimmer calc(var(--dur-4) * 4) var(--ease-in-out) infinite;
 }
 
-/* ---- 系统「减少动态效果」：全部收敛 ---- */
+/*
+ * ---- 跟着滚动变化的顶栏（components/motion/scrollEdge.js 加上 .m-scrolled）----
+ * 内容从顶栏下面滚过去时：底边的细线变亮，下面多一道很淡的阴影（内容「钻到」顶栏下面）。
+ * 顶栏要有定位（position: relative）；::after 留给它用。
+ */
+.m-edge::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%; /* 正好压在顶栏自己的底边线上 */
+  z-index: 5;
+  height: 14px;
+  border-top: 1px solid rgba(255, 255, 255, .09);
+  background: linear-gradient(rgba(0, 0, 0, .42), rgba(0, 0, 0, 0));
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur-3) var(--ease-out);
+}
+.m-edge.m-scrolled::after { opacity: 1; }
+/* 滚动容器最上面的哨兵：4px 高、再用负边距收回去，不占位置；往上滚过 4px 就算「滚过了」 */
+.m-edge-sentinel { flex: none; height: 4px; margin-bottom: -4px; visibility: hidden; pointer-events: none; }
+
+/* ---- 系统「减少动态效果」：全部收敛（状态照样切换，只是不动） ---- */
 @media (prefers-reduced-motion: reduce) {
   :root {
-    --dur-1: 1ms; --dur-2: 1ms; --dur-3: 1ms; --dur-4: 1ms;
-    --press-scale: 1; --press-scale-sm: 1; --stagger: 0ms; --rise: 0px;
+    --dur-1: 1ms; --dur-2: 1ms; --dur-3: 1ms; --dur-4: 1ms; --dur-push: 1ms; --dur-pop: 1ms;
+    --dur-spring-snappy: 1ms; --dur-spring-smooth: 1ms; --dur-spring-bouncy: 1ms;
+    --press-scale: 1; --press-scale-sm: 1; --stagger: 0ms; --rise: 0px; --tab-shift: 0px;
   }
   *, *::before, *::after {
     animation-duration: .01ms !important;
