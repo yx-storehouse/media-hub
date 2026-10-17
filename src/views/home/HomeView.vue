@@ -6,7 +6,7 @@ import AppLogo from '@/components/AppLogo.vue'
 import Icon from '@/components/Icon.vue'
 import BottomSheet from '@/components/BottomSheet.vue'
 import { useTabRetap } from '@/composables/useTabRetap'
-import { useSlider, under, fadeIn } from '@/components/home/motion'
+import { useSlider, under, fadeIn, scrollBehavior } from '@/components/home/motion'
 import { useScrollEdge } from '@/components/motion/scrollEdge'
 import RecommendTab from './RecommendTab.vue'
 import LatestTab from './LatestTab.vue'
@@ -35,7 +35,7 @@ function centerActiveTab(behavior) {
   row.scrollTo({ left: Math.max(0, el.offsetLeft + el.offsetWidth / 2 - row.clientWidth / 2), behavior })
 }
 /* 换分类时放到下一帧开头再量（新分类页刚挂上，当场读位置会逼浏览器在点按的那一下里多排一遍版） */
-watch(tab, () => requestAnimationFrame(() => centerActiveTab('smooth')), { flush: 'post' })
+watch(tab, () => requestAnimationFrame(() => centerActiveTab(scrollBehavior())), { flush: 'post' })
 onActivated(() => centerActiveTab('auto'))
 
 /* 选中分类下面的指示条：换分类时滑过去（先拉长再收拢），跟着标签一起横向滚动 */
@@ -80,7 +80,7 @@ function chooseTab(id) {
   <div class="page home">
     <header class="hd">
       <AppLogo />
-      <RouterLink to="/search" class="sbox"><Icon name="search" />搜您想搜,看您所想</RouterLink>
+      <RouterLink to="/search" class="sbox m-hold"><Icon name="search" />搜您想搜,看您所想</RouterLink>
       <button class="hi m-hold" @click="router.push('/history')"><Icon name="history" />历史</button>
       <button class="hi m-hold" @click="router.push('/library')"><Icon name="library" />片库</button>
     </header>
@@ -147,9 +147,11 @@ function chooseTab(id) {
   font-size: 14px;
   white-space: nowrap;
   cursor: text;
+  transition: background-color var(--dur-2) var(--ease-out);
 }
 .sbox svg { width: 14px; height: 14px; color: var(--t2); stroke-width: 2.4; }
-.sbox:active { background: #202020; }
+/* 按下的那一帧就亮一点（m-hold 加的 .m-pressed），松手淡回去 */
+.sbox.m-pressed { background: #202020; transition-duration: var(--dur-1); }
 .hi {
   display: flex;
   flex-direction: column;

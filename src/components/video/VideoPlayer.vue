@@ -4,6 +4,11 @@
  * 只认 10 秒内的标记，免得过一会儿打开别的视频时莫名其妙进了全屏。
  */
 let carryFullscreenAt = 0
+/*
+ * 卸载后多久再释放 <video> 的地址：离开的页面还要放完转场（推入 / 返回里长的那个）。
+ * 第一次挂上时读一次令牌就记住（读 CSS 变量要算样式，不在转场开始的那一刻读）；减少动态效果时没有转场，不用等。
+ */
+let releaseAfter = 0
 </script>
 
 <script setup>
@@ -12,6 +17,7 @@ import { useAppStore } from '@/stores/app'
 import { toast } from '@/composables/useToast'
 import { useBackDismiss } from '@/composables/useBackDismiss'
 import { formatClock } from '@/utils/format'
+import { cssDuration, reducedMotion } from '@/utils/motion'
 import Icon from '@/components/Icon.vue'
 import Cover from '@/components/Cover.vue'
 import BottomSheet from '@/components/BottomSheet.vue'
@@ -120,8 +126,16 @@ function markStarted() {
 let autoplayHeld = false
 /* 自动播放还没有结果（等着 hold 放开、或者 play() 还没回来）：先不显示大播放键，开播前不会闪一下「暂停着」的样子 */
 const autoStarting = ref(props.autoplay && hasSource.value)
+/*
+ * 播着的时候又 hold 了（播放页里点相似推荐，缩略图正飞过来）：旧视频立刻停下，不会在换过去之前接着出声。
+ * 不是 immediate：一挂上就 hold 着的新播放器不受影响（照常等 hold 放开再播）
+ */
 watch(() => props.hold, h => {
-  if (h || !autoplayHeld) return
+  if (h) {
+    el.value?.pause()
+    return
+  }
+  if (!autoplayHeld) return
   autoplayHeld = false
   play()
 })
@@ -175,6 +189,8 @@ function seekTo(t) {
 /* ---------- 播完：重播 / 下一个 ---------- */
 
 let cdTimer = 0
+/* 点了「下一个」以后，万一没换成视频，到点收起停住的倒计时（见 goNext） */
+let nextTimer = 0
 /** 用户点了「取消」：这次播完不再自动播 */
 let cdCancelled = false
 
@@ -196,12 +212,15 @@ function maybeCountdown() {
   cdTimer = setInterval(() => {
     // 切到后台、开着设置面板时先停住，回来接着数
     if (document.hidden || sheetOpen.value) return
-    if (--countdown.value <= 0) goNext(true)
+    // 数到「1 秒」那一格走满就播（不先变成 0：结束画面停在这一刻等新视频换上来，见 goNext）
+    if (countdown.value <= 1) goNext(true)
+    else countdown.value--
   }, 1000)
 }
 function stopCountdown() {
   clearInterval(cdTimer)
   cdTimer = 0
+  clearTimeout(nextTimer)
   countdown.value = 0
 }
 
@@ -245,8 +264,18 @@ function replay() {
   play()
 }
 function goNext(auto = false) {
-  stopCountdown()
-  if (!props.next) return
+  if (!props.next) {
+    stopCountdown()
+    return
+  }
+  /*
+   * 结束画面原样停在这一刻（倒计时不清零、不变回「播放下一个」）：播放页换视频时旧播放器会留到新内容回来，
+   * 这期间画面不会先变一下。万一没换成（跳转失败），过一会儿再收起倒计时。
+   */
+  clearInterval(cdTimer)
+  cdTimer = 0
+  clearTimeout(nextTimer)
+  nextTimer = setTimeout(stopCountdown, 1500)
   if (isFs.value) carryFullscreenAt = Date.now()
   emit('next', { auto })
 }
@@ -533,6 +562,7 @@ onMounted(() => {
   window.addEventListener('pagehide', onPageHide)
   if (orientationTarget) orientationTarget.addEventListener('change', onOrientation)
   else window.addEventListener('orientationchange', onOrientation)
+  if (!releaseAfter && !reducedMotion()) releaseAfter = Math.max(cssDuration('--dur-push', 440), cssDuration('--dur-pop', 380)) + 60
   const carry = Date.now() - carryFullscreenAt < 10000
   carryFullscreenAt = 0
   if (!hasSource.value) return
@@ -548,6 +578,8 @@ onMounted(() => {
  * 外框、<video>，以及画面上此刻是视频画面（播过、或者拖过进度）而不是封面 / 黑屏。
  */
 defineExpose({
+  /** 暂停（播放页换视频、旧播放器还留着等新内容时） */
+  pause,
   heroSource: () => {
     const v = el.value
     const showsVideo = !!v && hasSource.value && !posterOn.value && v.readyState >= 2
@@ -579,8 +611,11 @@ onBeforeUnmount(() => {
   if (v) {
     if (document.pictureInPictureElement === v) document.exitPictureInPicture().catch(() => {})
     v.pause()
-    v.removeAttribute('src')
-    v.load()
+    // 释放地址推迟到页面转场放完：离开的页面滑走时还是暂停的这一帧，不会先变成黑块；已经暂停，不会出声也不会在后台播
+    setTimeout(() => {
+      v.removeAttribute('src')
+      v.load()
+    }, reducedMotion() ? 0 : releaseAfter || 500)
   }
 })
 </script>
@@ -830,7 +865,12 @@ onBeforeUnmount(() => {
 .fs .bar { padding: 0 max(6px, env(safe-area-inset-right)) max(2px, env(safe-area-inset-bottom)) max(6px, env(safe-area-inset-left)); }
 
 /* ---------- 没有片源 ---------- */
-.nosrc .shade { opacity: 1; background: rgba(0, 0, 0, .52); animation: m-fade var(--dur-3) var(--ease-out) backwards; }
+/*
+ * 遮罩从 .67 淡到 1（.67 × .52 ≈ .35，正好是加载中占位封面上那层 .ph-cv::after 的暗度）：
+ * 占位换成播放器时接着那个暗度往下压，不会先亮一下再暗下去
+ */
+.nosrc .shade { opacity: 1; background: rgba(0, 0, 0, .52); animation: nosrc-dim var(--dur-3) var(--ease-out) backwards; }
+@keyframes nosrc-dim { from { opacity: .67; } }
 /* 如实说明：遮罩淡入后，标题、说明、按钮依次轻轻升上来 */
 .nosrc-msg > * { animation: m-rise var(--dur-3) var(--ease-out) backwards; }
 .nosrc-msg > :nth-child(2) { animation-delay: var(--stagger); }
@@ -885,11 +925,17 @@ onBeforeUnmount(() => {
 .big-play:active { transform: scale(var(--press-scale-sm)); transition: transform var(--dur-1) var(--ease-out); }
 .big-play svg { width: 24px; height: 24px; margin-left: 3px; }
 .big-play svg.retry { margin-left: 0; stroke-width: 2.4; }
-/* 暂停：从略大淡入、落到位；开始播：放大淡出（离场更快） */
+/*
+ * 暂停：从略大淡入、落到位；开始播：轻轻放大、很快淡出（--dur-1，进场的 2/3 左右，点了就让开，不挂在画面上）。
+ * 这次离场就是点按的反馈，用 ease-out 不用 ease-in：点下去的下一帧就开始散开；ease-in 前半段几乎不动，
+ * 视频已经在播了、播放键还满满地挂着五六帧，像没点到。
+ * 离场两条写在 .big-play:active 后面、同样的优先级：触屏点完以后 :active 还会挂一会儿，
+ * 写在前面会被它的 transition（只有 transform）盖掉，透明度一帧就没了。
+ */
 .bp-enter-active { transition: opacity var(--dur-2) var(--ease-out), transform var(--dur-3) var(--ease-out); }
-.bp-leave-active { transition: opacity var(--dur-2) var(--ease-in), transform var(--dur-2) var(--ease-in); }
 .bp-enter-from { opacity: 0; transform: scale(1.3); }
-.bp-leave-to { opacity: 0; transform: scale(1.35); }
+.big-play.bp-leave-active { transition: opacity var(--dur-1) var(--ease-out), transform var(--dur-1) var(--ease-out); }
+.big-play.bp-leave-to { opacity: 0; transform: scale(1.2); }
 
 /* 全屏时的倍速 / 循环小标签：顶部居中，回弹着落下，很快收起 */
 .chip-tip {

@@ -51,8 +51,8 @@ import FollowBtn from '@/components/creator/FollowBtn.vue'
 import ActBurst from '@/components/video/ActBurst.vue'
 import RollNum from '@/components/video/RollNum.vue'
 import { rememberVideo } from '@/components/video/preview'
-import { haptic } from '@/utils/motion'
-import { cameBack, pop, vRise } from '@/components/home/motion'
+import { haptic, reducedMotion } from '@/utils/motion'
+import { cameBack, pop, vRise, dur, ease } from '@/components/home/motion'
 
 /*
  * 帖子详情：作者栏（关注）→ 标题、关联视频（紧跟标题）、正文、配图、话题、发布时间 →「下一篇」，底部是阅读数 / 分享 / 收藏。
@@ -106,24 +106,77 @@ let loadSeq = 0
 let currentId = route.params.id
 let lastTop = 0
 
+/*
+ * 「下一篇」：旧的一篇先自己淡出（往上让一点），淡完了直接撤掉，不和骨架 / 新内容交叉淡出
+ * （滚动位置要回到顶部，旧内容会错位叠在新内容下面，三层字叠在一起看不清）。
+ * instant：这一次换内容不走 m-skel 的过渡（和社区换标签一样，旧内容直接撤掉）。
+ */
+const instant = ref(false)
+const article = ref(null)
+function swapNow() {
+  instant.value = true
+  nextTick(() => { instant.value = false })
+}
+let fadingEl = null
+let fading = null
+function fadeOld() {
+  const el = article.value
+  if (!post.value || !el || reducedMotion()) return null
+  // 已经在淡出（淡出途中又换了一篇）：接着等它，不从头再淡一遍（会先闪回不透明）
+  if (fadingEl === el) return fading
+  el.style.pointerEvents = 'none'
+  fadingEl = el
+  // ease-out：点下去的下一帧就开始变淡；淡到 3/4 时已经几乎看不见（不到 .05），这时就可以换，不空等最后那一截
+  const d = dur('--dur-1')
+  const a = el.animate(
+    [{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'translate3d(0, -12px, 0)' }],
+    { duration: d, easing: ease('--ease-out'), fill: 'forwards' }
+  )
+  fading = new Promise(resolve => {
+    a.finished.then(resolve, resolve)
+    setTimeout(resolve, d * 0.75)
+  })
+  return fading
+}
+
 async function load(id) {
   const token = ++loadSeq
   currentId = id
-  // 换一篇：先撤掉上一篇（加载期间显示骨架），不会把旧内容当成新帖子显示
-  post.value = null
   failed.value = null
-  following.value = false
-  ratios.value = {}
   viewer.value = null
   lastTop = 0
-  if (scroller.value) scroller.value.scrollTop = 0
-  try {
-    const p = await getPost(id)
+  // 请求马上发出，旧的一篇（有的话）同时淡出；作者栏在这期间不动，局域网里一般淡完就有结果了，不会闪一下骨架
+  let res = null
+  const req = getPost(id).then(p => { res = { p } }, e => { res = { e } })
+  const out = fadeOld()
+  if (out) {
+    await out
     if (token !== loadSeq) return
+  }
+  if (!res) {
+    // 还没回来：撤掉上一篇（已经看不见了）、先放骨架，不会把旧内容当成新帖子显示
+    if (post.value) swapNow()
+    post.value = null
+    following.value = false
+    ratios.value = {}
+    if (scroller.value) scroller.value.scrollTop = 0
+    await req
+    if (token !== loadSeq) return
+  } else if (post.value) {
+    // 淡出期间就回来了：旧的一篇直接换成新的（同一拍里），新的一篇从顶上浮现
+    swapNow()
+    ratios.value = {}
+    if (scroller.value) scroller.value.scrollTop = 0
+  }
+  try {
+    if (res.e) throw res.e
+    const p = res.p
     following.value = !!p.following
     // 这次会话里第一次打开才算一次阅读：先在本地 +1，接口返回新的阅读数后以它为准
     const first = !readSet().has(String(p.id))
     postStore.patch(p.id, { faved: !!p.faved, fav: p.fav ?? 0, read: (p.read ?? 0) + (first ? 1 : 0) })
+    // 减少动态效果：骨架直接换成正文（离场的骨架垫在下面也会透出一两帧）
+    if (reducedMotion()) swapNow()
     post.value = p
     if (first) {
       setRead(p.id, true)
@@ -134,6 +187,8 @@ async function load(id) {
     }
   } catch (e) {
     if (token !== loadSeq) return
+    if (post.value) swapNow()
+    post.value = null
     const missing = e?.status >= 400 && e?.status < 500 && e?.status !== 401
     failed.value = missing
       ? { message: (e.status === 400 && e.message) || '帖子不存在或已下架', retry: false }
@@ -180,6 +235,20 @@ const imageEl = i => imgBtns[i] || null
 const failText = e => (e?.code === 'demo' ? e.message : '操作失败，请稍后重试')
 
 let followBusy = false
+/* 从确认面板取消关注：面板收起约 200ms，提示等它让开再出来（按钮照常立刻变） */
+let toastAt = 0
+function unfollowFromSheet() {
+  toastAt = performance.now() + 180
+  setFollow(false)
+}
+/* 提示：刚从确认面板点的，等面板收起再出来 */
+function say(msg) {
+  const wait = toastAt - performance.now()
+  toastAt = 0
+  if (wait > 0) setTimeout(() => toast(msg), wait)
+  else toast(msg)
+}
+
 async function setFollow(next) {
   const a = author.value
   if (!a || a.id == null || followBusy) return
@@ -189,10 +258,10 @@ async function setFollow(next) {
     const res = await toggleFollow(a.id, { on: next })
     const on = typeof res?.active === 'boolean' ? res.active : next
     if (author.value?.id === a.id) following.value = on
-    toast(on ? '已关注' : '已取消关注')
+    say(on ? '已关注' : '已取消关注')
   } catch (e) {
     if (author.value?.id === a.id) following.value = !next
-    toast(failText(e))
+    say(failText(e))
   } finally {
     followBusy = false
   }
@@ -258,6 +327,8 @@ const snapKey = id => `${historyPos}:${id}`
 
 function saveSnapshot() {
   if (!post.value || failed.value) return
+  // 「下一篇」淡出途中就离开了：屏幕上还是上一篇，不能存到新的 id 下面
+  if (String(post.value.id) !== String(currentId)) return
   const key = snapKey(currentId)
   snapshots.delete(key)
   snapshots.set(key, {
@@ -306,7 +377,8 @@ onBeforeRouteUpdate(to => {
     <header class="pd-hd">
       <button type="button" class="pd-back hit-44" aria-label="返回" @click="back"><Icon name="chevL" /></button>
       <template v-if="post">
-        <component :is="authorLink ? RouterLink : 'div'" v-rise.self="{ y: 0 }" class="pd-author" v-bind="authorLink || {}">
+        <!-- 按帖子换 key：「下一篇」换了作者时新的作者栏淡入，不是原地跳字 -->
+        <component :is="authorLink ? RouterLink : 'div'" :key="`a${post.id}`" v-rise.self="{ y: 0 }" class="pd-author" v-bind="authorLink || {}">
           <Cover class="pd-av" v-bind="author?.avatar || {}" eager />
           <div class="pd-who">
             <div class="pd-nm">
@@ -322,6 +394,7 @@ onBeforeRouteUpdate(to => {
         </component>
         <FollowBtn
           v-if="author && author.id != null"
+          :key="`f${post.id}`"
           v-rise.self="{ y: 0 }"
           class="pd-follow"
           :on="following"
@@ -340,15 +413,15 @@ onBeforeRouteUpdate(to => {
     </header>
 
     <div ref="scroller" class="scroll" :aria-busy="!post && !failed" @scroll.passive="onScroll">
-      <!-- 骨架原地淡出，正文浮现；「下一篇」时旧的一篇淡出、骨架接上 -->
+      <!-- 骨架原地淡出，正文浮现；「下一篇」时旧的一篇自己淡出后直接撤掉（instant），新的一篇 / 骨架在干净的底上出来 -->
       <div class="m-swap">
-        <Transition name="m-skel">
+        <Transition name="m-skel" :css="!instant">
           <div v-if="failed" class="empty">
             {{ failed.message }}
             <button v-if="failed.retry" type="button" class="retry" @click="load(route.params.id)">重试</button>
           </div>
 
-          <div v-else-if="post" :key="`post${post.id}`" v-rise.self>
+          <div v-else-if="post" ref="article" :key="`post${post.id}`" v-rise.self>
             <article class="pd-body">
               <h1 class="pd-title">{{ post.title }}</h1>
 
@@ -434,7 +507,8 @@ onBeforeRouteUpdate(to => {
       </div>
     </div>
 
-    <footer v-if="post" class="pd-bar">
+    <!-- 按帖子 id 重新挂上：「下一篇」时底栏一直在，收藏数直接换成新帖子的，不会像点了收藏那样翻过去、胶囊也不会渐变填满 -->
+    <footer v-if="post" :key="`bar${post.id}`" class="pd-bar">
       <span class="pd-read">阅读 {{ formatCount(stats.read) }}</span>
       <button type="button" class="pd-share m-press-sm" aria-label="分享" @click="share({ title: post.title })"><Icon name="shareUp" /></button>
       <button type="button" class="pd-fav m-press" :class="{ on: stats.faved }" :aria-pressed="stats.faved" @click="onFav">
@@ -444,7 +518,7 @@ onBeforeRouteUpdate(to => {
     </footer>
 
     <ImageViewer v-if="viewer" :images="viewer.images" :index="viewer.index" :origin="imageEl" @close="viewer = null" />
-    <UnfollowSheet v-model:open="unfollowAsk" :name="author?.name || ''" @confirm="setFollow(false)" />
+    <UnfollowSheet v-model:open="unfollowAsk" :name="author?.name || ''" @confirm="unfollowFromSheet" />
   </div>
 </template>
 

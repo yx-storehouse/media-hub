@@ -18,6 +18,12 @@ const mq = typeof window !== 'undefined' && window.matchMedia
 /** 系统是否开了「减少动态效果」（实时读取，用户中途改设置也能跟上） */
 export const reducedMotion = () => !!mq?.matches
 
+/**
+ * 程序里的平滑滚动：el.scrollTo({ top, behavior: scrollBehavior() })。减少动态效果时直接跳到位
+ * （scrollTo 里显式写 'smooth' 会压过 CSS 的 scroll-behavior: auto）
+ */
+export const scrollBehavior = () => (reducedMotion() ? 'auto' : 'smooth')
+
 /** 轻微震动反馈；不支持、或开了减少动态效果时什么都不做 */
 export function haptic(ms = 8) {
   if (reducedMotion()) return

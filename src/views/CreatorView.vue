@@ -26,7 +26,7 @@ import MediaGrid from '@/components/creator/MediaGrid.vue'
 import UnfollowSheet from '@/components/creator/UnfollowSheet.vue'
 import { createFeed, PAGE } from '@/components/creator/feed'
 import { haptic } from '@/utils/motion'
-import { cameBack, useSlider, cover, vRise, fadeIn } from '@/components/home/motion'
+import { cameBack, useSlider, cover, vRise, fadeIn, scrollBehavior } from '@/components/home/motion'
 
 /*
  * 创作者主页（#/creator/:id?tab=videos|posts|media）：头图 + 头像 + 关注 + 数据行，下面是吸顶的「视频 / 帖子 / 媒体」标签。
@@ -202,7 +202,7 @@ function selectTab(key) {
   const stick = stickTop()
   if (key === tab.value) {
     // 再点一次当前标签：回到列表开头
-    if (el.scrollTop > stick) el.scrollTo({ top: stick, behavior: 'smooth' })
+    if (el.scrollTop > stick) el.scrollTo({ top: stick, behavior: scrollBehavior() })
     return
   }
   savedTop[tab.value] = el.scrollTop
@@ -227,8 +227,15 @@ function onTabKey(e) {
   nextTick(() => document.getElementById(`cr-tab-${next}`)?.focus())
 }
 
+/*
+ * 换排序：旧列表在骨架出来的那一帧直接撤掉（sortInstant 让这一次不走 m-skel 的淡出）。
+ * 不然旧列表垫在骨架下面慢慢淡、骨架缝里透出旧缩略图，新列表浮上来时三层叠在一起。骨架 → 新列表照常交叉淡入。
+ */
+const sortInstant = ref(false)
 function changeSort(i) {
   if (sort.value === i) return
+  sortInstant.value = true
+  nextTick(() => { sortInstant.value = false })
   sort.value = i
   sortKey.value++
   videos.reset()
@@ -274,6 +281,20 @@ async function followAfterLogin() {
   else setFollow(true)
 }
 
+/* 从确认面板取消关注：面板收起约 200ms，提示等它让开再出来（按钮和粉丝数照常立刻变） */
+let toastAt = 0
+function unfollowFromSheet() {
+  toastAt = performance.now() + 180
+  setFollow(false)
+}
+/* 提示：刚从确认面板点的，等面板收起再出来 */
+function say(msg) {
+  const wait = toastAt - performance.now()
+  toastAt = 0
+  if (wait > 0) setTimeout(() => toast(msg), wait)
+  else toast(msg)
+}
+
 async function setFollow(next) {
   const c = creator.value
   if (!c || followBusy) return
@@ -289,13 +310,13 @@ async function setFollow(next) {
     following.value = on
     if (typeof res?.followers === 'number') followers.value = res.followers
     else if (on !== next) followers.value = before.followers
-    toast(on ? '已关注' : '已取消关注')
+    say(on ? '已关注' : '已取消关注')
   } catch (e) {
     if (creator.value?.id === c.id) {
       following.value = before.following
       followers.value = before.followers
     }
-    toast((e?.status === 400 || e?.code === 'demo') && e.message ? e.message : '操作失败，请稍后重试')
+    say((e?.status === 400 || e?.code === 'demo') && e.message ? e.message : '操作失败，请稍后重试')
   } finally {
     followBusy = false
   }
@@ -388,7 +409,8 @@ onBeforeRouteUpdate(to => {
 <template>
   <div class="page creator">
     <!-- 顶栏：返回键压在头图上；滚过头图后变成实底并显示名字 -->
-    <div class="cr-top" :class="{ solid: collapsed || failed }">
+    <!-- data-iv-cover：变成实底时，看大图缩回被它盖住一截的格子只缩回露出来的那块（标签栏同理） -->
+    <div class="cr-top" :class="{ solid: collapsed || failed }" :data-iv-cover="collapsed || failed ? '' : null">
       <button type="button" class="cr-back hit-44 m-press-sm" aria-label="返回" @click="back"><Icon name="chevL" /></button>
       <span class="cr-tt" :aria-hidden="!collapsed">{{ creator?.name }}</span>
     </div>
@@ -403,7 +425,7 @@ onBeforeRouteUpdate(to => {
       <template v-else>
         <CreatorHeader ref="header" :creator="creator" :following="following" :followers="followers" :calm="restored" @follow="onFollow" />
 
-        <div ref="tabRow" class="cr-tabs" role="tablist" aria-label="主页内容">
+        <div ref="tabRow" class="cr-tabs" role="tablist" aria-label="主页内容" data-iv-cover>
           <span ref="tabBar" class="m-bar cr-bar" aria-hidden="true" />
           <button
             v-for="t in TABS"
@@ -446,9 +468,9 @@ onBeforeRouteUpdate(to => {
               <span class="lb">{{ s }}</span>
             </button>
           </div>
-          <!-- 骨架 / 换排序前的旧列表原地淡出，新列表错峰浮现 -->
+          <!-- 骨架原地淡出，新列表错峰浮现；换排序时旧列表直接撤掉（sortInstant），骨架接上 -->
           <div class="m-swap">
-            <Transition name="m-skel">
+            <Transition name="m-skel" :css="!sortInstant">
               <div v-if="videos.total === null && !videos.error" class="grid g11 cr-sk" :class="{ pt: !creator }" aria-hidden="true">
                 <div v-for="i in 6" :key="i" class="vc"><div class="cv sk" /><div class="sk sk-tt" /></div>
               </div>
@@ -535,7 +557,7 @@ onBeforeRouteUpdate(to => {
       <div class="pad-b" />
     </div>
 
-    <UnfollowSheet v-model:open="unfollowAsk" :name="creator?.name || ''" @confirm="setFollow(false)" />
+    <UnfollowSheet v-model:open="unfollowAsk" :name="creator?.name || ''" @confirm="unfollowFromSheet" />
     <!-- 看大图：从点的那一格放大出来，关掉时缩回当前这张对应的格子 -->
     <ImageViewer v-if="viewer" :images="viewerImages" :index="viewer.index" :origin="imageEl" @close="viewer = null" />
   </div>

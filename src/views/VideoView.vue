@@ -17,7 +17,7 @@ import { useBack } from '@/composables/useBack'
 import { toast } from '@/composables/useToast'
 import { share } from '@/composables/useShare'
 import { formatCount, formatDate } from '@/utils/format'
-import { cssDuration, cssEasing, haptic, reducedMotion } from '@/utils/motion'
+import { cssDuration, cssEasing, haptic, reducedMotion, scrollBehavior } from '@/utils/motion'
 import Icon from '@/components/Icon.vue'
 import Cover from '@/components/Cover.vue'
 import VideoPlayer from '@/components/video/VideoPlayer.vue'
@@ -35,6 +35,8 @@ import { claimHero, claimRelatedHero, armHeroBack } from '@/components/motion/he
  * - 播完的「下一个」：地址里带了列表（专题「播放全部」，见 playlist.js）就是列表的下一条，否则是相似推荐的第一条；
  *   跳过去替换当前记录，连着看几个以后，返回键仍然回到进来之前的页面。
  * - 在本页登录 / 退出后重新取一次自己的赞 / 收藏 / 关注状态；没登录时点的操作，登录后补做。
+ * - 本页里换视频（相似推荐、下一个、自动连播）：新视频的详情回来之前旧内容先留着（播放器立刻停、旧内容的操作不再生效），
+ *   回来时一次换成新内容，不会先闪一下骨架屏、底部操作栏也不会消失又出现（见 load 的 keepMs）。
  */
 defineOptions({ name: 'VideoView' })
 
@@ -93,15 +95,19 @@ const nextItem = computed(() => {
 
 /* ---------- 加载 ---------- */
 
-let loadSeq = 0
-async function load(id, query = route.query) {
-  const token = ++loadSeq
-  failed.value = null
+/*
+ * 本页里换视频、新内容还没回来的这一会儿：旧内容还显示着，但播放器已经停了，赞 / 收藏 / 关注 / 分享 / 换一批 / 标签
+ * 都不生效（旧播放器不接手指，返回键除外）。新内容回来、等够 keepMs、或者飞过来的缩略图落地时结束。
+ */
+const switching = ref(false)
+let keepTimer = 0
+
+/** 换成 id 这个视频：收起展开、清掉列表的下一条；换的是另一个视频时撤掉旧内容（播放器停下、操作栏撤掉），加载期间显示占位 */
+function resetFor(id) {
   tagsOpen.value = false
   descOpen.value = false
   batch.value = 0
   listNext.value = null
-  // 换成另一个视频：先撤掉旧的（播放器立即停下、操作栏不再作用于旧视频），加载期间显示占位
   if (String(video.value?.id) !== String(id)) {
     video.value = null
     related.value = []
@@ -109,10 +115,38 @@ async function load(id, query = route.query) {
     following.value = false
     preview.value = peekVideo(id)
   }
+}
+/** 留着旧内容等新视频的这一段结束：撤掉旧的、换成 id 的占位（新内容到了时紧接着就填上，同一次渲染） */
+function endSwitch(id) {
+  clearTimeout(keepTimer)
+  if (!switching.value) return
+  switching.value = false
+  resetFor(id)
+}
+
+let loadSeq = 0
+/**
+ * keepMs：本页里换视频时旧内容最多留多久（0 = 不留，立刻显示占位）。本地接口一般几十毫秒就回来，
+ * 留着旧内容就不会在中间闪一下骨架屏；真的慢，到点照常显示占位和骨架。
+ */
+async function load(id, query = route.query, { keepMs = 0 } = {}) {
+  const token = ++loadSeq
+  failed.value = null
+  clearTimeout(keepTimer)
+  if (keepMs > 0 && video.value && String(video.value.id) !== String(id)) {
+    switching.value = true
+    playerRef.value?.pause?.()
+    keepTimer = setTimeout(() => { if (token === loadSeq) endSwitch(id) }, keepMs)
+  } else {
+    switching.value = false
+    resetFor(id)
+  }
   try {
     // 相似推荐取不到不影响看视频
     const [v, list] = await Promise.all([getVideo(id), getRelatedVideos(id, { batch: 0 }).catch(() => [])])
     if (token !== loadSeq) return
+    // 留着的旧内容在这一次渲染里直接换成新的：中间没有骨架屏那一帧
+    endSwitch(id)
     startSec.value = pickResume(v)
     video.value = v
     related.value = list
@@ -124,6 +158,8 @@ async function load(id, query = route.query) {
     measure()
   } catch (e) {
     if (token !== loadSeq) return
+    // 失败时不能留着旧视频（旧播放器、操作栏还在）：撤掉，显示失败
+    endSwitch(id)
     const missing = e?.status >= 400 && e?.status < 500 && e?.status !== 401
     failed.value = missing
       ? { message: '视频不存在或已下架', retry: false }
@@ -154,7 +190,7 @@ async function loadListNext(list, id) {
 
 async function shuffle() {
   const id = video.value?.id
-  if (id == null) return
+  if (id == null || switching.value) return
   const b = ++batch.value
   spinning.value = true
   try {
@@ -176,9 +212,14 @@ onBeforeRouteUpdate(to => {
   const hop = claimRelatedHero(to.params.id)
   if (hop) {
     heroHold.value = true
-    hop.land(() => { heroHold.value = false })
+    hop.land(() => {
+      // 落地时新内容还没回来：撤掉旧的、露出新视频的占位，不会把旧视频的播放器露出来（已经又换了别的视频就不管）
+      if (String(route.params.id) === String(to.params.id)) endSwitch(to.params.id)
+      heroHold.value = false
+    })
   }
-  load(to.params.id, to.query)
+  // 旧内容留着等新的：缩略图在飞就留到落地（400ms 是兜底），没飞（下一个、自动连播）留 250ms，和缓冲转圈同一个规矩
+  load(to.params.id, to.query, { keepMs: hop ? 400 : 250 })
 })
 
 /* ---------- 共享元素过渡：从列表卡片飞进来、返回时缩回去（components/motion/hero.js） ---------- */
@@ -202,7 +243,8 @@ function heroSource() {
   return el ? { el, cover: preview.value?.cover, dim: preview.value?.cover ? 0.35 : 0 } : null
 }
 onBeforeRouteLeave(to => {
-  armHeroBack(router, to, heroOrigin, heroSource, video.value?.id ?? route.params.id)
+  // 正在换视频（旧内容还留着）：按地址里的新视频算，和以前换视频时一样不缩回卡片
+  armHeroBack(router, to, heroOrigin, heroSource, switching.value ? route.params.id : (video.value?.id ?? route.params.id))
 })
 
 /* ---------- 播完：下一个（替换当前记录） ---------- */
@@ -221,7 +263,7 @@ function scrollToRelated() {
   if (!s || !r) return
   if (!related.value.length) toast('暂时没有相似推荐')
   const top = r.getBoundingClientRect().top - s.getBoundingClientRect().top + s.scrollTop
-  s.scrollTo({ top, behavior: 'smooth' })
+  s.scrollTo({ top, behavior: scrollBehavior() })
 }
 
 /* ---------- 观看记录 / 续播进度（服务端只记登录用户；本机都记） ---------- */
@@ -290,7 +332,7 @@ function patch(kind, on, into) {
 
 async function interact(kind) {
   const v = video.value
-  if (!v || pending.size) return
+  if (!v || pending.size || switching.value) return
   // 未登录：弹登录框，登录后补做这一下
   if (!auth.requireLogin({ then: () => afterLogin(kind, v.id) })) return
 
@@ -351,10 +393,12 @@ function playFx(id, kind) {
   fx[id] = { kind, key: (fx[id]?.key || 0) + 1 }
 }
 function tapAct(kind) {
+  if (switching.value) return
   tappedAt[kind] = performance.now()
   interact(kind)
 }
 function tapShare() {
+  if (switching.value) return
   playFx('share', 'tap')
   share({ title: video.value?.title })
 }
@@ -381,7 +425,7 @@ const followPop = ref(false)
 let followBusy = false
 async function onFollow() {
   const c = creator.value
-  if (!c || followBusy) return
+  if (!c || followBusy || switching.value) return
   if (!auth.requireLogin({ then: () => afterLoginFollow(c.id) })) return
   const next = !following.value
   following.value = next
@@ -410,7 +454,7 @@ async function afterLoginFollow(id) {
   else onFollow()
 }
 
-const searchTag = t => router.push({ path: '/search', query: { q: t } })
+const searchTag = t => { if (!switching.value) router.push({ path: '/search', query: { q: t } }) }
 
 /* ---------- 「展开」只在放不下时出现（标签一行、简介三行） ---------- */
 
@@ -431,7 +475,10 @@ onMounted(() => {
     if (scroller.value) ro.observe(scroller.value)
   }
 })
-onBeforeUnmount(() => ro?.disconnect())
+onBeforeUnmount(() => {
+  ro?.disconnect()
+  clearTimeout(keepTimer)
+})
 
 /*
  * 展开 / 收起（标签、简介）：先量好切换前后的高度，再在这一小块上做一次高度过渡，
@@ -467,7 +514,7 @@ const noop = () => {}
 </script>
 
 <template>
-  <div ref="root" class="page video" :class="{ 'hero-hold': heroHold }" @touchstart.passive="noop">
+  <div ref="root" class="page video" :class="{ 'hero-hold': heroHold, switching }" @touchstart.passive="noop">
     <VideoPlayer
       v-if="video"
       ref="playerRef"
@@ -598,7 +645,8 @@ const noop = () => {}
       </div>
     </div>
 
-    <nav v-if="video" class="acts" aria-label="视频操作">
+    <!-- 按视频 id 重新挂上：换视频时数字直接换成新视频的，不会像点了赞那样翻过去 -->
+    <nav v-if="video" :key="video.id" class="acts" aria-label="视频操作">
       <button type="button" :class="{ on: video.liked }" :aria-pressed="!!video.liked" :aria-label="`点赞 ${video.likeCount ?? 0}`" @click="tapAct('like')">
         <span class="ico">
           <Icon :key="fx.like?.key || 0" name="thumbUp" :class="fxClass('like')" @animationend="endFx('like', $event)" />
@@ -629,22 +677,27 @@ const noop = () => {}
 .page.video { background: var(--bg); }
 /* 封面正从列表飞过来：播放器（或加载中的占位）先藏着，落地时由浮层原样接上 */
 .video.hero-hold > .player, .video.hero-hold > .player-ph { opacity: 0; }
+/* 换视频、旧内容还留着的那一会儿：旧播放器（重播、下一个、控制栏）和底部操作栏不接手指，返回键照常能点 */
+.video.switching > .acts, .video.switching > .player, .video.switching > .player :deep(*) { pointer-events: none; }
+.video.switching > .player.ui-on :deep(.back) { pointer-events: auto; }
 
 .player-ph { position: relative; flex: none; width: 100%; aspect-ratio: 16 / 9; overflow: hidden; background: #000; }
 .ph-cv { position: absolute; inset: 0; filter: var(--media); }
 .ph-cv::after { content: ''; position: absolute; inset: 0; background: rgba(0, 0, 0, .35); }
+/* 和播放器的缓冲转圈（.spinner）一样大、一样等 0.25 秒还在加载才淡入：接口很快回来时不闪，换成播放器时大小不跳 */
 .ph-spin {
   position: absolute;
   left: 50%;
   top: 50%;
-  width: 30px;
-  height: 30px;
-  margin: -15px 0 0 -15px;
+  width: 34px;
+  height: 34px;
+  margin: -17px 0 0 -17px;
   border: 3px solid rgba(255, 255, 255, .25);
   border-top-color: #fff;
   border-radius: 50%;
-  animation: rot .8s linear infinite;
+  animation: rot .8s linear infinite, ph-spin-in var(--dur-2) var(--ease-out) .25s backwards;
 }
+@keyframes ph-spin-in { from { opacity: 0; } }
 .ph-back { position: absolute; left: 6px; top: 6px; display: grid; place-items: center; width: 40px; height: 40px; color: #fff; }
 .ph-back svg { width: 24px; height: 24px; stroke-width: 2.6; filter: drop-shadow(0 1px 3px rgba(0, 0, 0, .5)); }
 

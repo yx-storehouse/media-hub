@@ -655,23 +655,33 @@ export function heroTap(e, coverEl, video, router, to) {
   requestAnimationFrame(() => launch(p, coverEl, reuse))
 }
 
-/* 播放器停稳后的位置：页面刚挂上就读会逼浏览器当场排版，所以等这一帧画完、由 IntersectionObserver 带回来 */
+/*
+ * 播放器停稳后的位置：页面刚挂上就读会逼浏览器当场排版，所以等这一帧画完、由 IntersectionObserver 带回来。
+ * 页面正在 pg-hero 入场（往上浮几像素）：播放器和所在页面在同一帧量，两者之差就是去掉上浮位移后的位置
+ * （页面本身 inset: 0 贴着 #app）。不能一个用观察那一帧的、一个回调里再读：CPU 忙时两者差一两帧，
+ * 上浮已经走了一截，算出来的终点偏下一两像素，浮层会多改飞一次、落地时留一道细边。
+ */
 function whenPlaced(playerEl, cb) {
-  const done = r => {
-    // 页面正在 pg-hero 入场（往上浮几像素）：去掉页面此刻的位移
-    const app = appBox()
-    const page = playerEl.closest('.page')
-    const t = page ? getComputedStyle(page).transform : 'none'
-    const m = t && t !== 'none' && typeof DOMMatrixReadOnly !== 'undefined' ? new DOMMatrixReadOnly(t) : null
-    cb({ x: r.left - (m ? m.m41 : 0) - app.x, y: r.top - (m ? m.m42 : 0) - app.y, w: r.width, h: r.height, r: 0, c: [0, 0, 0, 0] })
+  const page = playerEl.closest('.page')
+  const done = (r, pr) => {
+    const o = pr ? { x: pr.left, y: pr.top } : appBox()
+    cb({ x: r.left - o.x, y: r.top - o.y, w: r.width, h: r.height, r: 0, c: [0, 0, 0, 0] })
   }
   if (typeof IntersectionObserver === 'function') {
     const io = new IntersectionObserver(entries => {
       io.disconnect()
-      done(entries[entries.length - 1].boundingClientRect)
+      let r = null
+      let pr = null
+      for (const e of entries) {
+        if (e.target === playerEl) r = e.boundingClientRect
+        else if (e.target === page) pr = e.boundingClientRect
+      }
+      if (r) done(r, pr)
+      else done(playerEl.getBoundingClientRect(), page && page.getBoundingClientRect())
     })
     io.observe(playerEl)
-  } else requestAnimationFrame(() => done(playerEl.getBoundingClientRect()))
+    if (page) io.observe(page)
+  } else requestAnimationFrame(() => done(playerEl.getBoundingClientRect(), page && page.getBoundingClientRect()))
 }
 
 /**

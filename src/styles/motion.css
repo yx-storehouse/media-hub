@@ -114,6 +114,8 @@
  *  - 推入（pg-fwd）：离开的页面在下面，露出来的那一截由新页向左伸出的一块透明挡板（::before）接住。
  *    不给旧页加 pointer-events：它会继承，整棵子树的样式都要重算，社区这种长列表在低端机上多出一截卡顿；
  *  - Tab 之间：新页（z-index 2）整页盖在旧页上面，点到的本来就是新页，同样不给旧页加。
+ *    旧页自成一个层叠上下文（isolation）：它里面带 z-index 的浮层（短视频的顶栏、右侧按钮、标题、进度条）
+ *    只在旧页里面比高低，不会画到新页上面、也接不到点在新页上的手指。
  */
 .pg-fwd-enter-active, .pg-fwd-leave-active {
   transition: transform var(--dur-push) var(--ease-fluid), opacity var(--dur-push) var(--ease-fluid);
@@ -157,6 +159,12 @@
  * （旧页如果也设了层级，新页先收尾、旧页的计时器晚一毫秒才到的那一帧，旧页会闪到上面来。）
  */
 .page.pg-tab-enter-active { z-index: 2; }
+/*
+ * 旧页单独成一个层叠上下文，但不给层级（上面说的那一帧闪烁）：里面 z-index 4–7 的浮层
+ * （短视频 .sv-top / .sv-refresh、ShortItem 的 .sv-ctl / .sv-meta / .sv-side / .sv-prog）
+ * 不再和新页的 z-index 2 比，盖不到新页上，转场途中点在新页上的手指也不会被它们接走。
+ */
+.page.pg-tab-leave-active { isolation: isolate; }
 
 /*
  * ---- 共享元素过渡（hero，契约）----
@@ -166,7 +174,8 @@
  *  pg-hero       新页（详情）盖在上面（--z-page-top）快速淡入、轻轻上浮一点；旧页原地不动、完全可见，
  *                陪着新页的进场一直挂着（同样长），不会提前消失露出黑底
  *  pg-hero-back  离开的页面（详情）盖在上面淡出；回来的页面立刻出现在下面，不做位移
- *  底部导航      pg-hero 离开时往下滑走并淡出；pg-hero-back 回来时从下面弹上来（snappy 弹簧）
+ *  底部导航      pg-hero 离开时整条压在淡入的详情页上面往下滑走（不和详情页底部的操作栏透叠）；
+ *                pg-hero-back 离开时往下滑走并淡出；两种回来时都从下面弹上来（snappy 弹簧）
  */
 .page.pg-hero-enter-active {
   z-index: var(--z-page-top);
@@ -185,8 +194,17 @@
 .page.pg-hero-back-leave-to { opacity: 0; }
 .page.pg-hero-back-enter-active { transition: none; }
 
-.tabbar.pg-hero-leave-active, .tabbar.pg-hero-back-leave-active {
+.tabbar.pg-hero-back-leave-active {
   transition: transform var(--dur-3) var(--ease-in), opacity var(--dur-2) var(--ease-in);
+}
+/*
+ * 进详情：导航栏整条不透明地压在淡入的详情页上面往下滑走（减速，200ms 内让开），不和详情页底部的操作栏透叠；
+ * 飞行中的封面（--z-hero）照样在它上面。离开中不接手指：点到的是下面的详情页（赞 / 收藏）
+ */
+.tabbar.pg-hero-leave-active {
+  z-index: calc(var(--z-page-top) + 1);
+  pointer-events: none;
+  transition: transform var(--dur-2) var(--ease-out), opacity var(--dur-2) var(--ease-in);
 }
 .tabbar.pg-hero-leave-to, .tabbar.pg-hero-back-leave-to { transform: translate3d(0, 100%, 0); opacity: 0; }
 .tabbar.pg-hero-enter-active, .tabbar.pg-hero-back-enter-active {

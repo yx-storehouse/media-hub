@@ -5,7 +5,7 @@ import { useAuthStore } from '@/stores/auth'
 import { toast } from '@/composables/useToast'
 import { useBackDismiss } from '@/composables/useBackDismiss'
 import { useSheetDrag } from '@/components/motion/sheetDrag'
-import { shake, haptic } from '@/utils/motion'
+import { shake, haptic, spring, reducedMotion } from '@/utils/motion'
 import Icon from '@/components/Icon.vue'
 
 /*
@@ -13,6 +13,7 @@ import Icon from '@/components/Icon.vue'
  * 未登录时点「点赞 / 收藏 / 我的」都会打开它（见 stores/auth.js 的 requireLogin，登录后补做那次操作）。
  * 返回键 / 返回手势只关登录框；换页面时自动关掉，不会留到下一个页面上。
  * 没填、登录失败时表单左右摇一下（像 iOS 输错密码），错误信息从上面落下来。
+ * 再点登录时上一条错误先留着（变淡），等新的结果出来再换：弹层高度不会在请求中先缩回去、出错时再跳上来。
  */
 const auth = useAuthStore()
 const open = computed(() => auth.loginOpen)
@@ -31,11 +32,26 @@ const sheetEl = useTemplateRef('sheetEl')
 const maskEl = useTemplateRef('maskEl')
 const formEl = useTemplateRef('formEl')
 
-/* 出错：显示信息，表单摇一下，轻轻震一下（震动只有支持的安卓设备有） */
+/*
+ * 出错：显示信息，表单摇一下，轻轻震一下（震动只有支持的安卓设备有）。
+ * 第一次出错时错误信息插进来，贴着底边的弹层高出一行（顶边往上跳 28px）：先记下顶边，插进去以后
+ * 从原来的位置用 smooth 弹簧升上去，和摇一下同时进行。正在拖动 / 升起收起中（有行内 transform 或别的动画）不做，
+ * 减少动态效果时直接出现。
+ */
 function fail(msg) {
+  const el = sheetEl.value
+  const top = !error.value && el && !reducedMotion() && !el.style.transform && !el.getAnimations?.().length
+    ? el.getBoundingClientRect().top
+    : null
   error.value = msg
   shake(formEl.value)
   haptic(12)
+  if (top === null) return
+  nextTick(() => {
+    if (!el.isConnected || el.style.transform) return
+    const dy = top - el.getBoundingClientRect().top
+    if (Math.abs(dy) > 0.5) el.animate([{ transform: `translate3d(0, ${dy}px, 0)` }, { transform: 'none' }], spring('smooth'))
+  })
 }
 
 /*
@@ -73,7 +89,6 @@ async function submit() {
   if (!name) { fail('请输入账号'); return }
   if (!password.value) { fail('请输入密码'); return }
   busy.value = true
-  error.value = ''
   try {
     const user = await auth.login(name, password.value)
     toast(`欢迎回来，${user.name}`)
@@ -82,7 +97,8 @@ async function submit() {
   } catch (e) {
     fail(e.message || '登录失败')
   } finally {
-    busy.value = false
+    // 登录成功时弹层已经在收起：按钮保持「登录中…」一起滑走，不在半路变回「登录」（下次打开时重置）
+    if (auth.loginOpen) busy.value = false
   }
 }
 
@@ -113,7 +129,7 @@ const drag = useSheetDrag(sheetEl, maskEl, close)
         <div class="grab" />
         <h4 id="login-title">登录</h4>
 
-        <form ref="formEl" class="form" @submit.prevent="submit">
+        <form ref="formEl" class="form" :class="{ busy }" @submit.prevent="submit">
           <label class="field">
             <Icon name="tMe" />
             <input
@@ -184,7 +200,9 @@ const drag = useSheetDrag(sheetEl, maskEl, close)
 .field input::placeholder { color: #6e6e6e; }
 .field input:disabled { opacity: .6; }
 
-.err { color: #ff8080; font-size: 12.5px; line-height: 18px; animation: m-rise var(--dur-2) var(--ease-out); --rise: -4px; }
+.err { color: #ff8080; font-size: 12.5px; line-height: 18px; transition: opacity var(--dur-2) var(--ease-out); animation: m-rise var(--dur-2) var(--ease-out); --rise: -4px; }
+/* 请求中：上一条错误变淡留着，结果出来再换（不撤掉，弹层高度不变） */
+.form.busy .err { opacity: .5; }
 
 .submit {
   height: 44px;
@@ -194,6 +212,8 @@ const drag = useSheetDrag(sheetEl, maskEl, close)
   color: var(--on-accent);
   font-size: 15px;
   font-weight: 700;
+  /* 请求中变淡、回来复原：过渡一下，不一帧跳过去 */
+  transition: opacity var(--dur-2) var(--ease-out);
 }
 .submit:disabled { opacity: .55; }
 .submit:active:not(:disabled) { filter: brightness(.92); }

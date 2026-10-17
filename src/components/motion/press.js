@@ -12,6 +12,8 @@ import { reducedMotion, cssDuration, cssEasing, spring } from '@/utils/motion'
  *
  * 公共样式里的按钮（common.css 的 .btn-soft .pill .chip .opt .retry .ct-search，返回键 .sh-back）
  * 不用改模板，自动带上。按住期间元素上都有 .m-pressed，可以配合写变暗之类的样式。
+ * 开关 .sw 不缩放，只加 .m-pressed（圆点拉长，见 common.css）：CSS 的 :active 在安卓 / Chrome 上要等认出是点按
+ * 才加、松手后还要挂一会儿，按住时没反馈、松手了圆点还拉长着。
  *
  * 细节
  *  - pointerdown 立刻开始缩放；开始滚动（pointercancel / scroll）、手指移开超过 10px 时立刻弹回，不和滚动抢；
@@ -24,7 +26,7 @@ import { reducedMotion, cssDuration, cssEasing, spring } from '@/utils/motion'
 
 const CARD = '.m-press, .btn-soft, .pill, .chip, .opt, .retry, .ct-search'
 const SMALL = '.m-press-sm, .sh-back'
-const ANY = `${SMALL}, ${CARD}, .m-hold`
+const ANY = `${SMALL}, ${CARD}, .m-hold, .sw`
 const SLOP = 10 // px：手指移动超过这么多就不算按着了
 
 let T = null

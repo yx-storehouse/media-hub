@@ -1,6 +1,7 @@
 import { nextTick, onActivated, watch } from 'vue'
 import { isDemoId } from '@/api'
 import { createFeed, PAGE } from '@/components/creator/feed'
+import { scrollBehavior } from '@/utils/motion'
 
 /*
  * 首页的分页列表（分类页、最新）：和创作者主页同一套 createFeed，每次取 20 条，滚到底再取下一页。
@@ -63,6 +64,6 @@ export async function refreshFeed(feed, fetchPage, isStale = () => false) {
 
 /** 再点一次底部「首页」：滚动过就平滑回到顶部，已经在顶部就刷新 */
 export function toTopOrRefresh(el, refresh) {
-  if (el && el.scrollTop > 2) el.scrollTo({ top: 0, behavior: 'smooth' })
+  if (el && el.scrollTop > 2) el.scrollTo({ top: 0, behavior: scrollBehavior() })
   else refresh()
 }

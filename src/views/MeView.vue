@@ -255,11 +255,11 @@ onActivated(() => {
       <!-- 观看历史 / 我的收藏 / 我的关注：数字是实时统计，点进对应列表 -->
       <nav class="me-stat" aria-label="我的内容">
         <template v-for="s in stats" :key="s.key">
-          <RouterLink v-if="auth.loggedIn" :to="s.to">
+          <RouterLink v-if="auth.loggedIn" class="m-hold" :to="s.to">
             <b v-count="s.value" />
             <span>{{ s.label }}</span>
           </RouterLink>
-          <button v-else type="button" @click="go(s.to)">
+          <button v-else type="button" class="m-hold" @click="go(s.to)">
             <b v-count="s.value" />
             <span>{{ s.label }}</span>
           </button>
@@ -267,7 +267,7 @@ onActivated(() => {
       </nav>
 
       <div class="me-list">
-        <button v-for="c in CELLS" :key="c.label" class="me-cell" @click="open(c)">
+        <button v-for="c in CELLS" :key="c.label" class="m-hold me-cell" @click="open(c)">
           <Icon :name="c.icon" />
           <span>{{ c.label }}</span>
           <Icon name="chevR" class="go" />
@@ -276,13 +276,13 @@ onActivated(() => {
 
       <!-- App 里：回到 App 的启动页换服务器地址；安卓浏览器里：下载安卓 App（服务器上有安装包时） -->
       <div v-if="inApp || showApk" class="me-list">
-        <button v-if="inApp" class="me-cell" @click="openServerSettings">
+        <button v-if="inApp" class="m-hold me-cell" @click="openServerSettings">
           <Icon name="refresh" />
           <span>切换服务器</span>
           <em class="me-sub">{{ serverHost }}</em>
           <Icon name="chevR" class="go" />
         </button>
-        <a v-else class="me-cell" :href="APK_URL" download="Reel.apk">
+        <a v-else class="m-hold me-cell" :href="APK_URL" download="Reel.apk">
           <Icon name="iDownload" />
           <span>下载安卓 App</span>
           <Icon name="chevR" class="go" />
@@ -293,24 +293,24 @@ onActivated(() => {
       <template v-if="auth.loggedIn">
         <div class="me-list">
           <!-- 管理后台是独立页面（admin.html，桌面布局），新窗口打开，不打断手机端的浏览状态 -->
-          <a v-if="auth.isAdmin" class="me-cell" href="./admin.html" target="_blank" rel="noopener">
+          <a v-if="auth.isAdmin" class="m-hold me-cell" href="./admin.html" target="_blank" rel="noopener">
             <Icon name="gear" />
             <span>管理后台</span>
             <Icon name="chevR" class="go" />
           </a>
-          <button v-if="auth.isAdmin" class="me-cell" @click="router.push('/admin/users')">
+          <button v-if="auth.isAdmin" class="m-hold me-cell" @click="router.push('/admin/users')">
             <Icon name="iHelp" />
             <span>账号管理</span>
             <Icon name="chevR" class="go" />
           </button>
-          <button class="me-cell" @click="openPwd">
+          <button class="m-hold me-cell" @click="openPwd">
             <Icon name="lock" />
             <span>修改密码</span>
             <Icon name="chevR" class="go" />
           </button>
         </div>
         <div class="me-list">
-          <button class="me-cell me-out" @click="askLogout = true">退出登录</button>
+          <button class="m-hold me-cell me-out" @click="askLogout = true">退出登录</button>
         </div>
       </template>
 
@@ -395,7 +395,8 @@ onActivated(() => {
 /* 每一格一样宽，格数跟着接口走 */
 .me-stat { display: grid; grid-auto-columns: 1fr; grid-auto-flow: column; margin: 20px 14px 0; padding: 6px 0; border-radius: 12px; background: var(--panel); }
 .me-stat > * { display: block; padding: 8px 0; text-align: center; cursor: pointer; transition: opacity var(--dur-2) var(--ease-out); }
-.me-stat > *:active { opacity: .6; transition-duration: var(--dur-1); }
+/* 按下的那一帧就变（全局按压反馈 m-hold 加的 .m-pressed，至少留够按下的时长）；:active 在安卓上要等识别成点击才有 */
+.me-stat > .m-pressed { opacity: .6; transition-duration: var(--dur-1); }
 .me-stat b { display: block; font-size: 17px; font-weight: 700; line-height: 22px; font-variant-numeric: tabular-nums; }
 .me-stat span { color: var(--t2); font-size: 12px; }
 .me-stat :focus-visible { outline-offset: -2px; }
@@ -405,9 +406,9 @@ onActivated(() => {
 .me-cell:last-child { border: 0; }
 .me-cell > svg:first-child { width: 20px; height: 20px; color: var(--t2); }
 .me-cell .go { width: 15px; height: 15px; margin-left: auto; color: #5a5a5a; }
-.me-cell:active { background: #161616; transition-duration: var(--dur-1); }
+.me-cell.m-pressed { background: #161616; transition-duration: var(--dur-1); }
 .me-cell .go { transition: transform var(--dur-2) var(--ease-out); }
-.me-cell:active .go { transform: translateX(2px); }
+.me-cell.m-pressed .go { transform: translateX(2px); }
 .me-cell:focus-visible { outline-offset: -2px; }
 .me-out { justify-content: center; color: var(--t2); }
 .me-sub { overflow: hidden; min-width: 0; margin-left: auto; color: var(--t2); font-size: 12px; font-style: normal; text-overflow: ellipsis; white-space: nowrap; }

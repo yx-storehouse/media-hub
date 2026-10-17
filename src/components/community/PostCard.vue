@@ -8,7 +8,13 @@ import { rise, canEnter } from '@/components/home/motion'
 const queue = []
 function enter(el) {
   if (!el || !canEnter()) return
-  if (!queue.length) Promise.resolve().then(() => rise(queue.splice(0), { max: 4 }))
+  if (!queue.length) {
+    Promise.resolve().then(() => {
+      // 整批换 key（换标签、刷新）时 Vue 从后往前挂新卡片，排队的顺序是倒的：按文档顺序排好，最上面的先浮现
+      const batch = queue.splice(0).sort((a, b) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1))
+      rise(batch, { max: 4 })
+    })
+  }
   queue.push(el)
 }
 </script>

@@ -23,7 +23,7 @@ import { useRecentSearches } from '@/components/search/recent'
 import { useBack } from '@/composables/useBack'
 import { toast } from '@/composables/useToast'
 import { getHotWords, getCreators, searchVideos, searchPosts } from '@/api'
-import { cameBack, useSlider, under, vRise, fadeIn, pin } from '@/components/home/motion'
+import { cameBack, useSlider, under, vRise, fadeIn, pin, scrollBehavior } from '@/components/home/motion'
 
 /*
  * 搜索页（#/search?q=关键词&type=post）。
@@ -229,7 +229,7 @@ function selectType(key) {
   const el = scroller.value
   if (key === type.value) {
     // 再点一次当前标签：回到列表开头
-    if (el && el.scrollTop > 0) el.scrollTo({ top: 0, behavior: 'smooth' })
+    if (el && el.scrollTop > 0) el.scrollTo({ top: 0, behavior: scrollBehavior() })
     return
   }
   if (el) savedTop[type.value] = el.scrollTop

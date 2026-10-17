@@ -13,7 +13,7 @@ import Icon from '@/components/Icon.vue'
 import ListFoot from '@/components/home/ListFoot.vue'
 import PostCard from '@/components/community/PostCard.vue'
 import PostSkeleton from '@/components/community/PostSkeleton.vue'
-import { useSlider, under, vRise } from '@/components/home/motion'
+import { useSlider, under, vRise, scrollBehavior } from '@/components/home/motion'
 
 /*
  * 社区（常驻页）：最新 / 热门 / 关注 / 收藏四个标签，每个标签各自一份分页列表（滚到底自动加载）和滚动位置。
@@ -203,7 +203,7 @@ async function refresh() {
 /* 滚动过就平滑回到顶部，已经在顶部就刷新 */
 function toTopOrRefresh() {
   const el = scroller.value
-  if (el && el.scrollTop > 2) el.scrollTo({ top: 0, behavior: 'smooth' })
+  if (el && el.scrollTop > 2) el.scrollTo({ top: 0, behavior: scrollBehavior() })
   else refresh()
 }
 useTabRetap('community', toTopOrRefresh)

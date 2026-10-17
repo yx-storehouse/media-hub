@@ -17,7 +17,7 @@ import PostCard from '@/components/community/PostCard.vue'
 import ListFoot from '@/components/home/ListFoot.vue'
 import SkeletonGrid from '@/components/home/SkeletonGrid.vue'
 import { haptic } from '@/utils/motion'
-import { cameBack, useSlider, cover, vRise, fadeIn, pop } from '@/components/home/motion'
+import { cameBack, useSlider, cover, vRise, fadeIn, pop, scrollBehavior } from '@/components/home/motion'
 
 defineOptions({ name: 'FavoritesView' })
 
@@ -135,7 +135,7 @@ useSlider(tabRow, tabBar, cover('.fv-tab.on .lb', 2), { key: () => tab.value, de
 function selectTab(key) {
   if (key === tab.value) {
     // 再点一次当前标签：回到顶部
-    scrollers[key].value?.scrollTo({ top: 0, behavior: 'smooth' })
+    scrollers[key].value?.scrollTo({ top: 0, behavior: scrollBehavior() })
     return
   }
   pinned = true

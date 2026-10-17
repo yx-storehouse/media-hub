@@ -1,5 +1,5 @@
 import { watch, onMounted, onActivated, onBeforeUnmount } from 'vue'
-import { reducedMotion, parseMs } from '@/utils/motion'
+import { reducedMotion, parseMs, spring } from '@/utils/motion'
 
 /*
  * 内容页（首页、社区、帖子、创作者、搜索、专题、我的）共用的动效小工具，时长 / 缓动都取 src/styles/motion.css 的令牌。
@@ -31,6 +31,13 @@ export function cameBack() {
 
 /** 现在能不能播入场动画 */
 export const canEnter = () => !quiet && !reducedMotion()
+
+/*
+ * 程序里的平滑滚动（回到顶部、把选中的分类滚到中间）：减少动态效果时直接跳到位（定义在 utils/motion.js，
+ * 这里转一下手，内容页从同一个地方取动效工具）。
+ *   el.scrollTo({ top: 0, behavior: scrollBehavior() })
+ */
+export { scrollBehavior } from '@/utils/motion'
 
 /* ---------- 动效令牌（读一次缓存起来） ---------- */
 
@@ -107,9 +114,11 @@ export const vRise = {
 /** 淡入（x 不为 0 时再从那一侧滑进来一点）：切标签时新显示的一栏、换分类时新的分类页用 */
 export function fadeIn(el, { dur: d = '--dur-2', x = 0 } = {}) {
   if (!el || reducedMotion()) return null
-  const from = x ? { opacity: 0, transform: `translate3d(${x}px, 0, 0)` } : { opacity: 0 }
-  const to = x ? { opacity: 1, transform: 'none' } : { opacity: 1 }
-  return el.animate([from, to], { duration: dur(d), easing: ease('--ease-out') })
+  // 旧的一栏已经撤掉（KeepAlive 收起 / v-show 藏起），下面没有东西可交叉：从 0.4 起淡入，不会先黑一帧
+  const a = el.animate([{ opacity: 0.4 }, { opacity: 1 }], { duration: dur(d), easing: ease('--ease-out') })
+  // 位移和底部 Tab 切换（pg-tab）同一根 smooth 弹簧
+  if (x) el.animate([{ transform: `translate3d(${x}px, 0, 0)` }, { transform: 'none' }], spring('smooth'))
+  return a
 }
 
 /**

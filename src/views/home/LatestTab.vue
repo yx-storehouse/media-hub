@@ -35,7 +35,8 @@ const dateBar = ref(null)
 const regionRow = ref(null)
 const regionBar = ref(null)
 useSlider(dateRow, dateBar, cover('.dchip.on'), { key: () => date.value, deps: () => filters.value })
-useSlider(regionRow, regionBar, cover('.rp.on'), { key: () => region.value, deps: () => [filters.value, date.value] })
+// 地区是描边的框：拉长会把左右两条边拉粗、圆头压扁，所以只平移、宽度渐变，不拉长
+useSlider(regionRow, regionBar, cover('.rp.on'), { key: () => region.value, deps: () => [filters.value, date.value], stretch: false })
 
 async function loadFilters() {
   filtersFailed.value = false
@@ -170,12 +171,16 @@ load()
   color: var(--t2);
   font-size: 12.5px;
   font-weight: 500;
-  transition: color var(--dur-2) var(--ease-in-out), background-color var(--dur-2) var(--ease-in-out);
+  transition: background-color var(--dur-2) var(--ease-in-out);
 }
 .dchip.on { background: var(--accent); box-shadow: none; color: var(--on-accent); font-weight: 600; }
 /* 白底交给滑块 */
 [data-slider] > .dchip.on { background: transparent; }
 .dchip .lb { position: relative; z-index: 2; transition: opacity var(--dur-1) var(--ease-out); }
+/* 日期字用 difference 混合：白底滑到哪里哪里的字反成黑的，滑动途中都看得清（#a2 叠在灰底上 = 原来的 #8c）；角标不混合 */
+[data-slider] > .dchip .lb { color: #a2a2a2; mix-blend-mode: difference; }
+/* 一变成选中就是满的白 / 黑：按下时调暗的那一下不带进滑动里 */
+[data-slider] > .dchip.on .lb { color: #fff; opacity: 1; transition: none; }
 /* 按下时把字调暗（不缩放：缩放会让文字跑到白底下面去） */
 .dchip:active .lb { opacity: .6; }
 /* new-video count badge on the chip's top-right corner */

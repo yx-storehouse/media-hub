@@ -88,7 +88,10 @@ function open(v) {
 /* ---------- 删一条（先藏起来，几秒后才真正删，期间可以撤销） ---------- */
 
 const removing = reactive(new Map())   // id -> timer
-const shownTotal = computed(() => Math.max(0, (feed.total ?? 0) - removing.size))
+/* 撤销时间到了、删除请求还没回来：保持「已删除」的样子，直到真的从列表里拿掉（不然原来那条会先回来再走） */
+const committing = reactive(new Set())
+const isRemoved = id => removing.has(id) || committing.has(id)
+const shownTotal = computed(() => Math.max(0, (feed.total ?? 0) - removing.size - committing.size))
 
 function remove(v) {
   if (removing.has(v.id)) return
@@ -96,19 +99,24 @@ function remove(v) {
 }
 
 function undo(v) {
+  if (committing.has(v.id)) return
   clearTimeout(removing.get(v.id))
   removing.delete(v.id)
 }
 
 async function commit(id) {
+  committing.add(id)
   removing.delete(id)
   try {
     const res = await removeHistory(id)
+    // 拿掉这一条、改总数、清掉「提交中」在同一拍里做完：中间不会多渲染一次（标题数字不会先回跳一下）
     feed.list = feed.list.filter(x => x.id !== id)
     if (typeof res?.total === 'number') feed.total = res.total
   } catch {
     // 删除失败：这一条照常显示
     toast('删除失败，请稍后重试')
+  } finally {
+    committing.delete(id)
   }
 }
 
@@ -195,6 +203,8 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   const gone = flushRemovals()
+  // 正在删的（请求已经发出）也算删掉了：返回时不要从快照里把它放回来
+  for (const id of committing) gone.add(id)
   if (!session.value || feed.total === null) return snap.keep(null)
   snap.keep({
     feed: {
@@ -249,11 +259,11 @@ onBeforeUnmount(() => {
       -->
       <TransitionGroup ref="listEl" v-rise tag="div" name="hi" class="hi-list">
         <!-- class 里读一下删除状态：换成撤销条时列表也跟着重新排一次位置，下面的记录才会平滑补位 -->
-        <div v-for="v in feed.list" :key="v.id" class="hi" :class="{ removed: removing.has(v.id) }">
+        <div v-for="v in feed.list" :key="v.id" class="hi" :class="{ removed: isRemoved(v.id) }">
           <Transition name="hi-swap">
-            <div v-if="removing.has(v.id)" class="hi-undo" role="status">
+            <div v-if="isRemoved(v.id)" class="hi-undo" role="status">
               <span>已删除「{{ v.title }}」</span>
-              <button type="button" class="undo" @click="undo(v)">撤销</button>
+              <button type="button" class="undo" :disabled="committing.has(v.id)" @click="undo(v)">撤销</button>
             </div>
             <div v-else class="hi-row">
               <RouterLink class="hi-link" :to="`/video/${encodeURIComponent(v.id)}`" @click="open(v)">
@@ -302,9 +312,12 @@ onBeforeUnmount(() => {
 .hi-link { display: flex; gap: 12px; padding: 9px 14px; transition: background-color var(--dur-2) var(--ease-out); }
 .hi-link:active { background: #121212; transition-duration: var(--dur-1); }
 
-/* 列表：删掉的一条原地淡出、往左滑一点，下面的平滑补位（只动 transform） */
+/*
+ * 列表：删掉的一条原地淡出、往左滑一点，下面的平滑补位（只动 transform）。
+ * 淡出用 --dur-1 + ease-out：补位的那条一开始就往上走（ease-out），离开的要先它一步看不见，两行字不会叠在一起
+ */
 .hi-move { transition: transform var(--dur-3) var(--ease-out); }
-.hi-leave-active { position: absolute; left: 0; right: 0; pointer-events: none; transition: opacity var(--dur-2) var(--ease-in), transform var(--dur-2) var(--ease-in); }
+.hi-leave-active { position: absolute; left: 0; right: 0; pointer-events: none; transition: opacity var(--dur-1) var(--ease-out), transform var(--dur-2) var(--ease-in); }
 .hi-leave-to { opacity: 0; transform: translate3d(-24px, 0, 0); }
 /* 一条记录换成「已删除 · 撤销」：旧的叠在原处淡出，新的淡入 */
 .hi-swap-enter-active { transition: opacity var(--dur-2) var(--ease-out), transform var(--dur-2) var(--ease-out); }

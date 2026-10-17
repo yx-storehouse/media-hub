@@ -88,11 +88,13 @@ const leaving = el => {
  * 出现：从来的那一侧带着缩小弹出来（snappy 弹簧，落定时有一点点「顶」的感觉），透明度很快到位。
  * 到时间：原地缩小淡出，比出现快。
  * 被新的一条顶开：往外让出自己一格的高度（smooth 弹簧）再淡掉，两条短暂地叠在一起，看得出是新的盖上来了。
+ * 新的一条透明度 --dur-1 就到位、被顶开的那条一开始就往下掉（ease-out）：叠在一起时一眼看得出新的在上面，
+ * 不会有旧的还亮着、新的还半透明，看起来像旧的压在新的上面的那几帧。
  */
-.toast-enter-active { transition: opacity var(--dur-2) var(--ease-out), transform var(--dur-spring-snappy) var(--spring-snappy); }
+.toast-enter-active { transition: opacity var(--dur-1) var(--ease-out), transform var(--dur-spring-snappy) var(--spring-snappy); }
 .toast-enter-from { opacity: 0; transform: translate3d(0, calc(var(--toast-dir) * 16px), 0) scale(.88); }
 .toast-leave-active { transition: opacity var(--dur-2) var(--ease-in), transform var(--dur-2) var(--ease-in); }
 .toast-leave-to { opacity: 0; transform: scale(.92); }
-.toast.pushed.toast-leave-active { transition: opacity var(--dur-3) var(--ease-in), transform var(--dur-spring-smooth) var(--spring-smooth); }
+.toast.pushed.toast-leave-active { transition: opacity var(--dur-3) var(--ease-out), transform var(--dur-spring-smooth) var(--spring-smooth); }
 .toast.pushed.toast-leave-to { opacity: 0; transform: translate3d(0, calc(var(--toast-dir) * (-100% - 8px)), 0) scale(.94); }
 </style>

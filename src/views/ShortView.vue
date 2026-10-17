@@ -178,6 +178,10 @@ async function load() {
   active.value = 0
   advancingTo = -1
   boosted = -1
+  // 换上新的一批时第一条一挂上就是「在播」：不然在 IntersectionObserver 回调（下一帧）之前有一帧是暂停态，
+  // 中间的播放键整套闪出来再淡掉。之后观察者那次 play(0) 什么也不改，记观看、记刷到过照常由它来做；
+  // 自动播放被拦下时 ShortItem 照常报 state=false，播放键照常淡入
+  if (visible) play(0)
   await nextTick()
   if (visible) {
     scrollToClip(0)
@@ -234,16 +238,21 @@ function loadMore() {
   return p
 }
 
-/** 再点一次「短视频」Tab / 在第一条下拉：换一批推荐、回到第一条（和抖音一样） */
-async function refresh() {
+/*
+ * 再点一次「短视频」Tab / 在第一条下拉：换一批推荐、回到第一条（和抖音一样）。
+ * via：'tap' 点 Tab（刷新提示晚一点再淡入，局域网里一下就回来了，不闪一下）/ 'pull' 下拉（提示本来就跟着手指在）
+ */
+const refreshVia = ref('')
+async function refresh(via = 'tap') {
   if (!visible || refreshing.value) return
   if (!clips.value.length) return retry()
+  refreshVia.value = via
   refreshing.value = true
   const ok = await load()
   refreshing.value = false
   if (!ok && visible) toast('刷新失败，请稍后重试')
 }
-useTabRetap('short', refresh)
+useTabRetap('short', () => refresh('tap'))
 
 /* 网络恢复：第一页失败的重新加载，翻页失败或者快到末尾的接着加载 */
 function onOnline() {
@@ -709,7 +718,7 @@ function pullEnd() {
   pullFrom = null
   pull.on = false
   pull.y = 0
-  if (go) refresh()
+  if (go) refresh('pull')
 }
 
 /* ---------- 声音：用户要过声音（store.sound），被浏览器临时静音的话，在页面上点一下就恢复 ---------- */
@@ -914,11 +923,14 @@ function setSpeed(speed) {
       </div>
     </div>
 
-    <!-- 下拉刷新 / 再点一次「短视频」Tab 的提示 -->
+    <!--
+      下拉刷新 / 再点一次「短视频」Tab 的提示。点 Tab 刷新时晚 .25 秒才淡入（.late，CSS 动画的延迟）：
+      很快就刷新完的什么也不出现。不用 <Transition>：进场在延迟里被打断时会先以不透明的样子闪一帧
+    -->
     <div
       v-show="refreshing || pull.on"
       class="sv-refresh"
-      :class="{ spin: refreshing }"
+      :class="{ spin: refreshing, late: refreshing && refreshVia === 'tap' }"
       role="status"
       :style="pull.on ? { transform: `translate(-50%, ${pullShift}px)` } : undefined"
     >
@@ -1074,7 +1086,9 @@ function setSpeed(speed) {
 
 /* 第一页的占位骨架：和真实的一条同样的布局（右侧一列按钮、左下角文字） */
 .sv-skel { position: absolute; inset: 0; background: linear-gradient(180deg, #121212, #0b0b0b 60%, #050505); }
-.sv-skel i { display: block; background: #1d1d1d; animation: blink 1.4s ease-in-out infinite; }
+/* 和其他页面的骨架同一种呼吸（1.2 秒，最暗到 .5） */
+.sv-skel i { display: block; background: #1d1d1d; animation: sk 1.2s ease-in-out infinite; }
+@keyframes sk { 50% { opacity: .5; } }
 .sk-side { position: absolute; right: 9px; bottom: 26px; display: flex; flex-direction: column; gap: 26px; }
 .sk-side i { width: 36px; height: 36px; border-radius: 50%; }
 .sk-meta { position: absolute; left: 12px; bottom: 56px; display: flex; flex-direction: column; gap: 10px; width: 62%; }
@@ -1118,6 +1132,9 @@ function setSpeed(speed) {
 }
 .sv-refresh svg { width: 15px; height: 15px; stroke-width: 2.4; }
 .sv-refresh.spin svg { animation: rot .8s linear infinite; }
+/* 点 Tab 刷新：等 .25 秒还没刷新完才从上面轻轻落下来（延迟期间停在起始帧，看不见） */
+.sv-refresh.late { animation: svr-in var(--dur-2) var(--ease-out) .25s backwards; }
+@keyframes svr-in { from { opacity: 0; transform: translate(-50%, -8px); } }
 @media (prefers-reduced-motion: reduce) {
   .sv-refresh.spin svg,
   .sv-spin { animation: none; }

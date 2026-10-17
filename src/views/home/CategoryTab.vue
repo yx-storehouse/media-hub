@@ -121,9 +121,17 @@ load()
 /* 选中筛选的白底（useSlider 滑动）：压在各胶囊的灰底上面、文字下面 */
 .chips { position: relative; z-index: 0; }
 .cbar { top: 12px; z-index: 1; height: 27.5px; border-radius: 14px; background: var(--accent); }
-.chip { transition: color var(--dur-2) var(--ease-in-out), background-color var(--dur-2) var(--ease-in-out); }
+.chip { transition: background-color var(--dur-2) var(--ease-in-out); }
 [data-slider] > .chip.on { background: transparent; }
 .chip .lb { position: relative; z-index: 2; transition: opacity var(--dur-1) var(--ease-out); }
+/*
+ * 字用 difference 混合：白底滑到哪里，哪里的字就反成黑的，途中经过的、刚离开的、要去的都看得清，
+ * 点下去的那一帧选中的字就变了（不等颜色过渡）。#b9 叠在 #161616 灰底上正好是原来的 #a3。
+ * 一排胶囊本身是独立的层叠上下文（.chips 有 z-index），混合只和这一排里的东西算。
+ */
+[data-slider] > .chip .lb { color: #b9b9b9; mix-blend-mode: difference; }
+/* 点下去的那个一变成选中就是满的白 / 黑：按下时调暗的那一下（:active 松手后还会留一会儿）不带进滑动里 */
+[data-slider] > .chip.on .lb { color: #fff; opacity: 1; transition: none; }
 /* 胶囊不缩放（m-off）：缩放会让文字跑到白底下面去，按下时只把字调暗 */
 .chip:active .lb { opacity: .6; }
 .chip-sk { width: 56px; animation: sk 1.2s ease-in-out infinite; }

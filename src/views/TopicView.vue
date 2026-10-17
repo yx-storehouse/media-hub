@@ -24,7 +24,7 @@ import { getTopic, getTopicVideos, toggleTopicFav } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 import { rememberVideo } from '@/components/video/preview'
 import { haptic } from '@/utils/motion'
-import { cameBack, useSlider, cover, vRise, pop } from '@/components/home/motion'
+import { cameBack, useSlider, cover, vRise, pop, scrollBehavior } from '@/components/home/motion'
 
 /*
  * 专题页（#/topic/:id?sort=1）：头图 + 播放 / 收藏数 +「播放全部」「收藏」，下面是排序标签和两列视频，滚到底自动加载下一页。
@@ -153,7 +153,7 @@ function changeSort(i) {
   const top = listTop()
   if (i === sort.value) {
     // 再点一次当前排序：回到列表开头
-    if (el && el.scrollTop > top + 1) el.scrollTo({ top, behavior: 'smooth' })
+    if (el && el.scrollTop > top + 1) el.scrollTo({ top, behavior: scrollBehavior() })
     return
   }
   sort.value = i
@@ -418,9 +418,13 @@ onBeforeRouteUpdate(to => {
 .tp-chips { position: sticky; top: 0; z-index: 4; background: var(--bg); }
 /* 选中排序的白底（useSlider 滑动）：压在灰底上面、文字下面（吸顶栏自己有层级，滑块和文字的层级只在它里面比） */
 .tp-bar { top: 12px; z-index: 1; height: 27.5px; border-radius: 14px; background: var(--accent); }
-.tp-chips .chip { transition: color var(--dur-2) var(--ease-in-out), background-color var(--dur-2) var(--ease-in-out); }
+.tp-chips .chip { transition: background-color var(--dur-2) var(--ease-in-out); }
 .tp-chips[data-slider] > .chip.on { background: transparent; }
 .tp-chips .chip .lb { position: relative; z-index: 2; transition: opacity var(--dur-1) var(--ease-out); }
+/* 字用 difference 混合：白底滑到哪里哪里的字反成黑的，滑动途中每个字都看得清（#b9 叠在灰底上 = 原来的 #a3） */
+.tp-chips[data-slider] > .chip .lb { color: #b9b9b9; mix-blend-mode: difference; }
+/* 一变成选中就是满的白 / 黑：按下时调暗的那一下不带进滑动里 */
+.tp-chips[data-slider] > .chip.on .lb { color: #fff; opacity: 1; transition: none; }
 /* 胶囊不缩放（m-off）：缩放会让文字跑到白底下面去，按下时只把字调暗 */
 .tp-chips .chip:active .lb { opacity: .6; }
 /* 专题信息还没回来：骨架接在头图下面，位置和真列表差不多 */

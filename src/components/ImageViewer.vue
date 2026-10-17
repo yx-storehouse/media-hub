@@ -178,8 +178,12 @@ const radiusOf = el => parseFloat(getComputedStyle(el).borderTopLeftRadius) || 0
  * 「整张图」和「缩略图」两个状态的关键帧（transform-origin: 0 0）：
  * box 是做动画的元素的矩形，c 是图片内容在它里面的矩形，t 是缩略图的矩形（都是屏幕坐标）。
  * 缩略图状态：内容放大 / 缩小到正好盖住缩略图（cover），再用 clip-path 裁成缩略图的大小和圆角。
+ * v：缩略图只露出一部分（被滚动区外的顶栏 / 底栏盖住）时露出来的那块（屏幕坐标），裁到它为止，
+ * 落地时正好停在栏的边上，不会盖到栏上面、再被栏一下压回去。
+ * 不用裁的时候（比例一样、整张都露着）圆角另给一对关键帧 round，单独做一段动画：
+ * transform 那段照样整个在合成线程上跑，圆角从缩略图的圆角收成直角（关掉时反过来，落地就是圆的）。
  */
-function flyFrames(box, c, t, r) {
+function flyFrames(box, c, t, r, v = null) {
   const k = Math.max(t.width / c.width, t.height / c.height)
   const cw = t.width / k
   const ch = t.height / k
@@ -187,14 +191,52 @@ function flyFrames(box, c, t, r) {
   const tp = c.top - box.top + (c.height - ch) / 2
   const thumb = { transform: `translate(${t.left - box.left - k * l}px, ${t.top - box.top - k * tp}px) scale(${k})` }
   const full = { transform: 'translate(0px, 0px) scale(1)' }
-  // 缩略图和原图比例一样（帖子详情的配图）时不用裁，只动 transform，整个动画都在合成线程上跑
-  if (Math.abs(t.width / t.height - c.width / c.height) > 0.02) {
-    const inset = (x, y, w, h, rad) => `inset(${y}px ${box.width - x - w}px ${box.height - y - h}px ${x}px round ${rad}px)`
-    thumb.clipPath = inset(l, tp, cw, ch, r / k)
-    full.clipPath = inset(c.left - box.left, c.top - box.top, c.width, c.height, 0)
+  const inset = (x, y, w, h, rad) => `inset(${y}px ${box.width - x - w}px ${box.height - y - h}px ${x}px round ${rad})`
+  if (v || Math.abs(t.width / t.height - c.width / c.height) > 0.02) {
+    const rk = r / k
+    if (v) {
+      // 露出来的那块换算到元素自己的坐标里；被切开的那条边上的两个角不带圆角
+      const x0 = l + (v.left - t.left) / k
+      const y0 = tp + (v.top - t.top) / k
+      const x1 = l + (v.right - t.left) / k
+      const y1 = tp + (v.bottom - t.top) / k
+      const cutT = v.top > t.top + 0.5
+      const cutB = v.bottom < t.bottom - 0.5
+      const cutL = v.left > t.left + 0.5
+      const cutR = v.right < t.right - 0.5
+      const rad = [cutT || cutL, cutT || cutR, cutB || cutR, cutB || cutL].map(cut => `${cut ? 0 : rk}px`).join(' ')
+      thumb.clipPath = inset(x0, y0, x1 - x0, y1 - y0, rad)
+    } else thumb.clipPath = inset(l, tp, cw, ch, `${rk}px`)
+    // 四个角都写出来（0px），和缩略图那一帧的形状对得上，才能插值
+    full.clipPath = inset(c.left - box.left, c.top - box.top, c.width, c.height, '0px 0px 0px 0px')
+    return { thumb, full }
+  }
+  if (r > 0) {
+    const round = rad => ({ clipPath: inset(c.left - box.left, c.top - box.top, c.width, c.height, rad) })
+    return { thumb, full, round: [round(`${r / k}px`), round('0px')] }
   }
   return { thumb, full }
 }
+
+/*
+ * 缩略图在它的滚动区里真正露出来的那块（被滚动区外的顶栏 / 底栏盖住的不算）；整张都露着时返回 null。
+ * 滚动区里面盖在内容上的栏（吸顶的标签栏、变成实底的顶栏）由页面标上 data-iv-cover，盖住的那截也不算露着。
+ */
+function shownPart(thumb, t) {
+  const sc = thumb.closest('.scroll')?.getBoundingClientRect()
+  if (!sc) return null
+  const v = { left: Math.max(t.left, sc.left), top: Math.max(t.top, sc.top), right: Math.min(t.right, sc.right), bottom: Math.min(t.bottom, sc.bottom) }
+  for (const el of thumb.closest('.page')?.querySelectorAll('[data-iv-cover]') || []) {
+    const r = el.getBoundingClientRect()
+    if (!r.height || r.right <= v.left || r.left >= v.right) continue
+    if (r.top <= v.top + 1 && r.bottom > v.top) v.top = Math.min(v.bottom, r.bottom)
+    else if (r.bottom >= v.bottom - 1 && r.top < v.bottom) v.bottom = Math.max(v.top, r.top)
+  }
+  if (v.top <= t.top + 0.5 && v.bottom >= t.bottom - 0.5 && v.left <= t.left + 0.5 && v.right >= t.right - 0.5) return null
+  return v
+}
+/* 只露出一条缝（不到 8px）：当成看不到，走淡出 / 淡入 */
+const sliver = v => !!v && (v.bottom - v.top < 8 || v.right - v.left < 8)
 
 /*
  * 大图能画出来了再起飞：新的 <img> 即使图在缓存里也要先解码，加载失败时要先换成占位图；
@@ -244,14 +286,19 @@ async function zoomIn() {
   const slide = slides[i]
   if (!slide) return
   const thumb = thumbOf(i)
-  const t = visibleRect(thumb)
+  let t = visibleRect(thumb)
+  // 缩略图一部分被顶栏 / 底栏盖住：从露出来的那块放大出来
+  const v = t && shownPart(thumb, t)
+  if (sliver(v)) t = null
   if (!t) {
     opening.push(slide.animate([{ opacity: 0, transform: 'scale(.94)' }, { opacity: 1, transform: 'none' }], { duration, easing }))
     return
   }
   const s = slide.getBoundingClientRect()
-  const f = flyFrames(s, contentRect(s, ratioOf(i, thumb)), t, radiusOf(thumb))
+  const f = flyFrames(s, contentRect(s, ratioOf(i, thumb)), t, radiusOf(thumb), v)
   opening.push(slide.animate([f.thumb, f.full], { duration, easing }))
+  // 圆角单独一段（settleOpen 一起收尾）
+  if (f.round) opening.push(slide.animate(f.round, { duration, easing }))
 }
 function settleOpen() {
   opening.forEach(a => a.finish())
@@ -304,14 +351,19 @@ function zoomOut() {
   ghost.append(shade, img)
   app.append(ghost)
 
-  const t = k0 <= 1.01 ? visibleRect(thumb) : null
+  let t = k0 <= 1.01 ? visibleRect(thumb) : null
+  // 缩略图一部分被顶栏 / 底栏盖住：只缩回露出来的那块，落地停在栏的边上
+  const v = t && shownPart(thumb, t)
+  if (sliver(v)) t = null
   const duration = dur(t ? '--dur-3' : '--dur-2')
   const easing = ease(t ? '--ease-out' : '--ease-in')
   shade.animate([{ opacity: bgAlpha.value }, { opacity: 0 }], { duration, easing, fill: 'forwards' })
   let anim
   if (t) {
-    const f = flyFrames(box, box, t, radiusOf(thumb))
+    const f = flyFrames(box, box, t, radiusOf(thumb), v)
     anim = img.animate([f.full, f.thumb], { duration, easing, fill: 'forwards' })
+    // 圆角反过来：落地时已经是缩略图的圆角，替身撤掉的那一下不会从直角跳成圆角
+    if (f.round) img.animate([f.round[1], f.round[0]], { duration, easing, fill: 'forwards' })
   } else {
     showThumb()
     anim = img.animate([{ opacity: 1 }, { opacity: 0 }], { duration, easing, fill: 'forwards' })
@@ -519,7 +571,7 @@ onBeforeUnmount(() => {
       @keydown="onKey"
     >
       <!-- 黑色背景单独一层：打开时淡入、往下拖时跟着变淡（只改透明度） -->
-      <div ref="bg" class="iv-bg" :style="{ opacity: bgAlpha }" />
+      <div ref="bg" class="iv-bg" :class="{ anim: !dragging }" :style="{ opacity: bgAlpha }" />
       <div
         ref="stage"
         class="iv-stage"
@@ -577,6 +629,8 @@ onBeforeUnmount(() => {
   outline: 0;
 }
 .iv-bg { position: absolute; inset: 0; background: #000; }
+/* 往下拖松手弹回：背景和图片同一条曲线一起回到不透明（拖动中跟手，不加过渡；打开时的淡入是 WAAPI，压过它） */
+.iv-bg.anim { transition: opacity var(--dur-3) var(--ease-out); }
 .iv-stage { position: absolute; inset: 0; overflow: hidden; touch-action: none; user-select: none; -webkit-user-select: none; }
 .iv-track { display: flex; gap: 16px; height: 100%; will-change: transform; }
 .iv-track.anim { transition: transform var(--dur-3) var(--ease-out); }

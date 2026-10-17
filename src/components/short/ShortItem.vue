@@ -145,6 +145,8 @@ onDeactivated(() => {
   endPress()
   clearTimeout(tapTimer)
   tapTimer = 0
+  // 收起前在播的这条：收起期间不露暂停态的播放键（KeepAlive 在同一个任务里调完所有收起钩子，这时 playing 还是暂停前的值）
+  ctlHold.value = props.playing
   videoEl.value?.pause()
   clearFx()
   quiet.value = true
@@ -152,13 +154,19 @@ onDeactivated(() => {
 /*
  * 收起时父组件把每条都暂停了，回来又接着播：这一来一回不该让播放键淡入淡出一遍。
  * 收起时先关掉过渡（.quiet），回来两帧以后再打开。
+ * 收起时正在播的那条（.held）：页面滑走 / 切走的整个过程里播放键一直藏着，不会在离开的画面上一下冒出来；
+ * 用户自己暂停的那条照旧带着播放键滑走。
  */
 const quiet = ref(false)
+const ctlHold = ref(false)
 let quietRaf = 0
 onActivated(() => {
   cancelAnimationFrame(quietRaf)
   quietRaf = requestAnimationFrame(() => {
-    quietRaf = requestAnimationFrame(() => { quiet.value = false })
+    quietRaf = requestAnimationFrame(() => {
+      quiet.value = false
+      ctlHold.value = false
+    })
   })
 })
 /* 卸载时释放地址，否则离开后还可能在后台下载 */
@@ -530,7 +538,7 @@ const actions = computed(() => [
 <template>
   <section
     class="sv"
-    :class="{ playing, cur: current, quiet, real: hasVideo, still: !hasVideo, 'poster-ok': posterOk, scrubbing, boosting, 'title-open': titleOpen }"
+    :class="{ playing, cur: current, quiet, held: ctlHold, real: hasVideo, still: !hasVideo, 'poster-ok': posterOk, scrubbing, boosting, 'title-open': titleOpen }"
     @contextmenu.prevent
   >
     <Cover class="sv-bg" v-bind="clip.cover" :eager="eager" />
@@ -929,9 +937,13 @@ const actions = computed(() => [
 .sv-ctl.fx-in .sk { animation: sk-in var(--dur-3) var(--ease-out); }
 .sv-ctl.fx-in .sk.fwd { --sx: -16px; }
 .sv-ctl.fx-out .pb { animation: pb-out var(--dur-3) var(--ease-out); }
-.sv.playing .sv-ctl.fx-out { transition: opacity var(--dur-3) var(--ease-in); }
+/*
+ * 离场比进场快（约 2/3）：一点下去播放键就让开，不会在已经开始播的画面上鼓着一个大灰圈。
+ * 这次离场就是点按的反馈，透明度用 ease-out（下一帧就开始变淡；ease-in 前半段几乎不动，像没点到），和播放页的大播放键一样
+ */
+.sv.playing .sv-ctl.fx-out { transition: opacity var(--dur-1) var(--ease-out); }
 @keyframes pb-in { from { transform: scale(1.35); } }
-@keyframes pb-out { 30% { transform: scale(1.12); } to { transform: scale(1.5); } }
+@keyframes pb-out { 30% { transform: scale(1.1); } to { transform: scale(1.3); } }
 @keyframes sk-in { from { transform: translateX(var(--sx, 16px)) scale(.7); } }
 /* 点 ±10 秒：箭头顺着方向转一下 */
 .sv-ctl .sk.spin svg { animation: sk-spin var(--dur-3) var(--ease-out); }
@@ -1194,6 +1206,8 @@ const actions = computed(() => [
 /* 页面被 KeepAlive 收起 / 刚切回来的两帧里：暂停→继续这一来一回直接到位，不播过渡 */
 .sv.quiet,
 .sv.quiet * { transition: none !important; }
+/* 被 KeepAlive 收起时正在播的那条：父组件暂停了它，但离开的画面上不闪出暂停态的播放键 */
+.sv.quiet.held .sv-ctl { opacity: 0 !important; }
 
 /* 减少动态效果：时长已经由 motion.css 统一收敛；循环的箭头直接停住，免得只闪一下 */
 @media (prefers-reduced-motion: reduce) {
