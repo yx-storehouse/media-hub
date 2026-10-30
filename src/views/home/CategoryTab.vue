@@ -4,6 +4,7 @@ import { getCategoryFilters, getCategoryVideos } from '@/api'
 import VideoCard from '@/components/VideoCard.vue'
 import SkeletonGrid from '@/components/home/SkeletonGrid.vue'
 import ListFoot from '@/components/home/ListFoot.vue'
+import ContentSwap from '@/components/home/ContentSwap'
 import { createHomeFeed, useAutoMore, refreshFeed, toTopOrRefresh } from '@/components/home/list'
 import { useKeepScroll } from '@/composables/useKeepScroll'
 import { useSlider, cover, vRise } from '@/components/home/motion'
@@ -98,19 +99,17 @@ load()
             <span v-for="i in 4" :key="i" class="chip chip-sk" aria-hidden="true" />
           </template>
         </div>
-        <!-- 骨架 / 旧列表原地淡出，新列表错峰浮现 -->
-        <div class="m-swap">
-          <Transition name="m-skel">
-            <SkeletonGrid v-if="feed.total === null" :count="10" gap="g16" />
-            <div v-else-if="!feed.list.length" v-rise.self class="empty">这里还没有视频</div>
-            <div v-else :key="batch">
-              <div v-rise class="grid g16">
-                <VideoCard v-for="v in feed.list" :key="v.id" :video="v" />
-              </div>
-              <ListFoot :feed="feed" />
+        <!-- 换筛选：旧列表留着等新的，快的直接换成新列表（错峰浮现），慢了（250ms）才淡入骨架 -->
+        <ContentSwap :pending="feed.total === null">
+          <SkeletonGrid v-if="feed.total === null" :count="10" gap="g16" />
+          <div v-else-if="!feed.list.length" v-rise.self class="empty">这里还没有视频</div>
+          <div v-else :key="batch">
+            <div v-rise class="grid g16">
+              <VideoCard v-for="v in feed.list" :key="v.id" :video="v" />
             </div>
-          </Transition>
-        </div>
+            <ListFoot :feed="feed" />
+          </div>
+        </ContentSwap>
       </template>
       <div class="pad-b" />
     </div>

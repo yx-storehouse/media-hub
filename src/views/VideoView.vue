@@ -27,6 +27,7 @@ import RollNum from '@/components/video/RollNum.vue'
 import { pickResume, setResume } from '@/components/video/resume'
 import { peekVideo, rememberVideo } from '@/components/video/preview'
 import { parseList, nextInList } from '@/components/video/playlist'
+import { spinPhase } from '@/components/video/spin'
 import { claimHero, claimRelatedHero, armHeroBack } from '@/components/motion/hero'
 
 /*
@@ -37,6 +38,8 @@ import { claimHero, claimRelatedHero, armHeroBack } from '@/components/motion/he
  * - 在本页登录 / 退出后重新取一次自己的赞 / 收藏 / 关注状态；没登录时点的操作，登录后补做。
  * - 本页里换视频（相似推荐、下一个、自动连播）：新视频的详情回来之前旧内容先留着（播放器立刻停、旧内容的操作不再生效），
  *   回来时一次换成新内容，不会先闪一下骨架屏、底部操作栏也不会消失又出现（见 load 的 keepMs）。
+ *   接口慢：播放器那一块先换成新视频的封面（飞过来的缩略图落地时、或者 0.25 秒后），旧的信息区等满 0.25 秒才变暗，
+ *   新内容回来时就地亮起来；等了 1 秒还没回来才换成骨架屏（STALE_MS）。
  */
 defineOptions({ name: 'VideoView' })
 
@@ -97,10 +100,44 @@ const nextItem = computed(() => {
 
 /*
  * 本页里换视频、新内容还没回来的这一会儿：旧内容还显示着，但播放器已经停了，赞 / 收藏 / 关注 / 分享 / 换一批 / 标签
- * 都不生效（旧播放器不接手指，返回键除外）。新内容回来、等够 keepMs、或者飞过来的缩略图落地时结束。
+ * 都不生效（旧播放器、信息区不接手指，返回键除外；相似推荐照样能点，换成点的那一个）。
+ * 分三步，接口越慢走得越远，新内容一回来就停（同一次渲染里换成新内容）：
+ *  1. 播放器那一块换成新视频的占位（playerPh）：缩略图飞过来的落地那一刻（没飞的话等 keepMs），封面和落地的缩略图一模一样
+ *  2. 等满 DIM_MS（和缓冲转圈同一个规矩）旧的信息区、相似推荐、操作栏变暗（dim）；新内容回来时就地亮起来
+ *  3. 等满 STALE_MS 还没回来：旧内容整个撤掉，换成新视频的占位和骨架（标题已经是新的）
  */
 const switching = ref(false)
+const playerPh = ref(false)
+const dim = ref(false)
+/** 飞上去的那条相似推荐：旧列表还留着时它的缩略图一直空着（画面上只有飞上去的那一份） */
+const flownId = ref(null)
+/** 骨架屏撤掉旧内容以后，新内容回来时操作栏淡入（只在这种时候，第一次打开、返回时照常直接出现） */
+const actsIn = ref(false)
+const DIM_MS = 250
+const STALE_MS = 1000
 let keepTimer = 0
+let dimTimer = 0
+let staleTimer = 0
+
+/*
+ * 占位上的转圈：占位露出来满 DIM_MS 还在等才出现（和播放器的缓冲转圈同一个规矩，接口很快回来时什么也看不到）。
+ * 用计时器而不是 CSS 的 animation-delay：「减少动态效果」时那个延迟会被清零，每次打开都会闪一下转圈
+ */
+const phSpin = ref(false)
+/** 旋转相位按时间对齐：新视频回来、换成播放器时，播放器接着转（:spin）的转圈和它同一个角度 */
+const phSpinStyle = shallowRef(null)
+let phSpinTimer = 0
+/* flush post：新视频回来的那次渲染里 phSpin 还是 true，播放器挂上时能知道占位正在转圈 */
+watch(() => (!video.value || playerPh.value) && !failed.value, on => {
+  clearTimeout(phSpinTimer)
+  if (!on) phSpin.value = false
+  else if (!phSpin.value) {
+    phSpinTimer = setTimeout(() => {
+      phSpinStyle.value = { animationDelay: spinPhase() }
+      phSpin.value = true
+    }, DIM_MS)
+  }
+}, { immediate: true, flush: 'post' })
 
 /** 换成 id 这个视频：收起展开、清掉列表的下一条；换的是另一个视频时撤掉旧内容（播放器停下、操作栏撤掉），加载期间显示占位 */
 function resetFor(id) {
@@ -116,42 +153,65 @@ function resetFor(id) {
     preview.value = peekVideo(id)
   }
 }
+/** 停掉换视频的这一段（不动内容）：计时器清掉，变暗、空着的缩略图、播放器的占位都撤掉 */
+function stopSwitch() {
+  clearTimeout(keepTimer)
+  clearTimeout(dimTimer)
+  clearTimeout(staleTimer)
+  switching.value = false
+  playerPh.value = false
+  dim.value = false
+  flownId.value = null
+}
 /** 留着旧内容等新视频的这一段结束：撤掉旧的、换成 id 的占位（新内容到了时紧接着就填上，同一次渲染） */
 function endSwitch(id) {
-  clearTimeout(keepTimer)
-  if (!switching.value) return
-  switching.value = false
+  if (!switching.value) return stopSwitch()
+  stopSwitch()
   resetFor(id)
 }
 
 let loadSeq = 0
 /**
- * keepMs：本页里换视频时旧内容最多留多久（0 = 不留，立刻显示占位）。本地接口一般几十毫秒就回来，
- * 留着旧内容就不会在中间闪一下骨架屏；真的慢，到点照常显示占位和骨架。
+ * keepMs：本页里换视频时旧播放器最多留多久（0 = 不留，立刻显示占位）。本地接口一般几十毫秒就回来，
+ * 留着旧内容就不会在中间闪一下骨架屏；慢的话按上面的三步走。
  */
 async function load(id, query = route.query, { keepMs = 0 } = {}) {
   const token = ++loadSeq
   failed.value = null
   clearTimeout(keepTimer)
+  clearTimeout(dimTimer)
+  clearTimeout(staleTimer)
   if (keepMs > 0 && video.value && String(video.value.id) !== String(id)) {
+    // 已经在换（连点了两条相似推荐）：播放器那一块已经是占位的话就留着，只换成新这条的封面，旧播放器不会再露出来
     switching.value = true
+    preview.value = peekVideo(id)
     playerRef.value?.pause?.()
-    keepTimer = setTimeout(() => { if (token === loadSeq) endSwitch(id) }, keepMs)
+    keepTimer = setTimeout(() => { if (token === loadSeq) playerPh.value = true }, keepMs)
+    dimTimer = setTimeout(() => { if (token === loadSeq) dim.value = true }, DIM_MS)
+    staleTimer = setTimeout(() => {
+      if (token !== loadSeq || !switching.value) return
+      endSwitch(id)
+      actsIn.value = true
+    }, STALE_MS)
   } else {
-    switching.value = false
+    // 换回正在显示的这个视频（换的途中按了返回）：旧播放器已经撤掉的话从刚才看到的地方接着播
+    if (playerPh.value && String(video.value?.id) === String(id)) startSec.value = pickResume(video.value)
+    stopSwitch()
     resetFor(id)
   }
   try {
     // 相似推荐取不到不影响看视频
     const [v, list] = await Promise.all([getVideo(id), getRelatedVideos(id, { batch: 0 }).catch(() => [])])
     if (token !== loadSeq) return
-    // 留着的旧内容在这一次渲染里直接换成新的：中间没有骨架屏那一帧
+    // 还是同一个视频（重新取了一次）：不回到顶部
+    const same = String(video.value?.id) === String(v.id)
+    // 留着的旧内容在这一次渲染里直接换成新的：中间没有骨架屏那一帧；变暗的地方就地亮起来
     endSwitch(id)
-    startSec.value = pickResume(v)
+    if (!same) startSec.value = pickResume(v)
     video.value = v
     related.value = list
     showRelated(v.id, 0)
-    if (scroller.value) scroller.value.scrollTop = 0
+    if (scroller.value && !same) scroller.value.scrollTop = 0
     loadCreator(v)
     loadListNext(parseList(query), v.id)
     await nextTick()
@@ -160,6 +220,7 @@ async function load(id, query = route.query, { keepMs = 0 } = {}) {
     if (token !== loadSeq) return
     // 失败时不能留着旧视频（旧播放器、操作栏还在）：撤掉，显示失败
     endSwitch(id)
+    actsIn.value = false
     const missing = e?.status >= 400 && e?.status < 500 && e?.status !== 401
     failed.value = missing
       ? { message: '视频不存在或已下架', retry: false }
@@ -204,6 +265,8 @@ async function shuffle() {
 }
 
 load(route.params.id)
+/* 第几次「缩略图飞过来」：连点两条相似推荐时，前一条的浮层被打断也会回调落地，那时已经归新的这次管 */
+let hopSeq = 0
 onBeforeRouteUpdate(to => {
   if (to.params.id === route.params.id) return
   // 封面还在往播放器飞就换了视频：浮层原地淡出
@@ -211,15 +274,20 @@ onBeforeRouteUpdate(to => {
   // 点相似推荐过来的：缩略图正飞向播放器，新视频的播放器先藏着，落地时露出来
   const hop = claimRelatedHero(to.params.id)
   if (hop) {
+    const seq = ++hopSeq
     heroHold.value = true
     hop.land(() => {
-      // 落地时新内容还没回来：撤掉旧的、露出新视频的占位，不会把旧视频的播放器露出来（已经又换了别的视频就不管）
-      if (String(route.params.id) === String(to.params.id)) endSwitch(to.params.id)
+      if (seq !== hopSeq) return
+      // 落地时新内容还没回来：播放器那一块换成新视频的占位（和落地的缩略图一样），旧视频的播放器不会再露出来；
+      // 信息区接着留着等（见 load）。中途按返回回到了正在显示的视频（不在换了）就照常露出它的播放器
+      if (switching.value) playerPh.value = true
       heroHold.value = false
     })
   }
-  // 旧内容留着等新的：缩略图在飞就留到落地（400ms 是兜底），没飞（下一个、自动连播）留 250ms，和缓冲转圈同一个规矩
+  // 旧播放器留着等新的：缩略图在飞就留到落地（400ms 是兜底），没飞（下一个、自动连播）留 250ms，和缓冲转圈同一个规矩
   load(to.params.id, to.query, { keepMs: hop ? 400 : 250 })
+  // 飞上去的那条在旧列表里一直空着（load 开始换以后才记，换回正在显示的视频时不记）
+  if (hop && switching.value) flownId.value = String(to.params.id)
 })
 
 /* ---------- 共享元素过渡：从列表卡片飞进来、返回时缩回去（components/motion/hero.js） ---------- */
@@ -478,6 +546,9 @@ onMounted(() => {
 onBeforeUnmount(() => {
   ro?.disconnect()
   clearTimeout(keepTimer)
+  clearTimeout(dimTimer)
+  clearTimeout(staleTimer)
+  clearTimeout(phSpinTimer)
 })
 
 /*
@@ -514,15 +585,16 @@ const noop = () => {}
 </script>
 
 <template>
-  <div ref="root" class="page video" :class="{ 'hero-hold': heroHold, switching }" @touchstart.passive="noop">
+  <div ref="root" class="page video" :class="{ 'hero-hold': heroHold, switching, dim }" @touchstart.passive="noop">
     <VideoPlayer
-      v-if="video"
+      v-if="video && !playerPh"
       ref="playerRef"
       :key="video.id"
       :video="video"
       :start="startSec"
       :next="nextItem"
       :hold="heroHold"
+      :spin="phSpin"
       @back="back"
       @started="onStarted"
       @progress="onProgress"
@@ -532,7 +604,7 @@ const noop = () => {}
     <!-- 加载中 / 失败时的占位：有列表带过来的封面就先显示；保留返回键，用户随时能离开 -->
     <div v-else class="player-ph" :aria-busy="!failed">
       <Cover v-if="preview?.cover && !failed" class="ph-cv" v-bind="preview.cover" eager />
-      <div v-if="!failed" class="ph-spin" aria-hidden="true" />
+      <div v-if="phSpin" class="ph-spin" :style="phSpinStyle" aria-hidden="true" />
       <button type="button" class="ph-back hit-44" aria-label="返回" @click="back"><Icon name="chevL" /></button>
     </div>
 
@@ -615,7 +687,7 @@ const noop = () => {}
           </div>
           <!-- 每一批第一次出现时一条条错开升上来（最多错开前 8 条），返回再看同一批不重播 -->
           <div :key="relatedKey" class="r-list" :class="{ rise: riseRelated }">
-            <RelatedVideo v-for="(v, i) in related" :key="v.id" :video="v" :style="{ '--i': Math.min(i, 7) }" />
+            <RelatedVideo v-for="(v, i) in related" :key="v.id" :video="v" :away="flownId === String(v.id)" :style="{ '--i': Math.min(i, 7) }" />
             <div v-if="!related.length" class="r-empty">暂时没有相似推荐</div>
           </div>
         </section>
@@ -645,14 +717,17 @@ const noop = () => {}
       </div>
     </div>
 
-    <!-- 按视频 id 重新挂上：换视频时数字直接换成新视频的，不会像点了赞那样翻过去 -->
-    <nav v-if="video" :key="video.id" class="acts" aria-label="视频操作">
+    <!--
+      操作栏本身一直留着（换视频等新内容时在这里变暗、再就地亮起来）；数字按视频 id 重新挂上：换视频时直接换成新视频的，
+      不会像点了赞那样翻过去
+    -->
+    <nav v-if="video" class="acts" :class="{ 'acts-in': actsIn }" aria-label="视频操作" @animationend.self="actsIn = false">
       <button type="button" :class="{ on: video.liked }" :aria-pressed="!!video.liked" :aria-label="`点赞 ${video.likeCount ?? 0}`" @click="tapAct('like')">
         <span class="ico">
           <Icon :key="fx.like?.key || 0" name="thumbUp" :class="fxClass('like')" @animationend="endFx('like', $event)" />
           <ActBurst v-if="rings.like" :key="rings.like" @done="rings.like = 0" />
         </span>
-        <RollNum :value="formatCount(video.likeCount)" :n="video.likeCount ?? 0" />
+        <RollNum :key="video.id" :value="formatCount(video.likeCount)" :n="video.likeCount ?? 0" />
       </button>
       <button type="button" :class="{ on: video.disliked }" :aria-pressed="!!video.disliked" @click="tapAct('dislike')">
         <span class="ico"><Icon :key="fx.dislike?.key || 0" name="thumbDown" :class="fxClass('dislike')" @animationend="endFx('dislike', $event)" /></span>
@@ -663,7 +738,7 @@ const noop = () => {}
           <Icon :key="fx.fav?.key || 0" name="heart" :class="fxClass('fav')" @animationend="endFx('fav', $event)" />
           <ActBurst v-if="rings.fav" :key="rings.fav" @done="rings.fav = 0" />
         </span>
-        <RollNum :value="formatCount(video.favCount)" :n="video.favCount ?? 0" />
+        <RollNum :key="video.id" :value="formatCount(video.favCount)" :n="video.favCount ?? 0" />
       </button>
       <button type="button" @click="tapShare">
         <span class="ico"><Icon :key="fx.share?.key || 0" name="shareNodes" :class="fxClass('share')" @animationend="endFx('share', $event)" /></span>
@@ -677,14 +752,26 @@ const noop = () => {}
 .page.video { background: var(--bg); }
 /* 封面正从列表飞过来：播放器（或加载中的占位）先藏着，落地时由浮层原样接上 */
 .video.hero-hold > .player, .video.hero-hold > .player-ph { opacity: 0; }
-/* 换视频、旧内容还留着的那一会儿：旧播放器（重播、下一个、控制栏）和底部操作栏不接手指，返回键照常能点 */
-.video.switching > .acts, .video.switching > .player, .video.switching > .player :deep(*) { pointer-events: none; }
+/*
+ * 换视频、旧内容还留着的那一会儿：旧播放器（重播、下一个、控制栏）、信息区、「换一批」和底部操作栏不接手指，
+ * 返回键照常能点；相似推荐照样能点（换成点的那一个）
+ */
+.video.switching > .acts, .video.switching > .player, .video.switching > .player :deep(*),
+.video.switching .info, .video.switching .r-hd { pointer-events: none; }
 .video.switching > .player.ui-on :deep(.back) { pointer-events: auto; }
+/*
+ * 等了 0.25 秒新内容还没回来：旧的信息区、相似推荐、操作栏变暗；新内容回来时（同一个元素里换了内容）就地亮起来，
+ * 骨架屏顶上来时也是从暗处亮起来。很快回来的话还没开始变暗就换好了，什么也看不到
+ */
+.video > .scroll, .video > .acts { transition: opacity var(--dur-2) var(--ease-out); }
+.video.dim > .scroll, .video.dim > .acts { opacity: .4; transition-duration: var(--dur-3); }
+/* 骨架屏撤掉了旧的操作栏：新内容回来时操作栏淡入 */
+.acts.acts-in { animation: m-fade var(--dur-2) var(--ease-out); }
 
 .player-ph { position: relative; flex: none; width: 100%; aspect-ratio: 16 / 9; overflow: hidden; background: #000; }
 .ph-cv { position: absolute; inset: 0; filter: var(--media); }
 .ph-cv::after { content: ''; position: absolute; inset: 0; background: rgba(0, 0, 0, .35); }
-/* 和播放器的缓冲转圈（.spinner）一样大、一样等 0.25 秒还在加载才淡入：接口很快回来时不闪，换成播放器时大小不跳 */
+/* 和播放器的缓冲转圈（.spinner）一样大、一样等 0.25 秒还在加载才淡入（phSpin）：接口很快回来时不闪，换成播放器时大小不跳 */
 .ph-spin {
   position: absolute;
   left: 50%;
@@ -695,7 +782,9 @@ const noop = () => {}
   border: 3px solid rgba(255, 255, 255, .25);
   border-top-color: #fff;
   border-radius: 50%;
-  animation: rot .8s linear infinite, ph-spin-in var(--dur-2) var(--ease-out) .25s backwards;
+  /* 一圈很淡的阴影：画面很亮（浅色视频、亮的封面）时也看得清；不偏移，跟着转也看不出来 */
+  filter: drop-shadow(0 0 3px rgba(0, 0, 0, .45));
+  animation: rot .8s linear infinite, ph-spin-in var(--dur-2) var(--ease-out);
 }
 @keyframes ph-spin-in { from { opacity: 0; } }
 .ph-back { position: absolute; left: 6px; top: 6px; display: grid; place-items: center; width: 40px; height: 40px; color: #fff; }
@@ -856,5 +945,13 @@ const noop = () => {}
 @keyframes sk { 50% { opacity: .5; } }
 @media (prefers-reduced-motion: reduce) {
   .sk, .ph-spin { animation: none; }
+  /* 变暗 / 亮起来直接到位（极短的过渡也会先画一帧暗的新内容） */
+  .video > .scroll, .video > .acts { transition: none; }
+}
+
+/* iOS 14 / 安卓 WebView 87 不认 aspect-ratio（Safari 15、Chrome 88 才有）：里面全是绝对定位的东西，高度会是 0，用 ::before 的 padding 撑出同样的比例 */
+@supports not (aspect-ratio: 1 / 1) {
+  .player-ph::before { content: ''; display: block; padding-top: 56.25%; }
+  .sk-cv::before { content: ''; display: block; padding-top: 62.5%; }
 }
 </style>

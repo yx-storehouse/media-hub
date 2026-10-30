@@ -692,4 +692,9 @@ onBeforeUnmount(() => {
 .iv-ghost { position: absolute; inset: 0; z-index: 70; overflow: hidden; pointer-events: none; }
 .iv-ghost-bg { position: absolute; inset: 0; background: #000; }
 .iv-ghost-img { position: absolute; display: block; max-width: none; object-fit: fill; transform-origin: 0 0; background-color: #161616; background-position: center; background-size: cover; }
+
+/* iOS 14 / 安卓 WebView 87 不认 aspect-ratio（Safari 15、Chrome 88 才有）：里面全是绝对定位的东西，高度会是 0，用 ::before 的 padding 撑出同样的比例 */
+@supports not (aspect-ratio: 1 / 1) {
+  .iv-fb::before { content: ''; display: block; padding-top: 75%; }
+}
 </style>

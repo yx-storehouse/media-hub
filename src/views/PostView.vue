@@ -77,6 +77,8 @@ const following = ref(false)
 const scroller = ref(null)
 /* 配图按原始比例显示：加载完读出宽高，之前先用 4:3 占位 */
 const ratios = shallowRef({})
+/* 同一个比例换算成 padding-top（iOS 14 / 安卓 WebView 87 不认 aspect-ratio，样式里用 ::before 撑高）：'3 / 2' → '66.6667%' */
+const padOf = r => { const [w, h] = String(r || '4 / 3').split('/').map(Number); return w > 0 && h > 0 ? `${+(h / w * 100).toFixed(4)}%` : '75%' }
 /* 全屏看大图：{ images, index } */
 const viewer = shallowRef(null)
 /* 取消关注前的确认 */
@@ -469,7 +471,7 @@ onBeforeRouteUpdate(to => {
                   <Cover
                     class="pd-img"
                     v-bind="img"
-                    :style="{ aspectRatio: ratios[i] || '4 / 3' }"
+                    :style="{ aspectRatio: ratios[i] || '4 / 3', '--ar-pad': padOf(ratios[i]) }"
                     @load="onImage(i, $event)"
                   />
                 </button>
@@ -677,5 +679,13 @@ onBeforeRouteUpdate(to => {
 @keyframes sk { 50% { opacity: .5; } }
 @media (prefers-reduced-motion: reduce) {
   .sk { animation: none; }
+}
+
+/* iOS 14 / 安卓 WebView 87 不认 aspect-ratio（Safari 15、Chrome 88 才有）：里面全是绝对定位的东西，高度会是 0，用 ::before 的 padding 撑出同样的比例；.pd-split 本来就是 padding 撑的 */
+@supports not (aspect-ratio: 1 / 1) {
+  .pd-vcv::before { content: ''; display: block; padding-top: 56.25%; }
+  .sk-img::before { content: ''; display: block; padding-top: 75%; }
+  /* 配图：比例在行内样式的 --ar-pad 里 */
+  .pd-img::before { content: ''; display: block; padding-top: var(--ar-pad, 75%); }
 }
 </style>

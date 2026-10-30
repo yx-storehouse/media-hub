@@ -51,7 +51,8 @@ const TOKENS = {
   '--ease-out': 'cubic-bezier(.22, 1, .36, 1)',
   '--ease-in': 'cubic-bezier(.55, 0, 1, .45)',
   '--ease-in-out': 'cubic-bezier(.65, 0, .35, 1)',
-  '--ease-spring': 'cubic-bezier(.34, 1.56, .64, 1)'
+  // 和 motion.css 里 :root 的兜底同一条（bouncy 的形状）；只有读不到 CSS 变量时才用到
+  '--ease-spring': 'cubic-bezier(.5, 1.77, .1, .92)'
 }
 let cached = null
 function tokens() {

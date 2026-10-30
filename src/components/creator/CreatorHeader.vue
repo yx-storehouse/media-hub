@@ -166,6 +166,10 @@ const stats = computed(() => {
 .cr-stats .roll { vertical-align: bottom; }
 
 .cr-bio { margin: 8px 16px 0; color: var(--t3); font-size: 14px; line-height: 21px; overflow-wrap: anywhere; white-space: pre-line; }
+/* Safari 15.4 以前不认 overflow-wrap: anywhere（没有空格的长串——英文名、链接——不换行、顶出屏幕）；word-break: break-word 效果一样，老 Safari 也认 */
+@supports not (overflow-wrap: anywhere) {
+  .cr-name, .cr-bio { word-break: break-word; }
+}
 
 /* ---- 骨架 ---- */
 .sk { background: #161616; animation: sk 1.2s ease-in-out infinite; }

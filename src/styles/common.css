@@ -8,6 +8,10 @@
 .vc:active { opacity: .82; }
 .vc.big { grid-column: 1 / -1; }
 .cv { aspect-ratio: 16 / 10; border-radius: 8px; filter: var(--media); }
+/* iOS 14 / 安卓 WebView 87 不认 aspect-ratio（Safari 15、Chrome 88 才有）：里面全是绝对定位的东西，高度会是 0，用 ::before 的 padding 撑出同样的比例（16:10）；改了比例的页面（直播 3:4、同城 1:1）在自己的样式里改 padding-top */
+@supports not (aspect-ratio: 1 / 1) {
+  .cv::before { content: ''; display: block; padding-top: 62.5%; }
+}
 .dur {
   position: absolute;
   right: 6px;
@@ -36,6 +40,10 @@
   overflow-wrap: anywhere;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
+}
+/* Safari 15.4 以前不认 overflow-wrap: anywhere（没有空格的长串——英文名、链接——不换行、顶出屏幕）；word-break: break-word 效果一样，老 Safari 也认 */
+@supports not (overflow-wrap: anywhere) {
+  .tt { word-break: break-word; }
 }
 /* the full-width featured card has no neighbour to line up with: no empty second line */
 .vc.big .tt { min-height: 0; }
@@ -151,12 +159,18 @@
 
 /*
  * ---- 内容页动效（配合 src/components/home/motion.js）----
- * 骨架 → 内容、换排序 / 换一批：<div class="m-swap"><Transition name="m-skel">…</Transition></div>
- * 离开的那块（骨架或旧列表）绝对定位叠在原处淡出、不再占位，新内容自己入场（v-rise），两者交叉进行。
- * 离开的那块垫在新内容下面（z-index: -1，只在 .m-swap 里比）：骨架不会盖住刚出来的卡片，看起来是新内容从它上面浮现。
+ * 骨架 → 内容、换筛选 / 排序 / 关键词、换一批：<ContentSwap :pending>（components/home/ContentSwap.js，说明在那里）。
+ * 旧内容等新内容最多 250ms（还占着位置、不接手指），快的直接换成新的，慢的才淡入骨架；动画由脚本做，用到下面两个类：
+ *   .m-held  留在原处等新内容的旧内容
+ *   .m-out   离开中的那块：绝对定位叠在原处、不再占位，垫在新内容下面（z-index: -1，只在 .m-swap 里比），
+ *            看起来是新内容从它上面浮现
+ * 只有首次加载（骨架 → 内容）、或者要整块直接撤掉旧内容的地方（帖子详情、社区换标签、收藏、片库、推荐页的分区骨架）
+ * 还用 CSS 过渡：<div class="m-swap"><Transition name="m-skel">…</Transition></div>，离开的那块规则同 .m-out。
  */
 /* flow-root：子元素的外边距不穿出去，离场时绝对定位的那块和在流里时位置完全一样 */
 .m-swap { position: relative; z-index: 0; display: flow-root; }
+.m-swap > .m-held { pointer-events: none; }
+.m-swap > .m-out { position: absolute; top: 0; left: 0; right: 0; z-index: -1; pointer-events: none; }
 .m-skel-leave-active { position: absolute; top: 0; left: 0; right: 0; z-index: -1; pointer-events: none; transition: opacity var(--dur-2) var(--ease-in); }
 .m-skel-leave-to { opacity: 0; }
 /* 离开的那块里，标题、时长角标立刻藏起来：文字交叉淡化会叠成一团看不清（封面照常淡出） */

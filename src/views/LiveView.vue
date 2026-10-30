@@ -128,4 +128,9 @@ loadLives()
 .bt { position: absolute; left: 9px; right: 9px; bottom: 8px; z-index: 2; }
 .bt b { display: block; overflow: hidden; font-size: 13px; font-weight: 600; line-height: 18px; white-space: nowrap; text-overflow: ellipsis; }
 .bt span { display: block; overflow: hidden; color: rgba(255, 255, 255, .72); font-size: 11px; line-height: 15px; white-space: nowrap; text-overflow: ellipsis; }
+
+/* iOS 14 / WebView 87 兜底：3:4（common.css 的 .cv::before 改个比例） */
+@supports not (aspect-ratio: 1 / 1) {
+  .lv .cv::before { padding-top: 133.3333%; }
+}
 </style>

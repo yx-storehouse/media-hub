@@ -13,7 +13,9 @@ import { rememberVideo } from './preview'
  */
 const props = defineProps({
   /** Video + { tags, playCount, favCount } */
-  video: { type: Object, required: true }
+  video: { type: Object, required: true },
+  /** 缩略图已经飞上去了（播放页在等新视频的内容，旧列表还留着）：这里空着，画面上只有飞上去的那一份 */
+  away: Boolean
 })
 
 const router = useRouter()
@@ -28,7 +30,7 @@ function onClick(e) {
 </script>
 
 <template>
-  <RouterLink :to="to" class="rv" @click="onClick">
+  <RouterLink :to="to" class="rv" :class="{ away }" @click="onClick">
     <Cover class="rv-cv" v-bind="video.cover"><span class="dur">{{ video.dur }}</span></Cover>
     <div class="rv-bd">
       <div class="rv-tt">{{ video.title }}</div>
@@ -45,6 +47,8 @@ function onClick(e) {
 .rv { display: flex; gap: 11px; padding: 0 14px; }
 .rv:active { opacity: .82; }
 .rv-cv { flex: none; width: 142px; aspect-ratio: 16 / 10; border-radius: 7px; filter: var(--media); }
+/* hero.js 落地时会把缩略图露回来：旧列表还在的这一会儿用 class 接着藏着 */
+.rv.away .rv-cv { visibility: hidden; }
 .rv-bd { display: flex; flex: 1; flex-direction: column; min-width: 0; padding: 1px 0; }
 .rv-tt {
   display: -webkit-box;
@@ -60,4 +64,9 @@ function onClick(e) {
 .rv-st { display: flex; gap: 22px; margin-top: auto; color: var(--t2); font-size: 12px; font-variant-numeric: tabular-nums; }
 .rv-st span { display: flex; align-items: center; gap: 4px; }
 .rv-st svg { width: 11px; height: 11px; }
+
+/* iOS 14 / 安卓 WebView 87 不认 aspect-ratio（Safari 15、Chrome 88 才有）：里面全是绝对定位的东西，高度会是 0，用 ::before 的 padding 撑出同样的比例 */
+@supports not (aspect-ratio: 1 / 1) {
+  .rv-cv::before { content: ''; display: block; padding-top: 62.5%; }
+}
 </style>

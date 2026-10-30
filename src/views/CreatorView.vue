@@ -24,6 +24,7 @@ import PostSkeleton from '@/components/community/PostSkeleton.vue'
 import CreatorHeader from '@/components/creator/CreatorHeader.vue'
 import MediaGrid from '@/components/creator/MediaGrid.vue'
 import UnfollowSheet from '@/components/creator/UnfollowSheet.vue'
+import ContentSwap from '@/components/home/ContentSwap'
 import { createFeed, PAGE } from '@/components/creator/feed'
 import { haptic } from '@/utils/motion'
 import { cameBack, useSlider, cover, vRise, fadeIn, scrollBehavior } from '@/components/home/motion'
@@ -227,15 +228,9 @@ function onTabKey(e) {
   nextTick(() => document.getElementById(`cr-tab-${next}`)?.focus())
 }
 
-/*
- * 换排序：旧列表在骨架出来的那一帧直接撤掉（sortInstant 让这一次不走 m-skel 的淡出）。
- * 不然旧列表垫在骨架下面慢慢淡、骨架缝里透出旧缩略图，新列表浮上来时三层叠在一起。骨架 → 新列表照常交叉淡入。
- */
-const sortInstant = ref(false)
+/* 换排序：旧列表留着等新的（ContentSwap），快的直接换成新列表，慢了（250ms）才淡入骨架 */
 function changeSort(i) {
   if (sort.value === i) return
-  sortInstant.value = true
-  nextTick(() => { sortInstant.value = false })
   sort.value = i
   sortKey.value++
   videos.reset()
@@ -468,29 +463,27 @@ onBeforeRouteUpdate(to => {
               <span class="lb">{{ s }}</span>
             </button>
           </div>
-          <!-- 骨架原地淡出，新列表错峰浮现；换排序时旧列表直接撤掉（sortInstant），骨架接上 -->
-          <div class="m-swap">
-            <Transition name="m-skel" :css="!sortInstant">
-              <div v-if="videos.total === null && !videos.error" class="grid g11 cr-sk" :class="{ pt: !creator }" aria-hidden="true">
-                <div v-for="i in 6" :key="i" class="vc"><div class="cv sk" /><div class="sk sk-tt" /></div>
+          <!-- 骨架原地淡出，新列表错峰浮现；换排序时旧列表留着等新的，快的直接换成新列表，慢了（250ms）才淡入骨架 -->
+          <ContentSwap :pending="videos.total === null && !videos.error" :hold="!!creator">
+            <div v-if="videos.total === null && !videos.error" class="grid g11 cr-sk" :class="{ pt: !creator }" aria-hidden="true">
+              <div v-for="i in 6" :key="i" class="vc"><div class="cv sk" /><div class="sk sk-tt" /></div>
+            </div>
+            <div v-else-if="videos.total === null" class="empty">
+              加载失败，请检查网络
+              <button type="button" class="retry" @click="videos.more()">重试</button>
+            </div>
+            <div v-else-if="!videos.list.length" v-rise.self class="empty">还没有发布视频</div>
+            <div v-else :key="`list${sortKey}`">
+              <div v-rise class="grid g11">
+                <VideoCard v-for="v in videos.list" :key="v.id" :video="v" />
               </div>
-              <div v-else-if="videos.total === null" class="empty">
-                加载失败，请检查网络
-                <button type="button" class="retry" @click="videos.more()">重试</button>
+              <div class="cr-foot">
+                <span v-if="videos.loading">加载中…</span>
+                <button v-else-if="videos.error" type="button" class="cr-more" @click="videos.more()">加载失败，点击重试</button>
+                <span v-else-if="videos.done">没有更多了</span>
               </div>
-              <div v-else-if="!videos.list.length" v-rise.self class="empty">还没有发布视频</div>
-              <div v-else :key="`list${sortKey}`">
-                <div v-rise class="grid g11">
-                  <VideoCard v-for="v in videos.list" :key="v.id" :video="v" />
-                </div>
-                <div class="cr-foot">
-                  <span v-if="videos.loading">加载中…</span>
-                  <button v-else-if="videos.error" type="button" class="cr-more" @click="videos.more()">加载失败，点击重试</button>
-                  <span v-else-if="videos.done">没有更多了</span>
-                </div>
-              </div>
-            </Transition>
-          </div>
+            </div>
+          </ContentSwap>
         </section>
 
         <!-- 帖子：卡片和社区列表同一个组件；作者就是本页的创作者，头像 / 名字不再链接 -->
@@ -502,24 +495,22 @@ onBeforeRouteUpdate(to => {
           role="tabpanel"
           aria-labelledby="cr-tab-posts"
         >
-          <div class="m-swap">
-            <Transition name="m-skel">
-              <PostSkeleton v-if="posts.total === null && !posts.error" :count="2" />
-              <div v-else-if="posts.total === null" class="empty">
-                加载失败，请检查网络
-                <button type="button" class="retry" @click="posts.more()">重试</button>
+          <ContentSwap :pending="posts.total === null && !posts.error" :hold="!!creator">
+            <PostSkeleton v-if="posts.total === null && !posts.error" :count="2" />
+            <div v-else-if="posts.total === null" class="empty">
+              加载失败，请检查网络
+              <button type="button" class="retry" @click="posts.more()">重试</button>
+            </div>
+            <div v-else-if="!posts.list.length" v-rise.self class="empty">还没有发布帖子</div>
+            <div v-else>
+              <PostCard v-for="p in posts.list" :key="p.id" :post="p" :author-link="false" />
+              <div class="cr-foot">
+                <span v-if="posts.loading">加载中…</span>
+                <button v-else-if="posts.error" type="button" class="cr-more" @click="posts.more()">加载失败，点击重试</button>
+                <span v-else-if="posts.done">没有更多了</span>
               </div>
-              <div v-else-if="!posts.list.length" v-rise.self class="empty">还没有发布帖子</div>
-              <div v-else>
-                <PostCard v-for="p in posts.list" :key="p.id" :post="p" :author-link="false" />
-                <div class="cr-foot">
-                  <span v-if="posts.loading">加载中…</span>
-                  <button v-else-if="posts.error" type="button" class="cr-more" @click="posts.more()">加载失败，点击重试</button>
-                  <span v-else-if="posts.done">没有更多了</span>
-                </div>
-              </div>
-            </Transition>
-          </div>
+            </div>
+          </ContentSwap>
         </section>
 
         <!-- 媒体：三列照片墙（视频封面 + 帖子的图），点图片看大图、点视频进播放页 -->
@@ -531,27 +522,25 @@ onBeforeRouteUpdate(to => {
           role="tabpanel"
           aria-labelledby="cr-tab-media"
         >
-          <div class="m-swap">
-            <Transition name="m-skel">
-              <div v-if="media.total === null && !media.error" class="cr-mg-sk" aria-hidden="true">
-                <div v-for="i in 12" :key="i" class="sk" />
+          <ContentSwap :pending="media.total === null && !media.error" :hold="!!creator">
+            <div v-if="media.total === null && !media.error" class="cr-mg-sk" aria-hidden="true">
+              <div v-for="i in 12" :key="i" class="sk" />
+            </div>
+            <div v-else-if="media.total === null" class="empty">
+              加载失败，请检查网络
+              <button type="button" class="retry" @click="media.more()">重试</button>
+            </div>
+            <div v-else-if="!media.list.length" v-rise.self class="empty">还没有发布图片</div>
+            <div v-else>
+              <!-- 照片墙一格一格浮现（只缩放、不上下错位：格子之间只有 2px，错位会叠到下一行上） -->
+              <MediaGrid ref="mediaGrid" v-rise="{ y: 0, scale: .94, max: 12 }" :items="media.list" @open="openImage" />
+              <div class="cr-foot">
+                <span v-if="media.loading">加载中…</span>
+                <button v-else-if="media.error" type="button" class="cr-more" @click="media.more()">加载失败，点击重试</button>
+                <span v-else-if="media.done">没有更多了</span>
               </div>
-              <div v-else-if="media.total === null" class="empty">
-                加载失败，请检查网络
-                <button type="button" class="retry" @click="media.more()">重试</button>
-              </div>
-              <div v-else-if="!media.list.length" v-rise.self class="empty">还没有发布图片</div>
-              <div v-else>
-                <!-- 照片墙一格一格浮现（只缩放、不上下错位：格子之间只有 2px，错位会叠到下一行上） -->
-                <MediaGrid ref="mediaGrid" v-rise="{ y: 0, scale: .94, max: 12 }" :items="media.list" @open="openImage" />
-                <div class="cr-foot">
-                  <span v-if="media.loading">加载中…</span>
-                  <button v-else-if="media.error" type="button" class="cr-more" @click="media.more()">加载失败，点击重试</button>
-                  <span v-else-if="media.done">没有更多了</span>
-                </div>
-              </div>
-            </Transition>
-          </div>
+            </div>
+          </ContentSwap>
         </section>
       </template>
       <div class="pad-b" />

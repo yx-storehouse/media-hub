@@ -585,8 +585,13 @@ function launch(p, coverEl, reuse) {
       fallback: coverEl.style.backgroundImage || '',
       aspect: ok ? img.naturalWidth / img.naturalHeight : fallbackAspect(coverEl.style.backgroundImage)
     })
-    // 卡片按下时变暗了一点（:active）：浮层从同样的亮度开始，飞起来时恢复
-    const o = parseFloat(getComputedStyle(coverEl.closest('a') || coverEl).opacity)
+    // 卡片按下时变暗了一点（:active），或者整块变暗着（播放页换视频等新内容时 .scroll 是 .4）：浮层从同样的亮度开始，飞起来时恢复。
+    // 看到的亮度是一路往上到 #app 的不透明度相乘（每层读一次样式、不排版，点一下只读这一次）
+    let o = 1
+    for (let n = coverEl.closest('a') || coverEl; n && n.id !== 'app'; n = n.parentElement) {
+      const v = parseFloat(getComputedStyle(n).opacity)
+      if (Number.isFinite(v)) o *= v
+    }
     if (o < 0.99) f.layers[0].el.animate([{ opacity: o }, { opacity: 1 }], { duration: tok().d2, easing: tok().out })
     // 图片解码好了，浮层才露出来、卡片的封面同时藏起来（同一帧，看不出换过）
     f.el.style.visibility = 'hidden'

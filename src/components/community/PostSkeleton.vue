@@ -26,4 +26,9 @@ defineProps({
 @media (prefers-reduced-motion: reduce) {
   .sk { animation: none; }
 }
+
+/* iOS 14 / 安卓 WebView 87 不认 aspect-ratio（Safari 15、Chrome 88 才有）：里面全是绝对定位的东西，高度会是 0，用 ::before 的 padding 撑出同样的比例 */
+@supports not (aspect-ratio: 1 / 1) {
+  .md::before { content: ''; display: block; padding-top: 56.25%; }
+}
 </style>

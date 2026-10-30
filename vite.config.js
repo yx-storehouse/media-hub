@@ -2,7 +2,7 @@ import { fileURLToPath, URL } from 'node:url'
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 
-/* oldest engines we ship to: iOS 14 Safari / WKWebView and Android System WebView (Chrome) 87 */
+/* oldest engines we ship to: iOS 14.5 Safari / WKWebView (14.0–14.4 lack flex gap) and Android System WebView (Chrome) 87; 'safari14' stays as the esbuild syntax target */
 const BROWSERS = ['chrome87', 'safari14', 'firefox78', 'edge88']
 const API_TARGET = process.env.API_TARGET || 'http://127.0.0.1:3000'
 const abs = p => fileURLToPath(new URL(p, import.meta.url))

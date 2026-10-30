@@ -97,4 +97,9 @@ loadItems()
 .ft { display: flex; align-items: center; justify-content: space-between; margin-top: auto; color: var(--t2); font-size: 12px; }
 .ft b { color: var(--accent); font-size: 14px; font-weight: 600; }
 .ft .pin { display: inline; width: 12px; height: 12px; margin-right: 3px; vertical-align: -2px; }
+
+/* iOS 14 / WebView 87 兜底：正方形（common.css 的 .cv::before 改个比例） */
+@supports not (aspect-ratio: 1 / 1) {
+  .nb-item .cv::before { padding-top: 100%; }
+}
 </style>

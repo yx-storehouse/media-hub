@@ -93,7 +93,10 @@ async function sync() {
   if (v.ended) v.currentTime = 0
   v.playbackRate = rate.value
   try {
-    await v.play()
+    const p = v.play()
+    // 要播了但手里的数据还不够播：开始等（够了会发 playing，见 onReady）
+    if (v.readyState < HAVE_FUTURE_DATA) onStall()
+    await p
   } catch (e) {
     // 文件打不开由 onError 处理（父组件会退回封面预览）；元素已被换掉时这个结果也没用了，都不再上报
     if (v.error || v !== videoEl.value) return
@@ -120,6 +123,72 @@ watch(() => props.playing, on => {
 watch(hasVideo, on => { if (on) sync() }, { flush: 'post' })
 watch(rate, r => { if (videoEl.value) videoEl.value.playbackRate = r })
 onMounted(sync)
+
+/*
+ * ---------- 缓冲转圈：要播却卡住了（开播时数据还不够、网慢播到了还没下载的地方、拖到还没下载的位置）----------
+ * 和播放页播放器的转圈同一个样子、同一个规矩：卡住满 STALL_MS 还没好才淡入，一下就好的（翻页、开播、拖完进度）什么也看不到。
+ * 只管屏幕上这一条、并且是在播的时候；暂停、划走、播完、出错立刻收起。等多久由计时器管（不用 CSS 的 animation-delay：
+ * 「减少动态效果」时那个延迟会被清零，每次开播都会闪一下转圈）。
+ * 冷启动（这一条还一帧都没解出来就要播：首次打开短视频、划到一条完全没预载的）要多等一会儿：COLD_MS。解码器起步加上
+ * 页面刚挂上时主线程忙，慢一点的手机首次打开要 0.3～0.45 秒才真的播起来，这段时间封面一直在，不用再叠一个转圈。
+ * 转圈一旦出来，因为数据到了而收起时至少留满 MIN_SHOW_MS：数据刚好在转圈出来后几十毫秒到的话，不会刚开始淡入就没了、只闪一两帧。
+ */
+const HAVE_CURRENT_DATA = 2
+const HAVE_FUTURE_DATA = 3
+const STALL_MS = 250
+const COLD_MS = 600
+const MIN_SHOW_MS = 300
+const buffering = ref(false)
+let stallTimer = 0
+let hideTimer = 0
+/** 转圈出来的时刻（performance.now()） */
+let shownAt = 0
+/** 卡住时播到第几秒（-1 = 没卡住）：之后真的往前播了就算好了（有的浏览器缓冲好以后不一定再发 playing） */
+let stallAt = -1
+function onStall() {
+  const v = videoEl.value
+  if (!v || !props.current || !props.playing || v.paused || stallAt >= 0) return
+  stallAt = v.currentTime
+  clearTimeout(stallTimer)
+  // 转圈还在（刚好了、还没到最短时长又卡住）：接着转，不收
+  if (buffering.value) {
+    clearTimeout(hideTimer)
+    return
+  }
+  const cold = v.readyState < HAVE_CURRENT_DATA && v.currentTime === 0
+  stallTimer = setTimeout(() => {
+    if (stallAt < 0) return
+    buffering.value = true
+    shownAt = performance.now()
+  }, cold ? COLD_MS : STALL_MS)
+}
+/** 'stalled'（下载停住了一阵）：手里的数据确实不够接着播才算卡住 */
+function onStalled(e) {
+  if (e.target.readyState < HAVE_FUTURE_DATA) onStall()
+}
+/** 立刻收起：暂停、划走、播完、出错、页面收起 */
+function onBuffered() {
+  clearTimeout(stallTimer)
+  clearTimeout(hideTimer)
+  stallAt = -1
+  buffering.value = false
+}
+/** 数据够了、接着播了（playing / canplay / 真的往前播了）：转圈已经出来的话留满 MIN_SHOW_MS 再收 */
+function onReady() {
+  if (!buffering.value) return onBuffered()
+  clearTimeout(stallTimer)
+  stallAt = -1
+  const left = MIN_SHOW_MS - (performance.now() - shownAt)
+  if (left <= 0) return onBuffered()
+  clearTimeout(hideTimer)
+  hideTimer = setTimeout(onBuffered, left)
+}
+/** canplay：数据够了；还在播的话马上就会接着走（或者已经发了 playing） */
+function onCanPlay(e) {
+  if (e.target.readyState >= HAVE_FUTURE_DATA) onReady()
+}
+/* 不播了、或者不是屏幕上这一条了：收起 */
+watch(() => props.playing && props.current, on => { if (!on) onBuffered() })
 
 /** 小窗只跟着屏幕上这一条：滑走了就收起，免得小窗里停着上一条 */
 function exitPip() {
@@ -148,6 +217,7 @@ onDeactivated(() => {
   // 收起前在播的这条：收起期间不露暂停态的播放键（KeepAlive 在同一个任务里调完所有收起钩子，这时 playing 还是暂停前的值）
   ctlHold.value = props.playing
   videoEl.value?.pause()
+  onBuffered()
   clearFx()
   quiet.value = true
 })
@@ -174,6 +244,8 @@ onBeforeUnmount(() => {
   endPress()
   clearTimeout(tapTimer)
   clearTimeout(followTimer)
+  clearTimeout(stallTimer)
+  clearTimeout(hideTimer)
   cancelAnimationFrame(quietRaf)
   ro?.disconnect()
   const v = videoEl.value
@@ -190,15 +262,26 @@ function onMeta(e) {
   if (Number.isFinite(d) && d > 0) emit('duration', d)
   e.target.playbackRate = rate.value
 }
-const onTime = e => emit('time', e.target.currentTime)
+function onTime(e) {
+  const v = e.target
+  // 卡住以后又往前播了：缓冲好了
+  if (stallAt >= 0 && !v.paused && v.currentTime > stallAt + 0.05 && v.readyState >= HAVE_FUTURE_DATA) onReady()
+  emit('time', v.currentTime)
+}
 /*
  * 原生播放 / 暂停报给父组件。元素被移出文档时（文件打不开退回封面、页面被 KeepAlive 收起、卸载）
  * 浏览器会自动补发一次 pause，那不是用户或播放进度造成的，不能拿来改父组件的状态。
  */
 const onPlayState = e => {
+  if (e.type === 'pause') onBuffered()
   if (e.target.isConnected && e.target === videoEl.value) emit('state', e.type === 'play')
 }
+function onEnded() {
+  onBuffered()
+  emit('ended')
+}
 function onError() {
+  onBuffered()
   emit('state', false)
   emit('failed')
 }
@@ -559,8 +642,13 @@ const actions = computed(() => [
       @timeupdate="onTime"
       @play="onPlayState"
       @pause="onPlayState"
-      @ended="emit('ended')"
+      @ended="onEnded"
       @error="onError"
+      @waiting="onStall"
+      @stalled="onStalled"
+      @playing="onReady"
+      @canplay="onCanPlay"
+      @emptied="onBuffered"
     />
     <!-- 没有素材文件：完整、清晰地显示封面（不再假装在播放） -->
     <Cover v-else-if="clip.cover?.src" class="sv-poster" :src="clip.cover.src" :eager="eager" @load="posterOk = true" />
@@ -574,6 +662,8 @@ const actions = computed(() => [
       @pointercancel="pressCancel"
       @touchmove="holdScroll"
     />
+    <!-- 卡住了：中间转圈（满 0.25 秒才淡入），不接手指 -->
+    <div v-if="buffering" class="sv-buf" aria-hidden="true" />
     <!-- 外层上浮淡出（停一下再走），里层回弹放大 + 随机歪一点；外层的动画播完才移除 -->
     <i
       v-for="b in bursts"
@@ -788,6 +878,29 @@ const actions = computed(() => [
 @keyframes burst-float {
   to { opacity: 0; transform: translateY(-96px) scale(1.25); }
 }
+
+/*
+ * 缓冲转圈：和播放页播放器的转圈（VideoPlayer .spinner）一样大、一样的样子，放在中间播放键的位置。
+ * 等多久在脚本里（STALL_MS），挂上时只管淡入；拖进度条时让开（中间是大号时间）
+ */
+.sv-buf {
+  position: absolute;
+  left: 50%;
+  top: 52.5%;
+  z-index: 3;
+  width: 34px;
+  height: 34px;
+  margin: -17px 0 0 -17px;
+  border: 3px solid rgba(255, 255, 255, .25);
+  border-top-color: #fff;
+  border-radius: 50%;
+  /* 一圈很淡的阴影：画面很亮（浅色视频、亮的封面）时也看得清；不偏移，跟着转也看不出来 */
+  filter: drop-shadow(0 0 3px rgba(0, 0, 0, .45));
+  pointer-events: none;
+  animation: rot .8s linear infinite, sv-buf-in var(--dur-2) var(--ease-out);
+}
+@keyframes sv-buf-in { from { opacity: 0; } }
+.sv.scrubbing .sv-buf { opacity: 0; }
 
 /* 长按快进的提示：顶部居中，在「推荐 / 专题」下面 */
 .sv-boost {
@@ -1209,8 +1322,9 @@ const actions = computed(() => [
 /* 被 KeepAlive 收起时正在播的那条：父组件暂停了它，但离开的画面上不闪出暂停态的播放键 */
 .sv.quiet.held .sv-ctl { opacity: 0 !important; }
 
-/* 减少动态效果：时长已经由 motion.css 统一收敛；循环的箭头直接停住，免得只闪一下 */
+/* 减少动态效果：时长已经由 motion.css 统一收敛；循环的箭头、缓冲转圈直接停住，免得只闪一下 */
 @media (prefers-reduced-motion: reduce) {
-  .sv-boost .chev path { animation: none; }
+  .sv-boost .chev path,
+  .sv-buf { animation: none; }
 }
 </style>

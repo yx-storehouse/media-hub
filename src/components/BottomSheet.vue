@@ -28,6 +28,10 @@ watch(open, async isOpen => {
     returnFocus = document.activeElement
     await nextTick()
     sheet.value?.focus({ preventScroll: true })
+    // 不认 preventScroll 的 Safari 14：弹层这时还在屏幕下面（升起的起点），浏览器会把整个 #app 往上滚一截、
+    // 再随着弹层升起一点点滚回来，整页一晃。和 LoginSheet 一样，聚焦后把外壳拨回原位
+    const app = document.getElementById('app')
+    if (app?.scrollTop) app.scrollTop = 0
   } else if (returnFocus && returnFocus.isConnected) {
     returnFocus.focus({ preventScroll: true })
     returnFocus = null

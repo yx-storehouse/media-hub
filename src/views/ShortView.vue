@@ -127,7 +127,8 @@ const readExclude = () => [...new Set([...store.dislikedIds().reverse(), ...read
  */
 function withKeys(list, base, epoch) {
   const out = []
-  let prev = base.at(-1)?.id
+  // 不用 base.at(-1)：Array.prototype.at 要 Safari 15.4 / Chrome 92，iOS 14–15.3 和老安卓 WebView 上会抛错，整个短视频页空掉
+  let prev = base.length ? base[base.length - 1].id : undefined
   for (const c of list) {
     if (c.id === prev || store.has(dislikeKey(c.id))) continue
     out.push({ ...c, disliked: !!c.disliked, feedKey: ++keySeq, epoch })
@@ -623,7 +624,43 @@ async function goNext(i) {
   scrollToClip(i + 1, 'smooth')
 }
 
+/*
+ * iOS 14 的 Safari 不认 scroll-snap-stop: always（Safari 15 才有）：用力一甩，惯性会越过好几格才吸住。
+ * 只在这种浏览器上兜底（支持的浏览器不挂监听）：一次手势最多翻一格，滚过头就把 overflow 关一下掐断惯性、
+ * 停在下一格（正好是吸附点，打开 overflow 后不会再动）。只管手指按着和松手后 1 秒（惯性越界都发生在这段里），
+ * 之后别的原因引起的滚动（换一批后列表变短等）不受影响。
+ */
+const SNAP_STOP = (() => { try { return CSS.supports('scroll-snap-stop', 'always') } catch { return false } })()
+let flickFrom = -1 // 这次手势开始时停在哪一格；-1 = 不限制
+let flickUntil = 0 // 松手后限制到什么时候（performance.now()）
+let flickEl = null // 挂了监听的那个滚动容器（卸载时 feedEl 已经是 null）
+function onFlickStart() {
+  const f = feedEl.value
+  if (f?.clientHeight) flickFrom = Math.round(f.scrollTop / f.clientHeight)
+  flickUntil = Infinity
+}
+const onFlickEnd = () => { flickUntil = performance.now() + 1000 }
+function onFlickScroll() {
+  const f = feedEl.value
+  if (!f || flickFrom < 0) return
+  if (performance.now() > flickUntil) {
+    flickFrom = -1
+    return
+  }
+  const h = f.clientHeight
+  const y = f.scrollTop
+  const lo = Math.max(0, flickFrom - 1) * h
+  const hi = (flickFrom + 1) * h
+  if (y >= lo && y <= hi) return
+  flickFrom = -1
+  f.style.overflowY = 'hidden'
+  f.scrollTop = y > hi ? hi : lo
+  requestAnimationFrame(() => { f.style.overflowY = '' })
+}
+
 function scrollToClip(i, behavior = 'auto') {
+  // 程序自己滚（自动连播、恢复位置、转屏）不受上面「一次最多一格」的限制
+  flickFrom = -1
   const feed = feedEl.value
   if (feed) feed.scrollTo({ top: i * feed.clientHeight, behavior })
 }
@@ -812,6 +849,13 @@ onMounted(() => {
     ro = new ResizeObserver(onResize)
     ro.observe(feedEl.value)
   }
+  if (!SNAP_STOP && feedEl.value) {
+    flickEl = feedEl.value
+    flickEl.addEventListener('touchstart', onFlickStart, { passive: true })
+    flickEl.addEventListener('scroll', onFlickScroll, { passive: true })
+    flickEl.addEventListener('touchend', onFlickEnd, { passive: true })
+    flickEl.addEventListener('touchcancel', onFlickEnd, { passive: true })
+  }
 })
 
 onActivated(() => {
@@ -848,6 +892,10 @@ onUnmounted(() => {
   stop()
   clearTimeout(slowTimer)
   ro?.disconnect()
+  flickEl?.removeEventListener('touchstart', onFlickStart)
+  flickEl?.removeEventListener('scroll', onFlickScroll)
+  flickEl?.removeEventListener('touchend', onFlickEnd)
+  flickEl?.removeEventListener('touchcancel', onFlickEnd)
   io = null
   document.removeEventListener('fullscreenchange', onFullscreenChange)
   document.removeEventListener('webkitfullscreenchange', onFullscreenChange)

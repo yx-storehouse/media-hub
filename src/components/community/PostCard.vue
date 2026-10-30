@@ -274,4 +274,10 @@ function toggleFav() {
 /* 填充用 fill-opacity 过渡（fill 从 none 到颜色没法渐变） */
 .fav svg { fill: currentColor; fill-opacity: 0; transition: fill-opacity var(--dur-1) var(--ease-out); }
 .fav.on svg { fill-opacity: 1; }
+
+/* iOS 14 / 安卓 WebView 87 不认 aspect-ratio（Safari 15、Chrome 88 才有）：里面全是绝对定位的东西，高度会是 0，用 ::before 的 padding 撑出同样的比例 */
+@supports not (aspect-ratio: 1 / 1) {
+  .md::before { content: ''; display: block; padding-top: 56.25%; }
+  .tn::before { content: ''; display: block; padding-top: 88.9831%; }
+}
 </style>

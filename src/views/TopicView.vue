@@ -17,6 +17,7 @@ import Cover from '@/components/Cover.vue'
 import VideoCard from '@/components/VideoCard.vue'
 import SkeletonGrid from '@/components/home/SkeletonGrid.vue'
 import ListFoot from '@/components/home/ListFoot.vue'
+import ContentSwap from '@/components/home/ContentSwap'
 import { createPagedFeed, feedCount, useScrollMore } from '@/components/search/paging'
 import { useBack } from '@/composables/useBack'
 import { toast } from '@/composables/useToast'
@@ -335,23 +336,24 @@ onBeforeRouteUpdate(to => {
             <span class="lb">{{ s }}</span>
           </button>
         </div>
-        <!-- 换排序：旧列表原地淡出，骨架接上，新列表错峰浮现 -->
-        <div class="m-swap">
-          <Transition name="m-skel">
-            <div v-if="videos.total === null && videos.error" class="empty">
-              加载失败，请检查网络
-              <button type="button" class="retry" @click="videos.more()">重试</button>
+        <!--
+          换排序：旧列表留着等新的，快的直接换成新列表（错峰浮现），慢了（250ms）才淡入骨架。
+          骨架 10 张（5 行，比一屏高）：排序吸顶时点排序会滚到列表开头，骨架矮了页面就短了，滚动位置被压回顶上、排序条往下跳
+        -->
+        <ContentSwap :pending="videos.total === null && !videos.error">
+          <div v-if="videos.total === null && videos.error" class="empty">
+            加载失败，请检查网络
+            <button type="button" class="retry" @click="videos.more()">重试</button>
+          </div>
+          <SkeletonGrid v-else-if="videos.total === null" :count="10" gap="g11" />
+          <div v-else-if="!videos.list.length" v-rise.self class="empty">专题里还没有视频</div>
+          <div v-else :key="`list${sortKey}`">
+            <div v-rise class="grid g11">
+              <VideoCard v-for="(v, i) in videos.list" :key="v.id" :video="v" :to="videoTo(v, i)" />
             </div>
-            <SkeletonGrid v-else-if="videos.total === null" :count="6" gap="g11" />
-            <div v-else-if="!videos.list.length" v-rise.self class="empty">专题里还没有视频</div>
-            <div v-else :key="`list${sortKey}`">
-              <div v-rise class="grid g11">
-                <VideoCard v-for="(v, i) in videos.list" :key="v.id" :video="v" :to="videoTo(v, i)" />
-              </div>
-              <ListFoot :feed="videos" />
-            </div>
-          </Transition>
-        </div>
+            <ListFoot :feed="videos" />
+          </div>
+        </ContentSwap>
       </template>
       <div class="pad-b" />
     </div>

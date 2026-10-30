@@ -125,7 +125,7 @@ const appUrl = computed(() => `./index.html#/video/${props.editor.id}`)
 
     <h4 class="form-section">媒体</h4>
     <div class="form-grid">
-      <FormField class="full" label="播放地址" field="playbackUrl" :error="errors.playbackUrl" hint="mp4 / webm / m3u8 等；可以填外链，也可以上传到素材文件夹">
+      <FormField class="full" label="播放地址" field="playbackUrl" :error="errors.playbackUrl" hint="建议 mp4（H.264），iPhone、安卓都能放；webm / mkv 在部分 iPhone 上放不了。可以填外链，也可以上传到素材文件夹">
         <MediaUrlInput v-model="form.playbackUrl" kind="video" @uploaded="onVideoUploaded" />
       </FormField>
       <FormField class="full" label="封面" field="coverUrl" :error="errors.coverUrl" hint="留空时前台显示自动生成的占位图">

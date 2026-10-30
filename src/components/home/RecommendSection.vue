@@ -8,6 +8,7 @@ import { vRise, dur, ease } from './motion'
 import Icon from '@/components/Icon.vue'
 import VideoCard from '@/components/VideoCard.vue'
 import SkeletonGrid from './SkeletonGrid.vue'
+import ContentSwap from './ContentSwap'
 
 /* One block of the 推荐 tab: title, card grid, 换一批 / 看更多. */
 const props = defineProps({
@@ -26,6 +27,8 @@ const videos = shallowRef(null)
 const failed = ref(false)
 /* 每到一批就 +1：网格换 key，旧的一批原地淡出，新的一批入场 */
 const batch = ref(0)
+/* 正在换一批：旧的一批留着等新的（ContentSwap），快的直接换成新的一批，慢了（250ms）才淡入骨架 */
+const shuffling = ref(false)
 /* 新的一批怎么入场：第一次是错峰从下往上浮现；换一批是错峰淡入 + 轻微放大（和旧的一批交叉） */
 const fading = ref(false)
 const enterWith = () => (fading.value ? { y: 0, scale: 0.96 } : {})
@@ -33,14 +36,17 @@ const enterWith = () => (fading.value ? { y: 0, scale: 0.96 } : {})
 async function load(fade = false) {
   const requested = batchNo.value
   failed.value = false
+  shuffling.value = fade && !!videos.value
   try {
     const list = await getVideos(props.section.id, props.section.size, requested, props.section.seed)
     if (requested !== batchNo.value) return // a newer batch was asked for meanwhile
     videos.value = list
     batch.value++
     fading.value = fade
+    shuffling.value = false
   } catch {
     if (requested !== batchNo.value) return
+    shuffling.value = false
     if (videos.value) {
       // 换一批失败：留着这一批，下次还从这一批往后换
       batchNo.value = prevBatch(requested)
@@ -89,19 +95,17 @@ load()
       <RouterLink v-if="topicPath" class="sec-more" :to="topicPath">全部<Icon name="chevR" /></RouterLink>
     </div>
 
-    <!-- 骨架 / 上一批原地淡出，新的一批错峰入场 -->
-    <div class="m-swap">
-      <Transition name="m-skel">
-        <div v-if="videos" :key="batch" v-rise="enterWith()" class="grid">
-          <VideoCard v-for="(v, i) in videos" :key="v.id" :video="v" :big="section.featured && i === 0" />
-        </div>
-        <div v-else-if="failed" class="sec-fail">
-          这一组没加载出来
-          <button type="button" class="retry" @click="load()">重试</button>
-        </div>
-        <SkeletonGrid v-else :count="section.size || 4" :big="section.featured" />
-      </Transition>
-    </div>
+    <!-- 骨架原地淡出，新的一批错峰入场；换一批时上一批留着等新的，慢了（250ms）才淡入骨架 -->
+    <ContentSwap :pending="shuffling || (!videos && !failed)">
+      <div v-if="videos && !shuffling" :key="batch" v-rise="enterWith()" class="grid">
+        <VideoCard v-for="(v, i) in videos" :key="v.id" :video="v" :big="section.featured && i === 0" />
+      </div>
+      <div v-else-if="failed" class="sec-fail">
+        这一组没加载出来
+        <button type="button" class="retry" @click="load()">重试</button>
+      </div>
+      <SkeletonGrid v-else :count="section.size || 4" :big="section.featured" />
+    </ContentSwap>
 
     <div class="sec-btns">
       <button ref="shuffleBtn" type="button" class="btn-soft" @click="shuffle">

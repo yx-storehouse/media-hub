@@ -22,6 +22,7 @@ import Icon from '@/components/Icon.vue'
 import Cover from '@/components/Cover.vue'
 import BottomSheet from '@/components/BottomSheet.vue'
 import RollNum from './RollNum.vue'
+import { spinPhase } from './spin'
 
 /*
  * 播放页的播放器。
@@ -45,7 +46,12 @@ const props = defineProps({
   /** 从第几秒开始（断点续播） */
   start: { type: Number, default: 0 },
   /** 播完后的下一个：{ video: { id, title, cover }, hint }，没有为 null */
-  next: { type: Object, default: null }
+  next: { type: Object, default: null },
+  /**
+   * 挂上时播放页的加载占位已经在转圈（接口慢）：开播还在等数据的话，转圈原地接上（不再等 0.25 秒、不淡入），
+   * 不会消失一下又出现
+   */
+  spin: { type: Boolean, default: false }
 })
 const emit = defineEmits({
   back: null,
@@ -82,6 +88,33 @@ const duration = ref(props.video.len || 0)
 const current = ref(Math.min(props.start, duration.value || props.start))
 const muted = ref(false)
 const waiting = ref(false)
+/*
+ * 缓冲转圈：在播却卡住满 0.25 秒才出现（开播、拖完进度这种一下就好的不闪）。等多久由计时器管，不用 CSS 的
+ * animation-delay：「减少动态效果」时那个延迟会被清零，每次开播都会闪一下。短视频（ShortItem）同一个规矩
+ */
+const SPIN_MS = 250
+const spinning = ref(false)
+/** 转圈的样式：从占位接过来的不淡入；旋转的相位按时间对齐（和占位的转圈同一个角度，接上时不跳） */
+const spinStyle = ref(null)
+let spinTimer = 0
+/* 占位的转圈只接开播时的这一次（真的播起来以后就按平常的规矩） */
+let carrySpin = props.spin
+const showSpin = carried => {
+  if (spinning.value) return
+  spinStyle.value = { animation: carried ? 'rot .8s linear infinite' : null, animationDelay: spinPhase() }
+  spinning.value = true
+}
+function hideSpin() {
+  clearTimeout(spinTimer)
+  spinning.value = false
+}
+watch(() => waiting.value && playing.value, on => {
+  if (!on) return hideSpin()
+  clearTimeout(spinTimer)
+  if (carrySpin) showSpin(true)
+  else spinTimer = setTimeout(() => showSpin(false), SPIN_MS)
+  carrySpin = false
+})
 const failed = ref(false)
 /** 真全屏（Fullscreen API）/ 伪全屏（CSS 铺满屏幕，iOS 等不支持元素全屏时用） */
 const fullscreen = ref(false)
@@ -146,6 +179,8 @@ async function play() {
     await startPlayback()
   } finally {
     autoStarting.value = false
+    // 没播起来（被浏览器拦下）：占位接过来的转圈收起
+    if (!playing.value) hideSpin()
   }
 }
 
@@ -326,11 +361,18 @@ function hidePoster(e) {
 }
 function onPlaying(e) {
   waiting.value = false
+  carrySpin = false
+  hideSpin()
   hidePoster(e)
+}
+function onPause() {
+  playing.value = false
+  hideSpin()
 }
 function onError(e) {
   waiting.value = false
   playing.value = false
+  hideSpin()
   failed.value = true
   // 给用户看的只说结果；具体原因（地址、错误码）写到控制台，方便管理员排查
   const err = e.target.error
@@ -366,8 +408,13 @@ function report(reason) {
 /* ---------- 控制栏自动隐藏 ---------- */
 
 let hideTimer = 0
-/* 键盘焦点在播放器里时不自动收起，否则 Tab 过去的按钮是看不见的 */
-const keyboardInside = () => !!box.value?.querySelector(':focus-visible')
+/*
+ * 键盘焦点在播放器里时不自动收起，否则 Tab 过去的按钮是看不见的。
+ * :focus-visible 要 Safari 15.4：更老的 Safari 里 querySelector / matches 认不出它会直接抛 SyntaxError
+ * （控制栏就再也收不起来），抛错时当成「不是键盘焦点」
+ */
+const isFocusVisible = el => { try { return !!el?.matches(':focus-visible') } catch { return false } }
+const keyboardInside = () => { try { return !!box.value?.querySelector(':focus-visible') } catch { return false } }
 function showUi() {
   uiVisible.value = true
   clearTimeout(hideTimer)
@@ -383,7 +430,7 @@ function onSurfaceTap() {
   } else showUi()
 }
 function onFocusIn(e) {
-  if (e.target.matches(':focus-visible')) showUi()
+  if (isFocusVisible(e.target)) showUi()
 }
 
 /* ---------- 进度条：拖动 + 键盘（可点区域比看到的线高，见 .seek::before） ---------- */
@@ -570,7 +617,11 @@ onMounted(() => {
   if (!props.autoplay) return
   // 播放器还藏着（封面在飞）：先缓冲，露出来再播
   if (props.hold) autoplayHeld = true
-  else play()
+  else {
+    // 占位正在转圈：开播等数据的这一段转圈原地接上（不空一帧）；数据已经够了的话马上就会 playing 收起
+    if (carrySpin) showSpin(true)
+    play()
+  }
 })
 
 /*
@@ -596,6 +647,7 @@ onBeforeUnmount(() => {
   clearTimeout(tipTimer)
   clearTimeout(chipTimer)
   clearTimeout(posterTimer)
+  clearTimeout(spinTimer)
   document.removeEventListener('fullscreenchange', onFullscreenChange)
   document.removeEventListener('webkitfullscreenchange', onFullscreenChange)
   document.removeEventListener('visibilitychange', onVisibility)
@@ -644,7 +696,7 @@ onBeforeUnmount(() => {
       @timeupdate="onTime"
       @loadeddata="failed = false"
       @play="onPlay"
-      @pause="playing = false"
+      @pause="onPause"
       @ended="onEnded"
       @waiting="waiting = true"
       @playing="onPlaying"
@@ -684,7 +736,7 @@ onBeforeUnmount(() => {
       <Transition name="chip">
         <span v-if="chip" :key="chip.key" class="chip-tip" role="status">{{ chip.text }}</span>
       </Transition>
-      <div v-if="waiting && playing" class="spinner" aria-hidden="true" />
+      <div v-if="spinning" class="spinner" :style="spinStyle" aria-hidden="true" />
 
       <!-- 续播提示：从上次的位置接着播，可以一键从头 -->
       <div v-if="resumeTip && !ended" class="resume" role="status" @click.stop>
@@ -982,10 +1034,16 @@ onBeforeUnmount(() => {
   border: 3px solid rgba(255, 255, 255, .25);
   border-top-color: #fff;
   border-radius: 50%;
-  /* 卡顿一下就好的（开播、拖完进度）不闪转圈：等 0.25 秒还在缓冲才淡入 */
-  animation: rot .8s linear infinite, spin-in var(--dur-2) var(--ease-out) .25s backwards;
+  /* 一圈很淡的阴影：画面很亮（浅色视频、亮的封面）时也看得清；不偏移，跟着转也看不出来 */
+  filter: drop-shadow(0 0 3px rgba(0, 0, 0, .45));
+  /* 卡顿一下就好的（开播、拖完进度）不闪转圈：等 0.25 秒还在缓冲才挂上（spinning），挂上时淡入 */
+  animation: rot .8s linear infinite, spin-in var(--dur-2) var(--ease-out);
 }
 @keyframes spin-in { from { opacity: 0; } }
+/* 减少动态效果：不转，停在静止的样子 */
+@media (prefers-reduced-motion: reduce) {
+  .spinner { animation: none; }
+}
 
 /* ---------- 续播提示 ---------- */
 /* 控制栏显示时往上让出控制栏的高度（用 transform 跟着控制栏一起滑，不改 bottom） */
@@ -1131,4 +1189,10 @@ onBeforeUnmount(() => {
 .sp { flex: 1; }
 .speeds { margin-bottom: 12px; }
 .row2 small { display: block; margin-top: 2px; color: var(--t2); font-size: 12px; }
+
+/* iOS 14 / 安卓 WebView 87 不认 aspect-ratio（Safari 15、Chrome 88 才有）：里面全是绝对定位的东西，高度会是 0，用 ::before 的 padding 撑出同样的比例（伪全屏 / 全屏时高度另有规定，多出来的这块被 overflow 裁掉，看不见） */
+@supports not (aspect-ratio: 1 / 1) {
+  .player::before { content: ''; display: block; padding-top: 56.25%; }
+  .end-cv::before { content: ''; display: block; padding-top: 56.25%; }
+}
 </style>

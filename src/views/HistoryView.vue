@@ -341,6 +341,10 @@ onBeforeUnmount(() => {
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
 }
+/* Safari 15.4 以前不认 overflow-wrap: anywhere（没有空格的长串——英文名、链接——不换行、顶出屏幕）；word-break: break-word 效果一样，老 Safari 也认 */
+@supports not (overflow-wrap: anywhere) {
+  .hi-tt { word-break: break-word; }
+}
 .hi-pg { margin-top: auto; color: var(--t2); font-size: 12px; line-height: 17px; font-variant-numeric: tabular-nums; }
 .hi-pg.done { color: #6e6e6e; }
 .hi-at { color: #6e6e6e; font-size: 12px; line-height: 17px; font-variant-numeric: tabular-nums; }
@@ -369,5 +373,10 @@ onBeforeUnmount(() => {
 @keyframes sk { 50% { opacity: .5; } }
 @media (prefers-reduced-motion: reduce) {
   .sk { animation: none; }
+}
+
+/* iOS 14 / 安卓 WebView 87 不认 aspect-ratio（Safari 15、Chrome 88 才有）：里面全是绝对定位的东西，高度会是 0，用 ::before 的 padding 撑出同样的比例 */
+@supports not (aspect-ratio: 1 / 1) {
+  .hi-cv::before { content: ''; display: block; padding-top: 62.5%; }
 }
 </style>

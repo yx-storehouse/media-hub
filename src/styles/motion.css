@@ -23,10 +23,22 @@
  *    snappy  stiffness 700, damping 38（ζ≈0.72）  停稳 283ms
  *    smooth  stiffness 400, damping 38（ζ≈0.95）  停稳 358ms
  *    bouncy  stiffness 600, damping 26（ζ≈0.53）  停稳 382ms
- *  不支持 linear() 的浏览器（iOS 17.2 / Chrome 113 以前）用前面 :root 里拟合出来的 cubic-bezier 和时长兜底，
- *  形状接近，只是弹不出第二下。改参数：改 SPRINGS，再把
+ *  不支持 linear() 的浏览器（iOS 17.2 / Chrome 113 以前，真机里占不少）用前面 :root 里的 cubic-bezier + 时长兜底。
+ *  兜底是按真实时间拟合的：在 0..max(停稳, 兜底时长) 上每 1ms 比位置，Nelder–Mead 最小化 RMS（+ 速度误差），
+ *  约束：98% 停稳时间和弹簧差 10% 以内、过冲量只在弹簧有过冲时出现且差 25% 以内、收尾速度不超过峰值速度的约 9%
+ *  （不会冲到终点「咔」地停住），时长就是曲线走完的时间（没有拖着不动的尾巴）。结果（位置误差，1 = 全程）：
+ *    snappy  cubic-bezier(.31, .36, .16, 1.21) 246ms  RMS 1.1%、最大 2.3%；过冲 3.3%@187ms（弹簧 3.9%@171ms），
+ *            98% 停稳 222ms（弹簧 224ms）。旧的 (.29, .32, .11, 1.26) 270ms：RMS 1.2%，停稳晚 25ms
+ *    smooth  cubic-bezier(.23, .15, .19, 1) 314ms     RMS 0.6%、最大 1.1%；不过冲。旧的 320ms：RMS 0.7%、最大 1.5%
+ *    bouncy  cubic-bezier(.5, 1.77, .1, .92) 382ms    RMS 2.9%；过冲 13.5%@138ms（弹簧 14%@151ms），之后轻轻落到 1
+ *            下面一点再回来（y2 < 1），和弹簧一样「弹一下、回一下」，停稳 249ms（弹簧 235ms）。最大误差 8.8% 在头 20ms
+ *            （起步就有速度，看起来是「一碰就弹」）。旧的 (.45, 1.2, .01, 1.19) 360ms：过冲只有 9.5%、慢慢磨回 1，
+ *            停稳晚 88ms；--ease-spring 旧兜底 (.34, 1.56, .64, 1) 和 bouncy 的形状差 RMS 8.5%、最大 16%（峰按 382ms 算晚了约 70ms）
+ *    --ease-spring 的兜底和 --spring-bouncy 同一条曲线（两条路上都是 bouncy 的形状，时长由使用处给）。
+ *    带初速度的 springFrom() 不用固定曲线：现场给那根弹簧拟合（utils/motion.js 的 bezierFit），速度 ±10 内 RMS ≤ 1.1%。
+ *  改参数：改 SPRINGS，再把
  *    node --input-type=module -e "import('./src/utils/motion.js').then(m => console.log(m.springCss()))"
- *  的输出贴进下面的 @supports 段（兜底的 cubic-bezier 同步改 SPRINGS 里的 fallback）。
+ *  的输出贴进下面的 @supports 段，按上面的标准重新拟合兜底，同步改这里的 :root 和 SPRINGS 里的 fallback / fallbackMs。
  *  JS 里用 spring('snappy') / springEasing() / springFrom()（带初速度，松手接着手指的速度走），见 utils/motion.js。
  *
  * 层级（z-index，JS 里用 utils/motion.js 的 Z）
@@ -53,15 +65,15 @@
   --ease-in: cubic-bezier(.55, 0, 1, .45);         /* 离场 / 加速离开 */
   --ease-in-out: cubic-bezier(.65, 0, .35, 1);     /* 位置互换、指示条滑动 */
   --ease-fluid: cubic-bezier(.32, .72, 0, 1);      /* iOS 式流体减速：页面推入 / 返回 */
-  --ease-spring: cubic-bezier(.34, 1.56, .64, 1);  /* 轻微回弹：点赞、按钮弹起（支持 linear() 时换成真弹簧，见下） */
+  --ease-spring: cubic-bezier(.5, 1.77, .1, .92);  /* 轻微回弹：点赞、按钮弹起（bouncy 的形状；支持 linear() 时换成真弹簧，见下） */
 
-  /* 弹簧：先写兜底（拟合的 cubic-bezier + 对应时长），支持 linear() 的浏览器在下面的 @supports 里换成真弹簧 */
-  --spring-snappy: cubic-bezier(.29, .32, .11, 1.26);
-  --dur-spring-snappy: 270ms;
-  --spring-smooth: cubic-bezier(.23, .15, .18, 1.02);
-  --dur-spring-smooth: 320ms;
-  --spring-bouncy: cubic-bezier(.45, 1.2, .01, 1.19);
-  --dur-spring-bouncy: 360ms;
+  /* 弹簧：先写兜底（拟合的 cubic-bezier + 对应时长，拟合标准和误差见开头），支持 linear() 的浏览器在下面的 @supports 里换成真弹簧 */
+  --spring-snappy: cubic-bezier(.31, .36, .16, 1.21);
+  --dur-spring-snappy: 246ms;
+  --spring-smooth: cubic-bezier(.23, .15, .19, 1);
+  --dur-spring-smooth: 314ms;
+  --spring-bouncy: cubic-bezier(.5, 1.77, .1, .92);
+  --dur-spring-bouncy: 382ms;
 
   /* 交互参数 */
   --press-scale: .96;       /* 卡片、按钮按下时的缩放 */

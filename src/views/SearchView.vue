@@ -10,7 +10,7 @@ const SNAPSHOT_MAX = 6
 </script>
 
 <script setup>
-import { ref, shallowRef, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
+import { ref, shallowRef, reactive, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter, onBeforeRouteUpdate } from 'vue-router'
 import Icon from '@/components/Icon.vue'
 import Cover from '@/components/Cover.vue'
@@ -18,6 +18,7 @@ import VideoCard from '@/components/VideoCard.vue'
 import PostCard from '@/components/community/PostCard.vue'
 import SkeletonGrid from '@/components/home/SkeletonGrid.vue'
 import ListFoot from '@/components/home/ListFoot.vue'
+import ContentSwap from '@/components/home/ContentSwap'
 import { createPagedFeed, feedCount, useScrollMore } from '@/components/search/paging'
 import { useRecentSearches } from '@/components/search/recent'
 import { useBack } from '@/composables/useBack'
@@ -66,6 +67,17 @@ const feeds = {
 const checkMore = useScrollMore(scroller, () => (query.value ? feeds[type.value] : null))
 /* 各标签自己的滚动位置：切标签时各回各的位置 */
 const savedTop = { video: 0, post: 0 }
+/*
+ * 标签上的数字：换关键词时上一次的数字先留着（上一次的结果也还留着，见 ContentSwap），新结果回来直接变成新的，
+ * 不会先消失再出现；回到建议页、这个标签加载失败时才清掉。
+ */
+const tabCounts = reactive({ video: null, post: null })
+watch(() => TYPES.map(t => [feedCount(feeds[t.key]), feeds[t.key].error]), list => {
+  TYPES.forEach((t, i) => {
+    const [n, error] = list[i]
+    if (n !== null || error || !query.value) tabCounts[t.key] = n
+  })
+}, { immediate: true })
 
 const placeholder = computed(() => (type.value === 'post' && !query.value ? '搜索帖子、话题' : '搜您想搜,看您所想'))
 
@@ -247,7 +259,7 @@ function selectType(key) {
 /* 结果标签下的指示条：切标签时滑过去 */
 const tabRow = ref(null)
 const tabBar = ref(null)
-useSlider(tabRow, tabBar, under('.sr-tab.on', 20), { key: () => type.value, deps: () => [query.value, feedCount(feeds.video), feedCount(feeds.post)] })
+useSlider(tabRow, tabBar, under('.sr-tab.on', 20), { key: () => type.value, deps: () => [query.value, tabCounts.video, tabCounts.post] })
 
 /* 方向键在两个标签之间切换（只有选中的标签能 Tab 进入） */
 function onTabKey(e) {
@@ -377,7 +389,7 @@ watch(() => route.fullPath, () => {
         @click="selectType(t.key)"
         @keydown="onTabKey"
       >
-        {{ t.label }}<span v-if="feedCount(feeds[t.key]) !== null" class="n">{{ fmtCount(feedCount(feeds[t.key])) }}</span>
+        {{ t.label }}<span v-if="tabCounts[t.key] !== null" class="n">{{ fmtCount(tabCounts[t.key]) }}</span>
       </button>
     </div>
 
@@ -392,52 +404,53 @@ watch(() => route.fullPath, () => {
           role="tabpanel"
           :aria-labelledby="`sr-tab-${t.key}`"
         >
-          <!-- 第一页还没回来：骨架；第一页失败：重试。骨架 / 上一次的结果原地淡出，新结果错峰浮现 -->
-          <div class="m-swap">
-            <Transition name="m-skel">
-              <div v-if="feeds[t.key].total === null && feeds[t.key].error" class="empty">
-                加载失败，请检查网络
-                <button type="button" class="retry" @click="feeds[t.key].more()">重试</button>
+          <!--
+            第一页还没回来：骨架；第一页失败：重试。骨架原地淡出，新结果错峰浮现；
+            换关键词时上一次的结果留着等新的，快的直接换成新结果，慢了（250ms）才淡入骨架
+          -->
+          <ContentSwap :pending="feeds[t.key].total === null && !feeds[t.key].error">
+            <div v-if="feeds[t.key].total === null && feeds[t.key].error" class="empty">
+              加载失败，请检查网络
+              <button type="button" class="retry" @click="feeds[t.key].more()">重试</button>
+            </div>
+            <SkeletonGrid v-else-if="feeds[t.key].total === null && t.key === 'video'" :count="6" gap="g16" />
+            <div v-else-if="feeds[t.key].total === null" aria-hidden="true">
+              <div v-for="i in 3" :key="i" class="sk-post">
+                <div class="sk av" />
+                <div class="bd"><div class="sk l1" /><div class="sk l2" /><div class="sk md" /></div>
               </div>
-              <SkeletonGrid v-else-if="feeds[t.key].total === null && t.key === 'video'" :count="6" gap="g16" />
-              <div v-else-if="feeds[t.key].total === null" aria-hidden="true">
-                <div v-for="i in 3" :key="i" class="sk-post">
-                  <div class="sk av" />
-                  <div class="bd"><div class="sk l1" /><div class="sk l2" /><div class="sk md" /></div>
-                </div>
-              </div>
+            </div>
 
-              <div v-else-if="!feeds[t.key].list.length" :key="`none${resultKey}`" v-rise.self class="sr-none">
-                <!-- 没有结果：换个词，或者看看另一个标签 -->
-                <p class="t1">没有找到相关{{ t.label }}</p>
-                <p class="t2">换个关键词试试</p>
-                <button
-                  v-if="feedCount(feeds[otherOf(t.key)]) > 0"
-                  type="button"
-                  class="sr-alt"
-                  @click="selectType(otherOf(t.key))"
-                >
-                  看看相关{{ typeInfo(otherOf(t.key)).label }} · {{ fmtCount(feedCount(feeds[otherOf(t.key)])) }} {{ typeInfo(otherOf(t.key)).unit }}<Icon name="chevR" />
-                </button>
-                <template v-if="hotForEmpty.length">
-                  <div class="sr-hot-t">大家都在搜</div>
-                  <div class="kws">
-                    <button v-for="w in hotForEmpty" :key="w.word" type="button" class="kw" @click="searchFor(w.word)"><span>{{ w.word }}</span></button>
-                  </div>
-                </template>
-              </div>
+            <div v-else-if="!feeds[t.key].list.length" :key="`none${resultKey}`" v-rise.self class="sr-none">
+              <!-- 没有结果：换个词，或者看看另一个标签 -->
+              <p class="t1">没有找到相关{{ t.label }}</p>
+              <p class="t2">换个关键词试试</p>
+              <button
+                v-if="feedCount(feeds[otherOf(t.key)]) > 0"
+                type="button"
+                class="sr-alt"
+                @click="selectType(otherOf(t.key))"
+              >
+                看看相关{{ typeInfo(otherOf(t.key)).label }} · {{ fmtCount(feedCount(feeds[otherOf(t.key)])) }} {{ typeInfo(otherOf(t.key)).unit }}<Icon name="chevR" />
+              </button>
+              <template v-if="hotForEmpty.length">
+                <div class="sr-hot-t">大家都在搜</div>
+                <div class="kws">
+                  <button v-for="w in hotForEmpty" :key="w.word" type="button" class="kw" @click="searchFor(w.word)"><span>{{ w.word }}</span></button>
+                </div>
+              </template>
+            </div>
 
-              <div v-else :key="`res${resultKey}`">
-                <div v-if="t.key === 'video'" v-rise class="grid g16 sr-grid">
-                  <VideoCard v-for="v in feeds.video.list" :key="v.id" :video="v" />
-                </div>
-                <div v-else>
-                  <PostCard v-for="p in feeds.post.list" :key="p.id" :post="p" />
-                </div>
-                <ListFoot :feed="feeds[t.key]" />
+            <div v-else :key="`res${resultKey}`">
+              <div v-if="t.key === 'video'" v-rise class="grid g16 sr-grid">
+                <VideoCard v-for="v in feeds.video.list" :key="v.id" :video="v" />
               </div>
-            </Transition>
-          </div>
+              <div v-else>
+                <PostCard v-for="p in feeds.post.list" :key="p.id" :post="p" />
+              </div>
+              <ListFoot :feed="feeds[t.key]" />
+            </div>
+          </ContentSwap>
         </section>
       </template>
 
@@ -633,5 +646,10 @@ watch(() => route.fullPath, () => {
 @keyframes sk { 50% { opacity: .5; } }
 @media (prefers-reduced-motion: reduce) {
   .sk { animation: none; }
+}
+
+/* iOS 14 / 安卓 WebView 87 不认 aspect-ratio（Safari 15、Chrome 88 才有）：里面全是绝对定位的东西，高度会是 0，用 ::before 的 padding 撑出同样的比例 */
+@supports not (aspect-ratio: 1 / 1) {
+  .sk-post .md::before { content: ''; display: block; padding-top: 56.25%; }
 }
 </style>

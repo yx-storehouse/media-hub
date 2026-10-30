@@ -130,4 +130,9 @@ onBeforeUnmount(saveSnapshot)
 @media (prefers-reduced-motion: reduce) {
   .cat.sk { animation: none; }
 }
+
+/* iOS 14 / 安卓 WebView 87 不认 aspect-ratio（Safari 15、Chrome 88 才有）：里面全是绝对定位的东西，高度会是 0，用 ::before 的 padding 撑出同样的比例；卡片 16:8 是 flex 容器（::before 已经是阴影），用 ::after 当 0 宽的一项撑高：它的 padding 按内容宽（总宽 - 24px）算，calc(50% - 8px) 正好是总宽 / 2 再减上下 20px */
+@supports not (aspect-ratio: 1 / 1) {
+  .cat::after { content: ''; flex: none; width: 0; padding-top: calc(50% - 8px); }
+}
 </style>

@@ -109,7 +109,8 @@ router.afterEach((to, from, failure) => {
 
 /** Warm up the other pages' chunks once the first screen is idle, so later navigation is instant. */
 export function prefetchRoutes() {
-  const run = () => routes.forEach(r => typeof r.component === 'function' && r.component())
+  // only a warm-up: a failed prefetch must not reach the global unhandledrejection toast (the real navigation retries)
+  const run = () => routes.forEach(r => typeof r.component === 'function' && r.component().catch(() => {}))
   if ('requestIdleCallback' in window) window.requestIdleCallback(run, { timeout: 3000 })
   else setTimeout(run, 1500)
 }
