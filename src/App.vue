@@ -25,7 +25,7 @@ connectAuthToRouter(router)
 const pageAnim = usePageTransition(router)
 
 /*
- * 桌面布局的左侧导航：展开 / 图标栏跟着路由走（播放页、短视频默认收起），宽度通过 <html>.desk-rail 给 --desk-side，
+ * 桌面布局的左侧导航：展开 / 图标栏跟着路由走（播放页默认收起），宽度通过 <html>.desk-rail 给 --desk-side，
  * 见 composables/useDeskSide.js。
  * 换页时导航宽度变了（比如从首页进播放页）：所有页面的 left 都跟着 --desk-side 变，正在离开的那页会先横着跳一下
  * 再被新页盖住（共享元素过渡时它整页都还看得见）。所以离开的那页钉在原来的位置（行内 left），离场结束再去掉。

@@ -9,7 +9,7 @@ import HomeView from '@/views/home/HomeView.vue'
 /*
  * meta.tabbar  -> show the bottom tab bar
  * meta.tab     -> which bottom tab is highlighted
- * meta.deskRail -> 桌面布局（≥ 1024px）下左侧导航默认收成图标栏（播放页、短视频：内容要宽），见 composables/useDeskSide.js
+ * meta.deskRail -> 桌面布局（≥ 1024px）下左侧导航默认收成图标栏（播放页：播放器和相似推荐要宽）。短视频是导航里的主入口，不收——刚点的导航不能在鼠标底下缩一截，见 composables/useDeskSide.js
  * Pages with meta.tabbar are kept alive (see App.vue), so switching tabs keeps their scroll position and state.
  */
 const routes = [
@@ -23,7 +23,7 @@ const routes = [
     component: HomeView,
     meta: { tabbar: true, tab: 'home' }
   },
-  { path: '/short', name: 'short', component: () => import('@/views/ShortView.vue'), meta: { tabbar: true, tab: 'short', deskRail: true } },
+  { path: '/short', name: 'short', component: () => import('@/views/ShortView.vue'), meta: { tabbar: true, tab: 'short' } },
   { path: '/live', name: 'live', component: () => import('@/views/LiveView.vue'), meta: { tabbar: true, tab: 'live' } },
   { path: '/community', name: 'community', component: () => import('@/views/CommunityView.vue'), meta: { tabbar: true, tab: 'community' } },
   { path: '/nearby', name: 'nearby', component: () => import('@/views/NearbyView.vue'), meta: { tabbar: true, tab: 'nearby' } },

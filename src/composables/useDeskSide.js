@@ -6,7 +6,7 @@ import { isDesktop } from './useDesktop'
  *
  *   默认：窗口 ≥ 1280px 展开，1024–1279px 收起；
  *   顶栏的 ☰ 切换，记在本机（localStorage，读写都包 try/catch），之后不管窗口多宽都按记下的来；
- *   路由 meta.deskRail 的页面（播放页、短视频）默认收起，在这些页面上点 ☰ 只是这一次临时展开，不记，
+ *   路由 meta.deskRail 的页面（播放页）默认收起，在这些页面上点 ☰ 只是这一次临时展开，不记，
  *   换到别的页面（路由名变了）就恢复。
  *
  * 宽度通过 :root 上的 CSS 变量 --desk-side 给页面（App.vue 在 <html> 上加 / 去 .desk-rail，
