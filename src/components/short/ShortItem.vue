@@ -1,3 +1,39 @@
+<script>
+import { ref as moduleRef } from 'vue'
+/*
+ * 桌面上调的音量（0–1）：和播放页的播放器记在同一个地方（reel:volume），所有短视频共用一份。
+ * 只有桌面布局有音量条，手机上不写、也不改 <video>.volume（音量交给系统按键）。
+ */
+const VOL_KEY = 'reel:volume'
+function readVol() {
+  try {
+    const v = parseFloat(localStorage.getItem(VOL_KEY))
+    return Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 1
+  } catch {
+    return 1
+  }
+}
+const deskVol = moduleRef(readVol())
+/* 拖音量条时稍等一下再写（停下来才写一次）；页面收起时还没写的马上写掉 */
+let volSave = 0
+function flushVol() {
+  clearTimeout(volSave)
+  volSave = 0
+  try { localStorage.setItem(VOL_KEY, String(deskVol.value)) } catch { /* 存不了就只在这次打开里有效 */ }
+}
+/**
+ * 桌面：要恢复声音时音量是 0（拉到了最底）就回到一半，不然取消了静音还是听不见。
+ * 控制栏的喇叭、快捷键 M、「点击恢复声音」都走这里（短视频页在桌面布局时调用）
+ */
+export function audibleVolume() {
+  if (deskVol.value > 0) return
+  deskVol.value = 0.5
+  flushVol()
+}
+/** 桌面：音量拉到了 0（没静音也听不见） */
+export const volumeZero = () => deskVol.value === 0
+</script>
+
 <script setup>
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, useTemplateRef, watch } from 'vue'
 import { useRouter } from 'vue-router'
@@ -32,8 +68,13 @@ import RollNum from '@/components/video/RollNum.vue'
  *   failed   文件打不开：父组件把这条退回封面预览
  * clip.src 为空时如实显示：清晰的封面 +「暂无视频源 · 看详情」，父组件只用一个很短的计时让自动连播往下走。
  *
- * 桌面布局（≥ 1024px）：这一条是页面正中的一张 9:16 卡片（尺寸由 ShortView 的 --sv-cw / --sv-gap 给），
- * 右侧一列按钮放在卡片外面的右边；鼠标双击按系统的双击间隔认（见 onTap），进度条上悬停显示那个位置的时间。
+ * 桌面布局（≥ 1024px，参照抖音网页版的推荐流）：这一条是铺满页面的一个大画框（圆角，尺寸由 ShortView 的 --sv-* 给），
+ * 底边是单独一条常驻的深色控制栏（进度线压在它的上沿；播放 / 时间 / 连播 / 倍速 / 音量 / 小窗 / 全屏），上面整块是画面区：
+ * 画面居中、不裁切（contain），空出来的地方是模糊压暗的封面；画面区里左上角是父组件放进来的「推荐 / 专题 · 换一批」（slot top），
+ * 左下角作者 · 发布时间、标题、话题，右边一列按钮。另外几个事件：
+ *   fullscreen / pip  控制栏上的全屏、小窗（父组件处理：全屏的是整个短视频页）
+ *   mute              控制栏上的喇叭、音量条：要静音（true）/ 恢复声音（false）
+ * 鼠标双击按系统的双击间隔认（见 onTap），进度条上悬停显示那个位置的时间。
  * 父组件用键盘快捷键时通过 defineExpose 的 userToggle / seekBy 操作屏幕上这一条（和点按钮一样带动效）。
  */
 const props = defineProps({
@@ -57,9 +98,13 @@ const props = defineProps({
   /** 在当前这条附近：真实视频提前加载，离得远的不加载 */
   near: Boolean,
   /** 是否已关注作者：true / false；null = 还不知道（登录后正在取），这时不显示「+」 */
-  following: { type: Boolean, default: null }
+  following: { type: Boolean, default: null },
+  /** 桌面控制栏用：短视频页正在全屏、浏览器能不能全屏 / 小窗（父组件判断） */
+  fs: Boolean,
+  canFs: Boolean,
+  canPip: Boolean
 })
-const emit = defineEmits(['toggle', 'dbllike', 'seek', 'boost', 'unmute', 'settings', 'like', 'dislike', 'fav', 'follow', 'time', 'duration', 'state', 'ended', 'failed'])
+const emit = defineEmits(['toggle', 'dbllike', 'seek', 'boost', 'unmute', 'settings', 'like', 'dislike', 'fav', 'follow', 'time', 'duration', 'state', 'ended', 'failed', 'fullscreen', 'pip', 'mute'])
 
 const store = useAppStore()
 const router = useRouter()
@@ -209,6 +254,7 @@ watch(() => props.current, on => {
   titleOpen.value = false
   followTapped = false
   exitPip()
+  closeSpeed()
 })
 
 /*
@@ -225,6 +271,10 @@ onDeactivated(() => {
   onBuffered()
   clearFx()
   quiet.value = true
+  // 桌面控制栏：收起倍速菜单，没写掉的音量马上写
+  closeSpeed()
+  volDrag.value = false
+  if (volSave) flushVol()
 })
 /*
  * 收起时父组件把每条都暂停了，回来又接着播：这一来一回不该让播放键淡入淡出一遍。
@@ -243,6 +293,8 @@ onActivated(() => {
       ctlHold.value = false
     })
   })
+  // 播放页上可能调过音量（记在同一个 reel:volume 里）：回来时按最新的
+  if (isDesktop.value) deskVol.value = readVol()
 })
 /* 卸载时释放地址，否则离开后还可能在后台下载 */
 onBeforeUnmount(() => {
@@ -251,6 +303,7 @@ onBeforeUnmount(() => {
   clearTimeout(followTimer)
   clearTimeout(stallTimer)
   clearTimeout(hideTimer)
+  closeSpeed()
   cancelAnimationFrame(quietRaf)
   ro?.disconnect()
   const v = videoEl.value
@@ -266,6 +319,7 @@ function onMeta(e) {
   // MediaRecorder 录的 webm 开头读不到时长（Infinity），这时继续用后台记的时长
   if (Number.isFinite(d) && d > 0) emit('duration', d)
   e.target.playbackRate = rate.value
+  if (isDesktop.value) e.target.volume = deskVol.value
 }
 function onTime(e) {
   const v = e.target
@@ -346,13 +400,20 @@ function scrubCancel(e) {
   if (e.pointerId === drag.id) drag.id = null
 }
 
-/* 桌面：鼠标停在进度条上时，指针上方显示那个位置的时间（拖动时中间有大号时间，这个让开） */
-const hover = reactive({ on: false, x: 0, t: 0 })
+/*
+ * 桌面：鼠标停在进度条上时，指针上方显示那个位置的时间（拖动时中间有大号时间，这个让开），
+ * 线上浅一点的一截标出指着的位置（p，0–100）。进度条横贯整个画框，两头就是画框的边（圆角、超出的被切掉）：
+ * 时间标签的中心离两头至少 TIP_HALF（「00:00」的标签 49px 宽，一半 24.5，再往里留 5px 多），整个标签都在画框里
+ */
+const hover = reactive({ on: false, x: 0, t: 0, p: 0 })
+const TIP_HALF = 30
 function scrubHover(e) {
   if (e.pointerType !== 'mouse' || !isDesktop.value) return
   const rect = e.currentTarget.getBoundingClientRect()
-  hover.x = Math.min(rect.width, Math.max(0, e.clientX - rect.left))
-  hover.t = rect.width ? (hover.x / rect.width) * length.value : 0
+  const x = Math.min(rect.width, Math.max(0, e.clientX - rect.left))
+  hover.p = rect.width ? (x / rect.width) * 100 : 0
+  hover.t = (hover.p / 100) * length.value
+  hover.x = Math.min(Math.max(x, TIP_HALF), Math.max(TIP_HALF, rect.width - TIP_HALF))
   hover.on = true
 }
 function scrubLeave() {
@@ -431,6 +492,11 @@ function endPress(swallow = false) {
 function onTap(e) {
   if (swallowClick) {
     swallowClick = false
+    return
+  }
+  // 桌面：这一下是用来收起倍速菜单的（见 onDocDown），不当成播放 / 暂停
+  if (e.timeStamp - menuEatAt < HOLD_MS) {
+    menuEatAt = -Infinity
     return
   }
   // 长按（任何位置）后松手：不是点击
@@ -652,6 +718,153 @@ const actions = computed(() => [
     { id: 'settings', icon: 'gear', label: speedLabel.value, roll: true, aria: `播放设置，当前 ${store.playback.speed} 倍速`, run: () => tapPlain('settings', () => emit('settings')) }
 ])
 
+/* ---------- 桌面（≥ 1024px）：作者旁边的发布时间 ---------- */
+
+/** 发布时间：刚刚 / N分钟前 / N小时前 / N天前，再早的是「M月D日」（不是今年的带年份）；没有时间就不显示 */
+const ago = computed(() => {
+  const ts = props.clip.publishedAt
+  if (!isDesktop.value || !Number.isFinite(ts) || ts <= 0) return ''
+  const diff = Date.now() / 1000 - ts
+  if (diff < 60) return '刚刚'
+  if (diff < 3600) return `${Math.floor(diff / 60)}分钟前`
+  if (diff < 86400) return `${Math.floor(diff / 3600)}小时前`
+  if (diff < 86400 * 30) return `${Math.floor(diff / 86400)}天前`
+  const d = new Date(ts * 1000)
+  const md = `${d.getMonth() + 1}月${d.getDate()}日`
+  return d.getFullYear() === new Date().getFullYear() ? md : `${d.getFullYear()}年${md}`
+})
+
+/* ---------- 桌面：连播 / 倍速 ---------- */
+
+/** 倍速菜单从上到下：快的在上面（和抖音一样） */
+const MENU_SPEEDS = ['2.0x', '1.5x', '1.25x', '1.0x', '0.75x', '0.5x']
+const speedOpen = ref(false)
+const speedEl = useTemplateRef('speedEl')
+const speedBtn = useTemplateRef('speedBtn')
+const menuEl = useTemplateRef('menuEl')
+/** 点菜单外面的画面收起菜单的那一下（pointerdown 的时间）：随后的 click 不当成播放 / 暂停 */
+let menuEatAt = -Infinity
+
+function toggleAutoNext() {
+  store.playback.autoNext = !store.playback.autoNext
+}
+/* 键盘按下按钮产生的 click 没有点击次数（detail 为 0）：这时焦点直接进菜单（选中的那一项） */
+function toggleSpeed(e) {
+  if (speedOpen.value) return closeSpeed(e?.detail === 0)
+  speedOpen.value = true
+  document.addEventListener('pointerdown', onDocDown, true)
+  document.addEventListener('keydown', onDocKey)
+  if (e?.detail === 0) nextTick(() => menuEl.value?.querySelector('[aria-checked="true"]')?.focus())
+}
+function closeSpeed(refocus = false) {
+  if (!speedOpen.value) return
+  speedOpen.value = false
+  document.removeEventListener('pointerdown', onDocDown, true)
+  document.removeEventListener('keydown', onDocKey)
+  if (refocus) speedBtn.value?.focus()
+}
+function onDocDown(e) {
+  if (speedEl.value?.contains(e.target)) return
+  if (e.target.classList?.contains('sv-click')) menuEatAt = e.timeStamp
+  closeSpeed()
+}
+/*
+ * Esc 收起菜单，焦点在哪都算（鼠标点开的菜单，焦点不在菜单里）；焦点原来在菜单里（键盘打开的）就回到「倍速」按钮。
+ * 别的弹层先处理过的 Esc（defaultPrevented）不管
+ */
+function onDocKey(e) {
+  if (e.key !== 'Escape' || e.defaultPrevented) return
+  e.preventDefault()
+  closeSpeed(!!speedEl.value?.contains(document.activeElement))
+}
+function pickSpeed(s, e) {
+  store.playback.speed = s
+  closeSpeed(e?.detail === 0)
+}
+/* 鼠标移到喇叭上要调音量：倍速菜单先收起（两个弹出来的不叠在一起）；键盘走到喇叭上也一样 */
+function onVolEnter(e) {
+  if (e.pointerType === 'mouse') closeSpeed()
+}
+/* 菜单里：↑ ↓ 在几项之间移动（按键不再交给短视频页翻页）；Esc 见 onDocKey */
+function onMenuKey(e) {
+  if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return
+  e.preventDefault()
+  const items = [...(menuEl.value?.querySelectorAll('button') || [])]
+  const i = items.indexOf(document.activeElement)
+  const next = items[(i + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length]
+  next?.focus()
+}
+const speedText = computed(() => (store.playback.speed === '1.0x' ? '倍速' : store.playback.speed))
+
+/* ---------- 桌面：音量（鼠标移到喇叭上，上面弹出竖着的音量条；和播放页同一个音量） ---------- */
+
+const volEl = useTemplateRef('volEl')
+const volDrag = ref(false)
+/** 听不到声音：静音了，或者音量拉到了 0 */
+const silent = computed(() => store.muted || (isDesktop.value && deskVol.value === 0))
+const volPct = computed(() => (store.muted ? 0 : Math.round(deskVol.value * 100)))
+
+function setVolume(v) {
+  v = Math.round(Math.max(0, Math.min(1, v)) * 100) / 100
+  deskVol.value = v
+  // 往上调就是要声音：静音着的顺便打开
+  if (v > 0 && store.muted) emit('mute', false)
+  clearTimeout(volSave)
+  volSave = setTimeout(flushVol, 300)
+}
+/* 桌面才改 <video>.volume；拉窄到手机布局时还原成 1（手机上音量交给系统按键） */
+watch([deskVol, isDesktop], ([v, desk]) => {
+  if (videoEl.value) videoEl.value.volume = desk ? v : 1
+})
+/* 拉窄到手机布局：桌面的倍速菜单、音量拖动都收掉 */
+watch(isDesktop, desk => {
+  if (desk) return
+  closeSpeed()
+  volDrag.value = false
+})
+function toggleMute() {
+  if (silent.value) {
+    // 音量拉到 0 以后取消静音：回到一半音量（不然点了喇叭还是没声音）
+    if (deskVol.value === 0) setVolume(0.5)
+    if (store.muted) emit('mute', false)
+  } else emit('mute', true)
+}
+/* 竖着的音量条：从下往上是 0–100%（按在条的上下两头外面也算，夹到 0 / 1） */
+function volAt(e) {
+  const r = volEl.value.getBoundingClientRect()
+  return (r.bottom - e.clientY) / Math.max(1, r.height)
+}
+function startVol(e) {
+  if (!e.isPrimary || e.button !== 0) return
+  volDrag.value = true
+  try { e.currentTarget.setPointerCapture(e.pointerId) } catch { /* 指针已经抬起 */ }
+  setVolume(volAt(e))
+}
+function moveVol(e) {
+  if (volDrag.value) setVolume(volAt(e))
+}
+function endVol() {
+  volDrag.value = false
+}
+/*
+ * 聚焦在音量条上时方向键调音量（这时 ↑ ↓ 不翻页，和别的竖着的滑块一样）。
+ * 静音着（包括浏览器不让自动有声播放的时候）：往上是恢复声音，从记着的音量接着来（记着的是 0 就从一格开始）；
+ * 往下什么也不做，不把记着的音量（播放页也用）改成 0
+ */
+function onVolKey(e) {
+  const step = { ArrowRight: 0.05, ArrowUp: 0.05, ArrowLeft: -0.05, ArrowDown: -0.05 }[e.key]
+  let v = null
+  if (step != null) {
+    if (!store.muted) v = deskVol.value + step
+    else if (step > 0) v = Math.max(deskVol.value, step)
+  } else if (e.key === 'Home') v = 0
+  else if (e.key === 'End') v = 1
+  else return
+  e.preventDefault()
+  e.stopPropagation()
+  if (v != null) setVolume(v)
+}
+
 /*
  * 桌面的键盘快捷键（父组件管按键，操作屏幕上这一条）：空格 = 点一下播放键，← / → = 跳几秒，
  * 和用鼠标点一样带播放键 / 箭头的动效
@@ -738,11 +951,24 @@ defineExpose({ userToggle, seekBy })
       <span>{{ seekFx.dir < 0 ? '-' : '+' }}{{ seekFx.sec }}秒</span>
     </i>
 
+    <!-- 桌面：画框左上角，父组件放进来的「推荐 / 专题 · 换一批」（跟着这一条一起滑动） -->
+    <div v-if="isDesktop && $slots.top" class="sv-dtop"><slot name="top" /></div>
+
     <div class="sv-ctl" :class="ctlFx && `fx-${ctlFx}`">
       <button v-if="hasVideo" class="sk back" :class="{ spin: seekFx?.dir < 0 }" type="button" aria-label="后退10秒" @click="seekBy(-10)">
         <Icon :key="seekFx?.dir < 0 ? seekFx.key : 0" name="replay" />
       </button>
-      <button class="pb" type="button" :aria-label="playing ? '暂停' : '播放'" @click="userToggle" @animationend.self="ctlFx = ''"><Icon name="play" /></button>
+      <!-- 桌面：控制栏上有同一个播放 / 暂停键，正中这个不进 Tab 顺序（鼠标照样能点） -->
+      <button
+        class="pb"
+        type="button"
+        :tabindex="isDesktop ? -1 : undefined"
+        :aria-label="playing ? '暂停' : '播放'"
+        @click="userToggle"
+        @animationend.self="ctlFx = ''"
+      >
+        <Icon name="play" />
+      </button>
       <button v-if="hasVideo" class="sk fwd" :class="{ spin: seekFx?.dir > 0 }" type="button" aria-label="前进10秒" @click="seekBy(10)">
         <Icon :key="seekFx?.dir > 0 ? seekFx.key : 0" name="forward" />
       </button>
@@ -758,8 +984,14 @@ defineExpose({ userToggle, seekBy })
       <button v-else class="sv-chip sv-nosrc" type="button" @click="openDetail">
         暂无视频源 · 看详情<Icon name="chevR" />
       </button>
-      <button v-if="creator" class="sv-name" type="button" @click="openCreator">@{{ creator.name }}</button>
-      <div v-if="tags.length" class="sv-tags">
+      <!-- 桌面：作者 · 发布时间 一行，标题排在它下面、话题再下面 -->
+      <div v-if="isDesktop && (creator || ago)" class="sv-who">
+        <button v-if="creator" class="sv-name" type="button" @click="openCreator">@{{ creator.name }}</button>
+        <span v-if="ago" class="sv-ago">{{ creator ? '· ' : '' }}{{ ago }}</span>
+      </div>
+      <button v-else-if="creator" class="sv-name" type="button" @click="openCreator">@{{ creator.name }}</button>
+      <!-- 手机：话题在标题上面；桌面在标题下面（见下面那一份）。DOM 顺序跟着画出来的顺序走，Tab 也是从上往下 -->
+      <div v-if="tags.length && !isDesktop" class="sv-tags">
         <button v-for="t in tags" :key="t" type="button" @click="searchTag(t)">#{{ t }}</button>
       </div>
       <div
@@ -774,9 +1006,13 @@ defineExpose({ userToggle, seekBy })
       >
         {{ clip.title }}
       </div>
+      <div v-if="tags.length && isDesktop" class="sv-tags">
+        <button v-for="t in tags" :key="t" type="button" @click="searchTag(t)">#{{ t }}</button>
+      </div>
       <button v-if="showFull" class="sv-chip sv-full" type="button" @click="openDetail">看完整版<Icon name="chevR" /></button>
     </div>
 
+    <!-- 桌面：这条进度线压在控制栏的上沿（画面和控制栏的分界线上） -->
     <div v-if="hasVideo" class="sv-prog" :class="{ drag: dragging }">
       <span>{{ mmss(shownTime) }}</span>
       <div
@@ -797,7 +1033,11 @@ defineExpose({ userToggle, seekBy })
         @keydown="scrubKey"
       >
         <!-- 线（拖动时用 scaleY 变粗）和圆点（按住时回弹长出来）分开：圆点不跟着线一起被压扁 -->
-        <div class="bar"><i :style="{ transform: `translateX(${pct - 100}%)` }" /></div>
+        <div class="bar">
+          <!-- 桌面：鼠标指着的位置（浅色的一截） -->
+          <b v-if="isDesktop" class="hov" :class="{ on: hover.on }" :style="{ transform: `translateX(${hover.p - 100}%)` }" />
+          <i :style="{ transform: `translateX(${pct - 100}%)` }" />
+        </div>
         <span class="knob" :style="{ transform: `translateX(${pct}%)` }"><b /></span>
         <!-- 桌面：鼠标悬停处的时间 -->
         <span
@@ -856,6 +1096,108 @@ defineExpose({ userToggle, seekBy })
         <!-- 会变的（赞 / 收藏数、倍速）才翻动；「不喜欢」「分享」是固定文字，不多挂一层组件 -->
         <RollNum v-if="a.roll" :value="a.label" :n="typeof a.label === 'number' ? a.label : null" />
         <span v-else>{{ a.label }}</span>
+      </button>
+    </div>
+
+    <!--
+      桌面：画框底边单独一条常驻的深色控制栏（抖音网页版那样，不压在画面上、不自动收起）；进度条是上面的 .sv-prog，压在它的上沿。
+      左边播放 / 暂停、时间，右边连播、倍速、音量、小窗、全屏。没有片源的条目只有播放 / 暂停（控制封面预览的计时）和连播
+    -->
+    <div v-if="isDesktop" class="sv-bar">
+      <button class="b-btn" type="button" :aria-label="playing ? '暂停' : '播放'" :title="playing ? '暂停（空格）' : '播放（空格）'" @click="userToggle">
+        <Icon :name="playing ? 'pause' : 'play'" />
+      </button>
+      <span v-if="hasVideo" class="b-time">{{ mmss(shownTime) }}<i>/</i>{{ mmss(length) }}</span>
+      <span class="b-sp" />
+      <button
+        class="b-auto"
+        :class="{ on: store.playback.autoNext }"
+        type="button"
+        role="switch"
+        :aria-checked="store.playback.autoNext"
+        title="自动连播：播完自动播下一个"
+        @click="toggleAutoNext"
+      >
+        <i class="b-sw" aria-hidden="true" />连播
+      </button>
+      <div v-if="hasVideo" ref="speedEl" class="b-speed">
+        <button
+          ref="speedBtn"
+          class="b-btn b-txt"
+          type="button"
+          aria-haspopup="menu"
+          :aria-expanded="speedOpen"
+          :aria-label="`倍速，当前 ${store.playback.speed}`"
+          @click="toggleSpeed"
+        >
+          {{ speedText }}
+        </button>
+        <Transition name="b-menu">
+          <div v-if="speedOpen" ref="menuEl" class="b-menu" role="menu" aria-label="倍速" @keydown="onMenuKey">
+            <button
+              v-for="s in MENU_SPEEDS"
+              :key="s"
+              type="button"
+              role="menuitemradio"
+              :aria-checked="store.playback.speed === s"
+              :class="{ on: store.playback.speed === s }"
+              @click="pickSpeed(s, $event)"
+            >
+              {{ s }}
+            </button>
+          </div>
+        </Transition>
+      </div>
+      <template v-if="hasVideo">
+        <!-- 音量：鼠标移到喇叭上，上面弹出竖着的音量条（键盘聚焦、正在拖时也在） -->
+        <div class="b-volw" :class="{ on: volDrag }" @pointerenter="onVolEnter" @focusin="closeSpeed()">
+          <button
+            class="b-btn"
+            type="button"
+            data-sound
+            :aria-label="silent ? '恢复声音' : '静音'"
+            :title="silent ? '恢复声音（M）' : '静音（M）'"
+            @click="toggleMute"
+          >
+            <Icon :name="silent ? 'mute' : 'vol'" />
+          </button>
+          <div
+            class="b-vpop"
+            role="slider"
+            tabindex="0"
+            aria-label="音量"
+            aria-orientation="vertical"
+            aria-valuemin="0"
+            aria-valuemax="100"
+            :aria-valuenow="volPct"
+            :aria-valuetext="store.muted ? '静音' : `${volPct}%`"
+            @pointerdown="startVol"
+            @pointermove="moveVol"
+            @pointerup="endVol"
+            @pointercancel="endVol"
+            @lostpointercapture="endVol"
+            @keydown="onVolKey"
+          >
+            <span class="vn">{{ volPct }}</span>
+            <div ref="volEl" class="vt">
+              <i :style="{ transform: `scaleY(${volPct / 100})` }" />
+              <span class="vk" :style="{ transform: `translateY(${-volPct}%)` }"><b /></span>
+            </div>
+          </div>
+        </div>
+        <button v-if="canPip" class="b-btn" type="button" aria-label="小窗播放" title="小窗播放" @click="emit('pip')">
+          <Icon name="pip" />
+        </button>
+      </template>
+      <button
+        v-if="fs || (hasVideo && canFs)"
+        class="b-btn"
+        type="button"
+        :aria-label="fs ? '退出全屏' : '全屏'"
+        :title="fs ? '退出全屏（F）' : '全屏（F）'"
+        @click="emit('fullscreen')"
+      >
+        <Icon :name="fs ? 'fullscreenExit' : 'fullscreen'" />
       </button>
     </div>
   </section>
@@ -1379,36 +1721,122 @@ defineExpose({ userToggle, seekBy })
 }
 
 /*
- * ---- 桌面布局（≥ 1024px）：每一条是页面正中的一张 9:16 卡片 ----
- * 卡片宽 --sv-cw、上下留 --sv-gap、圆角 --sv-r，都由 ShortView 给（全屏时没有留白和圆角）。
- * 卡片本身不裁切（overflow: visible）：右侧一列按钮放到卡片外面的右边，圆底按钮 + 下面一行字，和卡片底边对齐；
- * 会超出卡片的只有模糊底图（inset -10%），用 clip-path 裁回卡片的圆角矩形（clip-path 在 filter 之后，模糊边缘不露出来）。
- * 卡片里的文字、进度条离卡片四边 16px。这几段放在样式的最后：和上面「手机横过来」那段同名的规则以这里为准
- * （窗口矮到 500px 以下时那段藏头像、标题只留一行照样生效）。
+ * ---- 桌面布局（≥ 1024px，参照抖音网页版的推荐流）：每一条是铺满页面的一个圆角大画框 ----
+ * 画框的位置、大小由 ShortView 给（.sv-slot 四周留 --sv-gap，圆角 --sv-r，全屏时都是 0），每一条一样大，翻页时整个画框上下滑。
+ * 画框分上下两块：底下 --sv-bar 高的一条是常驻的深色控制栏（进度线压在它的上沿），上面整块是画面区。
+ * 画面区里画面 contain 居中、不裁切，空出来的地方是模糊压暗的封面（一张图加 filter，不是第二个视频）；
+ * 左上角的频道、左下角的文字、右边一列按钮对齐同一组内边距 --sv-in，左下角文字和右边一列的底边都在 --sv-lift（控制栏上面一点）。
+ * 这几段放在样式的最后：和上面「手机横过来」那段同名的规则以这里为准。
  */
 @media (min-width: 1024px) {
-  .sv { width: var(--sv-cw); margin: 0 auto; overflow: visible; border-radius: var(--sv-r); }
-  .sv::before { border-radius: var(--sv-r); }
-  .sv-bg,
-  .sv-video,
-  .sv-poster { border-radius: var(--sv-r); }
-  /* inset -10%：底图比卡片四边各大出卡片尺寸的 10%，裁掉 10 / 120 */
+  /* 下面用的简写（ShortView 没给时用默认值）：控制栏高、内边距、文字和右边一列的底边 */
+  .sv {
+    --bh: var(--sv-bar, 48px);
+    --in: var(--sv-in, 20px);
+    --lift: var(--sv-lift, 74px);
+    border-radius: var(--sv-r, 14px);
+    isolation: isolate;
+  }
+  /* 画面区上下两头各压暗一点：左上角的频道、左下角的文字在亮的画面上也看得清 */
+  .sv::before { bottom: var(--bh); background: linear-gradient(180deg, rgba(0, 0, 0, .34) 0, rgba(0, 0, 0, 0) 150px, rgba(0, 0, 0, 0) calc(100% - 240px), rgba(0, 0, 0, .42) 100%); }
+  .sv.title-open::before { background: linear-gradient(180deg, rgba(0, 0, 0, .34) 0, rgba(0, 0, 0, 0) 150px, rgba(0, 0, 0, .25) 45%, rgba(0, 0, 0, .78) 100%); }
+  /*
+   * 底图只铺画面区。当背景时（有视频文件、或封面加载出来了）比画面区大一圈再模糊，模糊的边缘被画框和控制栏挡住；
+   * 竖屏视频两边、横屏视频上下空出来的地方就是它。
+   * 上面一截再用遮罩压暗一点（往下渐渐变回原样，从外扩的 64px 算起）：和底边那层压暗差不多深，
+   * 横屏视频上下空出来的两条深浅一样；只压暗底图，画面本身不受影响
+   */
+  .sv-bg { bottom: var(--bh); }
   .sv.real .sv-bg,
-  .sv.still.poster-ok .sv-bg { clip-path: inset(8.3333% round var(--sv-r)); }
+  .sv.still.poster-ok .sv-bg {
+    inset: -64px -64px calc(var(--bh) - 64px);
+    filter: blur(40px) brightness(.64);
+    -webkit-mask-image: linear-gradient(180deg, rgba(0, 0, 0, .66) 64px, #000 304px);
+    mask-image: linear-gradient(180deg, rgba(0, 0, 0, .66) 64px, #000 304px);
+  }
+  /* <video> 是替换元素：高度要明写（height: auto 时 bottom 不起作用） */
+  .sv-video { height: calc(100% - var(--bh)); }
+  .sv-poster,
+  .sv-click { bottom: var(--bh); }
   .sv-click { cursor: pointer; }
 
-  .sv-meta { left: 16px; right: 16px; bottom: 52px; }
-  .sv-name { font-size: 16px; line-height: 22px; }
-  .sv-tags button { font-size: 13px; }
-  .sv-title { font-size: 14px; line-height: 20px; }
-  .sv-prog { left: 16px; right: 16px; bottom: 12px; font-size: 12px; }
+  /* 左上角：父组件放进来的「推荐 / 专题 · 换一批」 */
+  .sv-dtop { position: absolute; left: var(--in); top: calc(var(--in) - 6px); z-index: 5; display: flex; align-items: center; }
 
-  /* 进度条上悬停的时间：外层跟着鼠标平移，里层居中 */
+  /* 画面区的正中（暂停时的播放键、缓冲转圈、跳几秒的箭头、拖进度时的大号时间）；±10 秒在桌面上用 ← → 和进度条，不显示 */
+  .sv-ctl,
+  .sv-buf,
+  .sv-seekfx,
+  .sv-scrub { top: calc((100% - var(--bh)) / 2); }
+  .sv-ctl .sk { display: none; }
+  .sv-ctl .pb { width: 68px; height: 68px; }
+  .sv-ctl .pb svg { width: 30px; height: 30px; margin-left: 4px; }
+  .sv-buf { width: 44px; height: 44px; margin: -22px 0 0 -22px; }
+  .sv-boost { top: calc(var(--in) + 50px); }
+
+  /* 左下角：作者 · 发布时间、标题（两行，点开看全文）、话题、看完整版；不超过画框的一半多一点，不压到右边一列 */
+  .sv-meta {
+    left: var(--in);
+    right: auto;
+    bottom: var(--lift);
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    width: min(56%, 720px, calc(100% - 2 * var(--in) - 104px));
+  }
+  .sv-unmute,
+  .sv-chip { height: 32px; padding: 0 14px 0 12px; border-radius: 16px; font-size: 13px; }
+  .sv-chip { padding-right: 10px; }
+  .sv-unmute,
+  .sv-nosrc { order: 0; margin-bottom: 14px; }
+  .sv-unmute svg { width: 15px; height: 15px; }
+  .sv-who { order: 1; display: flex; align-items: baseline; gap: 8px; max-width: 100%; margin-bottom: 6px; }
+  .sv-name { flex: 0 1 auto; min-width: 0; margin: 0; font-size: 18px; line-height: 25px; }
+  .sv-ago { flex: none; color: rgba(255, 255, 255, .72); font-size: 13px; line-height: 18px; white-space: nowrap; text-shadow: 0 1px 4px rgba(0, 0, 0, .4); }
+  .sv-title { order: 2; max-width: 100%; font-size: 15px; line-height: 22px; }
+  /*
+   * 话题一行超出就截掉（overflow: hidden）：四周留 4px 内边距（外边距相应往回收，位置不变），
+   * 键盘焦点的框（外扩 2px、2px 粗）整圈都在里面，不被切成一条竖线
+   */
+  .sv-tags { order: 3; max-width: calc(100% + 4px); margin: 2px 0 -4px -9px; padding: 4px; gap: 4px; }
+  .sv-tags button { padding: 2px 5px; border-radius: 6px; color: rgba(255, 255, 255, .8); font-size: 14px; line-height: 20px; }
+  .sv-full { order: 4; height: 30px; margin: 12px 0 0; }
+  .sv.title-open .sv-title { max-height: 36vh; }
+
+  /*
+   * 右边一列（画面区里贴着右边，底边和左下角的文字齐平）：头像 + 关注、赞、不喜欢、收藏、分享、设置。
+   * 列宽就是头像宽：头像右边正好在内边距 --sv-in 上，图标居中在它下面
+   */
+  .sv-side { right: var(--in); bottom: var(--lift); width: 48px; gap: 10px; }
+  .sv-au { margin-bottom: 8px; }
+  .sv-author { width: 48px; height: 48px; }
+  .sv-act { gap: 1px; font-size: 13px; font-weight: 500; line-height: 18px; text-shadow: 0 1px 4px rgba(0, 0, 0, .5); }
+  .sv-act .ico {
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    transition: transform var(--dur-2) var(--ease-spring), background-color var(--dur-2) var(--ease-out);
+  }
+  .sv-act svg { width: 33px; height: 33px; stroke-width: 1.8; filter: drop-shadow(0 1px 3px rgba(0, 0, 0, .35)); }
+
+  /*
+   * 进度条：控制栏上沿横贯整个画框的一条细线（和抖音一样从左边一直到右边），可点的范围是线上下各 8px。
+   * 鼠标移上去变粗、出圆点和那一点的时间，按住拖动跳过去。封面预览的计时线（.sv-wait）也在这个位置，只是更淡、不能拖
+   */
+  .sv-prog { left: 0; right: 0; bottom: calc(var(--bh) - 8px); z-index: 6; gap: 0; height: 16px; font-size: 12px; }
+  .sv-prog > span { display: none; }
+  .sv-prog .track { height: 16px; }
+  .sv-prog .bar { height: 2px; border-radius: 0; background: rgba(255, 255, 255, .22); }
+  .sv-prog .bar i { border-radius: 0; }
+  .sv-prog .bar .hov { position: absolute; inset: 0; background: rgba(255, 255, 255, .3); opacity: 0; transition: opacity var(--dur-1) var(--ease-out); }
+  .sv-prog .bar .hov.on { opacity: 1; }
   .sv-prog .tip {
     position: absolute;
     left: 0;
     bottom: 50%;
-    margin-bottom: 9px;
+    margin-bottom: 6px;
     opacity: 0;
     transition: opacity var(--dur-1) var(--ease-out);
     pointer-events: none;
@@ -1416,67 +1844,163 @@ defineExpose({ userToggle, seekBy })
   .sv-prog .tip.on { opacity: 1; }
   .sv-prog .tip b {
     display: block;
-    padding: 0 7px;
+    padding: 0 8px;
     border-radius: 6px;
-    background: rgba(22, 22, 22, .88);
+    background: rgba(18, 18, 18, .9);
     color: #fff;
     font-size: 12px;
     font-weight: 600;
-    line-height: 22px;
+    line-height: 20px;
+    font-variant-numeric: tabular-nums;
     transform: translateX(-50%);
   }
+  .sv-wait .bar { height: 2px; background: rgba(255, 255, 255, .14); }
+  .sv-wait .bar i { background: rgba(255, 255, 255, .5); }
 
-  /* 右侧一列在卡片外面（底边和卡片对齐，全屏时离屏幕底边留一点）：拖进度条时不用让开 */
-  .sv-side { right: auto; left: calc(100% + 12px); bottom: var(--sv-side-b, 0px); gap: 14px; width: 64px; }
-  .sv.scrubbing .sv-side { opacity: 1; }
-  .sv-au { margin-bottom: 4px; }
-  .sv-author { width: 48px; height: 48px; }
-  .sv-act { gap: 6px; color: var(--t3); font-size: 12px; line-height: 16px; text-shadow: none; }
-  .sv-act.on { color: var(--accent); }
-  .sv-act .ico {
+  /*
+   * 控制栏：画框最底下单独一条（深色实底，不压在画面上，一直在）。图标按钮 36px（图标 22px），
+   * 两头让出按钮的内边距，让看得见的图标边（播放三角、全屏的角）落在内边距 --sv-in 上：左边让 13px，右边让 10px
+   */
+  .sv-bar {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    height: var(--bh);
+    padding: 0 calc(var(--in) - 10px) 0 calc(var(--in) - 13px);
+    background: #000;
+    color: #fff;
+    /* 倍速菜单、音量条从按钮上沿往上弹多高：越过进度条的可点范围再留 8px，不压在进度线上 */
+    --b-pop: calc((var(--bh) - 36px) / 2 + 16px);
+  }
+  .b-btn {
+    position: relative;
     display: grid;
     place-items: center;
-    width: 48px;
-    height: 48px;
-    border-radius: 50%;
-    background: #1f1f1f;
-    color: var(--t1);
-    transition: transform var(--dur-2) var(--ease-spring), background-color var(--dur-2) var(--ease-out);
+    min-width: 36px;
+    height: 36px;
+    border-radius: 8px;
+    color: #fff;
   }
-  .sv-act svg { width: 24px; height: 24px; stroke-width: 2; }
+  .b-btn svg { width: 22px; height: 22px; transition: transform var(--dur-2) var(--ease-spring); }
+  .b-btn:active svg { transform: scale(var(--press-scale-sm)); transition-duration: var(--dur-1); transition-timing-function: var(--ease-out); }
+  .b-time { margin-left: 6px; color: rgba(255, 255, 255, .92); font-size: 13px; line-height: 18px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .b-time i { margin: 0 5px; color: rgba(255, 255, 255, .45); font-style: normal; }
+  .b-sp { flex: 1; }
+  .b-txt { padding: 0 9px; font-size: 14px; font-weight: 600; }
+
+  /* 连播：小开关 + 文字（开着是白底黑点） */
+  .b-auto { display: flex; align-items: center; gap: 7px; height: 36px; padding: 0 9px; border-radius: 8px; color: #fff; font-size: 14px; font-weight: 600; }
+  .b-sw { position: relative; flex: none; width: 28px; height: 16px; border-radius: 8px; background: rgba(255, 255, 255, .26); transition: background-color var(--dur-2) var(--ease-out); }
+  .b-sw::after {
+    content: '';
+    position: absolute;
+    left: 2px;
+    top: 2px;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: #fff;
+    transition: transform var(--dur-spring-snappy) var(--spring-snappy), background-color var(--dur-2) var(--ease-out);
+  }
+  .b-auto.on .b-sw { background: var(--accent); }
+  .b-auto.on .b-sw::after { background: var(--on-accent); transform: translateX(12px); }
+
+  /* 倍速：点开从按钮上方弹出一列（快的在上面），当前的那一项亮着 */
+  .b-speed { position: relative; }
+  .b-menu {
+    position: absolute;
+    left: 50%;
+    bottom: calc(100% + var(--b-pop));
+    display: flex;
+    flex-direction: column;
+    width: 88px;
+    margin-left: -44px;
+    padding: 6px;
+    border-radius: 12px;
+    background: rgba(24, 24, 24, .96);
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, .08), 0 12px 32px rgba(0, 0, 0, .5);
+    transform-origin: 50% 100%;
+  }
+  .b-menu button { height: 34px; border-radius: 8px; color: var(--t2); font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .b-menu button.on { background: rgba(255, 255, 255, .1); color: #fff; }
+  .b-menu-enter-active { transition: opacity var(--dur-2) var(--ease-out), transform var(--dur-spring-snappy) var(--spring-snappy); }
+  .b-menu-leave-active { transition: opacity var(--dur-1) var(--ease-in), transform var(--dur-1) var(--ease-in); }
+  .b-menu-enter-from { opacity: 0; transform: translate3d(0, 6px, 0) scale(.96); }
+  .b-menu-leave-to { opacity: 0; transform: scale(.98); }
+
+  /* 音量：喇叭上方竖着的一条（上面是百分比），鼠标移到喇叭上出现，移开稍等一下再收（往上挪的路上不会闪没） */
+  .b-volw { position: relative; }
+  .b-vpop {
+    position: absolute;
+    left: 50%;
+    bottom: calc(100% + var(--b-pop));
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    width: 40px;
+    margin-left: -20px;
+    padding: 10px 0 16px;
+    border-radius: 12px;
+    background: rgba(24, 24, 24, .96);
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, .08), 0 12px 32px rgba(0, 0, 0, .5);
+    cursor: pointer;
+    touch-action: none;
+    opacity: 0;
+    transform: translate3d(0, 6px, 0);
+    pointer-events: none;
+    transition: opacity var(--dur-2) var(--ease-in) var(--dur-2), transform var(--dur-2) var(--ease-in) var(--dur-2);
+  }
+  /* 喇叭和音量条之间的空隙也算在里面（鼠标往上挪的路上不会断） */
+  .b-vpop::after { content: ''; position: absolute; left: 0; right: 0; top: 100%; height: var(--b-pop); }
+  .b-volw.on .b-vpop { opacity: 1; transform: none; pointer-events: auto; transition: opacity var(--dur-2) var(--ease-out), transform var(--dur-2) var(--ease-out); }
+  .vn { color: #fff; font-size: 12px; font-weight: 600; line-height: 16px; font-variant-numeric: tabular-nums; }
+  .vt { position: relative; width: 4px; height: 84px; border-radius: 2px; background: rgba(255, 255, 255, .28); }
+  .vt i { position: absolute; inset: 0; border-radius: 2px; background: #fff; transform-origin: 50% 100%; }
+  .vk { position: absolute; inset: 0; pointer-events: none; }
+  .vk b { position: absolute; left: 50%; bottom: 0; width: 12px; height: 12px; margin: 0 0 -6px -6px; border-radius: 50%; background: #fff; box-shadow: 0 0 4px rgba(0, 0, 0, .4); }
 }
-/* 窗口比较矮（右侧一列放不下 48px 的圆）：收小一号 */
+/* 窗口比较矮（右边一列放不下）：收小一号 */
 @media (min-width: 1024px) and (max-height: 700px) {
-  .sv-side { gap: 10px; }
+  .sv-side { gap: 6px; }
   .sv-author { width: 42px; height: 42px; }
-  .sv-act { gap: 4px; }
   .sv-act .ico { width: 40px; height: 40px; }
-  .sv-act svg { width: 21px; height: 21px; }
+  .sv-act svg { width: 29px; height: 29px; }
 }
-/* 很高的窗口（卡片 1100px 以上，如 2560×1440）：卡片里的字、右侧一列都大一号，不让手机尺寸的小字飘在大卡片里 */
+/* 很高的窗口（画框 1100px 以上，如 2560×1440）：框里的字、按钮都大一号，不让手机尺寸的小字飘在大画框里 */
 @media (min-width: 1024px) and (min-height: 1200px) {
-  .sv-meta { left: 20px; right: 20px; bottom: 64px; }
   .sv-unmute,
-  .sv-chip { height: 34px; margin-bottom: 16px; padding: 0 15px 0 14px; border-radius: 11px; font-size: 13px; }
-  .sv-unmute svg { width: 16px; height: 16px; }
-  .sv-chip { padding-right: 10px; }
-  .sv-full { height: 32px; margin-top: 12px; }
-  .sv-name { margin-bottom: 8px; font-size: 18px; line-height: 26px; }
-  .sv-tags button { font-size: 14px; line-height: 20px; }
-  .sv-title { font-size: 16px; line-height: 24px; }
-  .sv-prog { left: 20px; right: 20px; bottom: 16px; font-size: 13px; }
-  .sv-ctl { gap: 44px; }
-  .sv-ctl .pb { width: 64px; height: 64px; }
-  .sv-ctl .pb svg { width: 29px; height: 29px; }
-  .sv-ctl .sk { width: 32px; height: 32px; }
-  .sv-side { left: calc(100% + 16px); gap: 18px; width: 72px; }
+  .sv-chip { height: 36px; padding: 0 16px 0 14px; border-radius: 18px; font-size: 14px; }
+  .sv-chip { padding-right: 12px; }
+  .sv-unmute svg { width: 17px; height: 17px; }
+  .sv-full { height: 34px; }
+  .sv-name { font-size: 21px; line-height: 29px; }
+  .sv-ago { font-size: 15px; line-height: 20px; }
+  .sv-title { font-size: 17px; line-height: 26px; }
+  .sv-tags button { font-size: 16px; line-height: 22px; }
+  .sv-ctl .pb { width: 80px; height: 80px; }
+  .sv-ctl .pb svg { width: 34px; height: 34px; }
+  .sv-side { width: 56px; gap: 14px; }
   .sv-author { width: 56px; height: 56px; }
-  .sv-act { gap: 8px; font-size: 13px; line-height: 18px; }
-  .sv-act .ico { width: 56px; height: 56px; }
-  .sv-act svg { width: 27px; height: 27px; }
+  .sv-act { font-size: 14px; line-height: 20px; }
+  .sv-act .ico { width: 52px; height: 52px; }
+  .sv-act svg { width: 38px; height: 38px; }
+  .sv-bar { --b-pop: calc((var(--bh) - 40px) / 2 + 16px); }
+  .b-btn { min-width: 40px; height: 40px; }
+  .b-btn svg { width: 24px; height: 24px; }
+  .b-time,
+  .b-txt,
+  .b-auto { font-size: 15px; }
 }
 @media (min-width: 1024px) and (hover: hover) {
-  .sv-act:hover .ico { background: #2c2c2c; }
+  .sv-act:hover .ico { background: rgba(255, 255, 255, .12); }
+  .sv-author { transition: transform var(--dur-2) var(--ease-spring); }
+  .sv-author:hover { transform: scale(1.04); }
   .sv-name:hover { text-decoration: underline; text-underline-offset: 3px; }
   .sv-tags button { transition: color var(--dur-2) var(--ease-out); }
   .sv-tags button:hover { color: #fff; }
@@ -1486,8 +2010,25 @@ defineExpose({ userToggle, seekBy })
   .sv-nosrc:hover { background: rgba(48, 48, 48, .9); }
   .sv-full:hover { background: rgba(255, 255, 255, .26); }
   .sv-ctl .pb:hover { background: rgba(84, 84, 84, .6); }
-  /* 鼠标移到进度条上：线变粗一点、露出圆点（拖动时是 2 倍粗） */
-  .sv-prog .track:hover .bar { transform: scaleY(1.67); }
+  /* 鼠标移到进度条上：线变粗（和拖动时一样粗）、露出圆点 */
+  .sv-prog .track:hover .bar { transform: scaleY(2); }
   .sv-prog .track:hover .knob b { transform: scale(1); transition: transform var(--dur-2) var(--ease-spring); }
+  .b-btn,
+  .b-auto { transition: background-color var(--dur-2) var(--ease-out); }
+  .b-btn:hover,
+  .b-auto:hover { background: rgba(255, 255, 255, .1); }
+  .b-menu button { transition: background-color var(--dur-2) var(--ease-out), color var(--dur-2) var(--ease-out); }
+  .b-menu button:not(.on):hover { background: rgba(255, 255, 255, .08); color: #fff; }
+  .b-volw:hover .b-vpop { opacity: 1; transform: none; pointer-events: auto; transition: opacity var(--dur-2) var(--ease-out), transform var(--dur-2) var(--ease-out); }
+}
+/* 只有触屏的大屏（平板横过来）：没有悬停，音量条出不来，整个不要（音量用系统按键，喇叭照样能点） */
+@media (min-width: 1024px) and (hover: none) {
+  .b-vpop { display: none; }
+}
+/* :focus-visible 单独写（老 Safari 不认，会让同一条规则里的其他选择器一起失效） */
+@media (min-width: 1024px) {
+  .b-vpop:focus-visible { opacity: 1; transform: none; pointer-events: auto; outline: 2px solid var(--accent); outline-offset: 2px; transition: none; }
+  /* 进度条从画框左边一直到右边：焦点框往里画，不被画框两边切掉 */
+  .sv-prog .track:focus-visible { outline-offset: -2px; border-radius: 0; }
 }
 </style>

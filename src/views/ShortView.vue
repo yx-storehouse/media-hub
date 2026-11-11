@@ -9,7 +9,7 @@ import { isDesktop } from '@/composables/useDesktop'
 import { scrollBehavior } from '@/utils/motion'
 import Icon from '@/components/Icon.vue'
 import BottomSheet from '@/components/BottomSheet.vue'
-import ShortItem from '@/components/short/ShortItem.vue'
+import ShortItem, { audibleVolume, volumeZero } from '@/components/short/ShortItem.vue'
 
 defineOptions({ name: 'ShortView' })
 
@@ -66,8 +66,6 @@ const failed = ref(false)
 const refreshing = ref(false)
 /** 下一页的状态，显示在最后一条下面的那一格：'' 平常 / 'loading' / 'failed' / 'end' */
 const moreState = ref('')
-/** 停在最后那一格上（和下面的 atTail 一样，桌面的「下一个」按钮要读，所以单独留一份响应式的） */
-const onTail = ref(false)
 
 const settingsOpen = ref(false)
 
@@ -192,7 +190,6 @@ async function load() {
   players.value = list.map(newPlayer)
   current = 0
   atTail = false
-  onTail.value = false
   navTo = -1
   active.value = 0
   advancingTo = -1
@@ -687,7 +684,6 @@ function scrollToClip(i, behavior = 'auto') {
 function enterTail() {
   if (atTail) return
   atTail = true
-  onTail.value = true
   if (navTo === clips.value.length) navTo = -1
   leaveView()
   pauseAll()
@@ -712,7 +708,6 @@ function observe(reset = true) {
       }
       current = Number(e.target.dataset.index)
       atTail = false
-      onTail.value = false
       if (navTo === current) navTo = -1
       active.value = current
       advancingTo = -1
@@ -850,7 +845,7 @@ async function togglePip() {
 }
 
 /*
- * ---------- 桌面布局（≥ 1024px）：滚轮 / 触控板、键盘、右侧的上 / 下按钮翻页 ----------
+ * ---------- 桌面布局（≥ 1024px）：滚轮 / 触控板、键盘翻页（和抖音网页版一样，没有上 / 下按钮） ----------
  * 手机上是手指上下滑（吸附滚动），这些都不挂 / 不生效。
  */
 
@@ -871,57 +866,24 @@ function step(dir) {
   if (to === here) return
   navTo = to
   navAt = performance.now()
-  const behavior = scrollBehavior()
-  if (behavior === 'smooth') holdTop(to)
-  scrollToClip(to, behavior)
-}
-
-/*
- * 卡片顶上那一条（全屏 / 小窗、推荐 / 专题、换一批 / 声音）固定在页面上，不跟着卡片走：平滑翻页的途中卡片从它下面滚过去，
- * 它会压在上一条的文字、进度条和两张卡片之间的空隙上。翻页途中先淡出（stepping），滚到要去的那一格再淡入。
- * 到没到看滚动位置（观察者在这一格露出 60% 时就认了，那时还在滚）；被打断（拖动、改窗口大小）的话 STEP_MAX 之后照样回来
- */
-const stepping = ref(false)
-const STEP_MAX = 1200
-let stepTop = 0
-let stepTimer = 0
-let stepFeed = null
-function holdTop(to) {
-  const f = feedEl.value
-  const el = f?.querySelector(to < clips.value.length ? `.sv-slot[data-index="${to}"]` : '.sv-tail')
-  if (!el) return
-  stepTop = el.offsetTop
-  if (stepFeed !== f) {
-    stepFeed?.removeEventListener('scroll', onStepScroll)
-    stepFeed = f
-    f.addEventListener('scroll', onStepScroll, { passive: true })
-  }
-  stepping.value = true
-  clearTimeout(stepTimer)
-  stepTimer = setTimeout(endStep, STEP_MAX)
-}
-function onStepScroll() {
-  if (stepFeed && Math.abs(stepFeed.scrollTop - stepTop) < 2) endStep()
-}
-function endStep() {
-  clearTimeout(stepTimer)
-  stepFeed?.removeEventListener('scroll', onStepScroll)
-  stepFeed = null
-  stepping.value = false
+  // 画框里的东西（左上角的频道、文字、按钮、控制栏）都在这一条自己里面，跟着整个画框一起滑
+  scrollToClip(to, scrollBehavior())
 }
 
 /*
  * 滚轮 / 触控板：一次手势只翻一条，不会一下滚过好几条。
  *  - 滚轮一格一个事件：连着转的几格（间隔不到 WHEEL_GAP）算同一次手势；
- *  - 触控板一次轻扫是一串越来越小的事件（松手后的惯性）：整串算一次；惯性还没停又扫了一下，
- *    事件会重新变大（比翻页后最小的那个大 4 倍以上、并且够 WHEEL_MIN），算新的一次；
+ *  - 触控板一次轻扫是一串先变大（手指在加速）再越来越小（松手后的惯性）的事件：整串算一次；
+ *    惯性还没停又扫了一下，事件会重新变大，算新的一次：这串真的减弱过（最大的那个够 WHEEL_MIN，后来有不到它一半的），
+ *    又出现比减弱后最小的那个（floor）大 4 倍以上、并且够 WHEEL_MIN 的。加速途中的小抖动（开头那几个小的、
+ *    比前一个略小的）不算减弱，慢慢加速的一次轻扫不会被当成两次；
  *  - 反方向滚：马上算新的一次。
  * 页面上能自己滚的地方（展开的长标题）还能滚时交给它；Ctrl + 滚轮是浏览器缩放，不管。
  */
 const WHEEL_MIN = 24
 const WHEEL_GAP = 200
 const WHEEL_SURGE_AFTER = 300
-const wheel = { sum: 0, last: -1e9, used: false, dir: 0, at: 0, floor: Infinity }
+const wheel = { sum: 0, last: -1e9, used: false, dir: 0, at: 0, peak: 0, floor: Infinity }
 
 function scrollsInside(target, dy) {
   for (let el = target; el && el !== feedEl.value && el !== pageEl.value; el = el.parentElement) {
@@ -952,7 +914,9 @@ function onWheel(e) {
     wheel.used = false
   }
   if (wheel.used) {
-    wheel.floor = Math.min(wheel.floor, abs)
+    // 还在变大：记下最大的；明显减弱下来的（不到最大的一半）才记进最小值
+    if (abs > wheel.peak) wheel.peak = abs
+    else if (wheel.peak >= WHEEL_MIN && abs < wheel.peak / 2) wheel.floor = Math.min(wheel.floor, abs)
     return
   }
   wheel.sum += dy
@@ -960,6 +924,7 @@ function onWheel(e) {
   wheel.used = true
   wheel.dir = Math.sign(wheel.sum)
   wheel.at = now
+  wheel.peak = abs
   wheel.floor = Infinity
   step(wheel.dir)
 }
@@ -974,8 +939,6 @@ function bindWheel(on) {
   el?.addEventListener('wheel', onWheel, { passive: false })
 }
 watch(isDesktop, bindWheel)
-/* 窗口拉窄到手机布局：翻页途中淡出的顶上那一条马上回来（手机上它一直在） */
-watch(isDesktop, d => { if (!d) endStep() })
 
 /* 屏幕上这一条的 ShortItem（键盘快捷键通过它操作，和用鼠标点一样带动效）：feedKey → 组件 */
 const items = new Map()
@@ -986,10 +949,45 @@ function setItem(key, inst) {
 const curItem = () => (atTail ? null : items.get(clips.value[current]?.feedKey) || null)
 
 const isTyping = t => !!t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))
-/* 键盘聚焦（Tab 过来）的按钮：空格照常按下它；鼠标点过留着焦点的按钮（比如刚点了赞），空格还是播放 / 暂停 */
+
+/*
+ * 桌面：鼠标点过的按钮、拖过的进度条 / 音量条不留焦点（和 Safari 一样）。不然之后按空格不是播放 / 暂停，
+ * 而是再按一下那个按钮（连播被关掉、赞被取消、静音又被打开），按别的快捷键时它还会莫名冒出焦点框
+ * （Chrome 在按过键以后把鼠标点出来的焦点也当成键盘焦点画框）。
+ * 按下鼠标的那一下（同一个任务里浏览器把焦点交给按下的元素）收到的焦点直接还回去；焦点本来就在页面里某个按钮上
+ * （Tab 走过来的）又用鼠标点了它，也不留。键盘走过来的焦点照旧。只管这个页面里的（播放设置、登录框挂在页面外面）。
+ */
+let mouseFocusing = false
+function onPagePointerDown(e) {
+  if (!isDesktop.value || e.pointerType !== 'mouse') return
+  const a = document.activeElement
+  if (a && a !== document.body && pageEl.value?.contains(a) && !isTyping(a)) a.blur()
+  mouseFocusing = true
+  setTimeout(() => { mouseFocusing = false })
+}
+function onPageFocusIn(e) {
+  if (mouseFocusing && !isTyping(e.target)) e.target.blur?.()
+}
+
+const BTN = 'button, [role="button"], [role="switch"], [role="tab"], [role="menuitem"]'
+
+/* 键盘聚焦（Tab 过来）的按钮：空格照常按下它；鼠标点的按钮不留焦点（见上面），空格还是播放 / 暂停 */
 function keyboardButton(t) {
-  if (!t?.closest?.('button, [role="button"], [role="switch"], [role="tab"], [role="menuitem"]')) return false
+  if (!t?.closest?.(BTN)) return false
   try { return t.matches(':focus-visible') } catch { return true }
+}
+
+/*
+ * 页面外面（顶栏的 ☰、「登录」）用鼠标点过的按钮：上面那套管不到，焦点留在它上面，按过键以后 Chrome 也把它当成键盘焦点，
+ * 空格会再按它一下（☰ 又把导航展开了），而不是播放 / 暂停。记下鼠标最后按下的那个按钮，空格时还是播放 / 暂停（见 onDeskKey）。
+ * 鼠标按在别处、按 Tab 走开就不算了；开着弹出菜单的按钮（头像菜单）空格照常归它
+ */
+let mouseBtn = null
+function onDocPointerDown(e) {
+  mouseBtn = isDesktop.value && e.pointerType === 'mouse' ? e.target.closest?.(BTN) || null : null
+}
+function mouseFocused(t) {
+  return !!mouseBtn && t.closest(BTN) === mouseBtn && !mouseBtn.matches('[aria-haspopup][aria-expanded="true"]')
 }
 
 /*
@@ -997,6 +995,7 @@ function keyboardButton(t) {
  * 在输入框里打字、开着弹层（播放设置、登录框等）时不管；按住不放只算一下（← / → 除外，可以一直跳）。
  */
 function onDeskKey(e) {
+  if (e.key === 'Tab') mouseBtn = null
   if (!isDesktop.value || !visible || e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey || e.isComposing) return
   if (isTyping(e.target) || document.querySelector('[aria-modal="true"]')) return
   // 焦点在顶栏的下拉菜单（头像菜单）、搜索建议里：按键归它们（和 VideoPlayer 一样）
@@ -1008,12 +1007,18 @@ function onDeskKey(e) {
   } else if (k === 'ArrowUp' || k === 'k' || k === 'K' || k === 'PageUp') {
     if (once) step(-1)
   } else if (k === ' ' || k === 'Spacebar') {
-    if (keyboardButton(e.target)) return
+    if (keyboardButton(e.target)) {
+      if (!mouseFocused(e.target)) return
+      // 鼠标点过的 ☰ 等：焦点还回去（松开空格时不会再按它一下），这一下照样是播放 / 暂停
+      e.target.blur()
+      mouseBtn = null
+    }
     if (once) togglePlay()
   } else if (k === 'ArrowLeft' || k === 'ArrowRight') {
     if (clips.value[current]?.src) curItem()?.seekBy(k === 'ArrowLeft' ? -KEY_SEEK : KEY_SEEK)
   } else if (k === 'm' || k === 'M') {
-    if (once) setMuted(!store.muted)
+    // 和控制栏上的喇叭一样：听不到声音（静音了，或者音量拉到了 0）就恢复声音，否则静音
+    if (once) setMuted(!(store.muted || volumeZero()))
   } else if (k === 'f' || k === 'F') {
     if (once && canFullscreen && (fullscreen.value || curHasFile.value)) toggleFullscreen()
   } else return
@@ -1034,7 +1039,6 @@ function stop() {
   visible = false
   boosted = -1
   navTo = -1
-  endStep()
   clearInterval(timer)
   timer = 0
   io?.disconnect()
@@ -1045,6 +1049,8 @@ function stop() {
   window.removeEventListener('online', onOnline)
   document.removeEventListener('visibilitychange', onHidden)
   document.removeEventListener('keydown', onDeskKey)
+  document.removeEventListener('pointerdown', onDocPointerDown, true)
+  mouseBtn = null
 }
 
 onMounted(() => {
@@ -1074,6 +1080,7 @@ onActivated(() => {
   window.addEventListener('online', onOnline)
   document.addEventListener('visibilitychange', onHidden)
   document.addEventListener('keydown', onDeskKey)
+  document.addEventListener('pointerdown', onDocPointerDown, true)
   if (!clips.value.length) {
     // first activation: load() starts the observer once the feed is rendered; a failed first page retries here
     if (failed.value) retry()
@@ -1116,11 +1123,16 @@ function selectFeed(i) {
   if (FEEDS[i] === '专题') toast('专题内容即将上线')
 }
 
-/** 用户自己点的静音 / 恢复声音：记下来，下次打开照这个来 */
-function setMuted(muted) {
+/**
+ * 用户自己点的静音 / 恢复声音：记下来，下次打开照这个来。
+ * quiet：桌面控制栏上的喇叭、音量条（图标自己就是反馈，不再弹提示）
+ */
+function setMuted(muted, quiet = false) {
   store.muted = muted
   store.sound = !muted
-  toast(muted ? '已静音' : '已恢复声音')
+  // 桌面：音量拉到了 0 的话回到一半（不然提示「已恢复声音」还是听不见；手机上音量交给系统按键，不管）
+  if (!muted && isDesktop.value) audibleVolume()
+  if (!quiet) toast(muted ? '已静音' : '已恢复声音')
 }
 
 /* 设置面板挂在页面外面，全屏时看不见：先退出全屏再打开 */
@@ -1145,8 +1157,11 @@ function setSpeed(speed) {
     @touchend.capture.passive="restoreSound"
     @click.capture="restoreSound"
     @keydown.capture="restoreSound"
+    @pointerdown.capture="onPagePointerDown"
+    @focusin="onPageFocusIn"
   >
-    <div class="sv-top" :class="{ off: stepping }">
+    <!-- 手机：顶上一条（全屏 / 小窗、推荐 / 专题、声音）；桌面上这些都在每一条画框里（左上角的频道、底边的控制栏） -->
+    <div class="sv-top">
       <div class="l">
         <!-- 只有能真正播放的条目才有全屏 / 小窗；全屏时一直留着退出键 -->
         <button
@@ -1183,10 +1198,6 @@ function setSpeed(speed) {
         </button>
       </div>
       <div class="r">
-        <!-- 桌面：手机上的「下拉刷新」换成这个按钮（再点一次左侧的「短视频」也一样） -->
-        <button v-if="isDesktop" type="button" aria-label="换一批" title="换一批" @click="refresh('tap')">
-          <Icon name="refresh" />
-        </button>
         <button
           type="button"
           data-sound
@@ -1197,16 +1208,6 @@ function setSpeed(speed) {
           <Icon :name="store.muted ? 'mute' : 'vol'" />
         </button>
       </div>
-    </div>
-
-    <!-- 桌面：页面右边的上一个 / 下一个（手机上是手指上下滑） -->
-    <div v-if="isDesktop && clips.length" class="sv-nav">
-      <button type="button" aria-label="上一个" title="上一个（↑ / K）" :disabled="active === 0 && !onTail" @click="step(-1)">
-        <Icon name="chevU" />
-      </button>
-      <button type="button" aria-label="下一个" title="下一个（↓ / J）" :disabled="onTail" @click="step(1)">
-        <Icon name="chevD" />
-      </button>
     </div>
 
     <!--
@@ -1252,6 +1253,9 @@ function setSpeed(speed) {
           :eager="Math.abs(i - active) <= 1"
           :near="Math.abs(i - active) <= 1"
           :following="followOf(clip)"
+          :fs="fullscreen"
+          :can-fs="canFullscreen"
+          :can-pip="canPip"
           @toggle="toggle(i)"
           @dbllike="onDoubleLike(i)"
           @seek="t => seek(i, t)"
@@ -1267,7 +1271,35 @@ function setSpeed(speed) {
           @fav="onFav(i)"
           @follow="onFollow(i)"
           @settings="openSettings"
-        />
+          @fullscreen="toggleFullscreen"
+          @pip="togglePip"
+          @mute="m => setMuted(m, true)"
+        >
+          <!--
+            桌面：画框左上角的「推荐 / 专题 · 换一批」（手机上是页面顶上那一条和下拉刷新；ShortItem 只在桌面布局时渲染它）。
+            这里不写 v-if：带条件的插槽会被编译成「动态插槽」，父组件每次更新（播放进度）都会让每一条跟着重渲染
+          -->
+          <template #top>
+            <div class="sv-feeds" role="tablist" aria-label="短视频频道">
+              <button
+                v-for="(name, fi) in FEEDS"
+                :key="name"
+                class="sv-tab"
+                :class="{ on: fi === 0 }"
+                type="button"
+                role="tab"
+                :aria-selected="fi === 0"
+                @click="selectFeed(fi)"
+              >
+                {{ name }}
+              </button>
+            </div>
+            <i class="sv-dsep" aria-hidden="true" />
+            <button class="sv-rf" type="button" title="换一批（再点一次左侧的「短视频」也一样）" @click="refresh('tap')">
+              <Icon name="refresh" />换一批
+            </button>
+          </template>
+        </ShortItem>
       </div>
       <!-- 最后一格：下一页还没到时转圈，失败时给重试（滑到这里会自动再试一次） -->
       <div v-if="clips.length" class="sv-slot sv-tail" data-tail>
@@ -1296,6 +1328,31 @@ function setSpeed(speed) {
         <button class="retry" type="button" @click="retry">重试</button>
       </div>
       <div v-else-if="!loading && !clips.length" class="empty sv-empty">还没有视频</div>
+    </div>
+
+    <!--
+      桌面：还没有内容（第一页的骨架、没有视频、加载失败）时，画框左上角照样是「推荐 / 专题 · 换一批」，
+      位置和每一条里的那一份（上面的 #top 插槽）一样：数据回来时不跳；没有视频时这里的「换一批」就是刷新
+    -->
+    <div v-if="isDesktop && !clips.length" class="sv-ftop">
+      <div class="sv-feeds" role="tablist" aria-label="短视频频道">
+        <button
+          v-for="(name, fi) in FEEDS"
+          :key="name"
+          class="sv-tab"
+          :class="{ on: fi === 0 }"
+          type="button"
+          role="tab"
+          :aria-selected="fi === 0"
+          @click="selectFeed(fi)"
+        >
+          {{ name }}
+        </button>
+      </div>
+      <i class="sv-dsep" aria-hidden="true" />
+      <button class="sv-rf" type="button" title="换一批（再点一次左侧的「短视频」也一样）" @click="refresh('tap')">
+        <Icon name="refresh" />换一批
+      </button>
     </div>
 
     <BottomSheet v-model:open="settingsOpen" title="播放设置">
@@ -1489,89 +1546,86 @@ function setSpeed(speed) {
 .speeds { margin-bottom: 12px; }
 
 /*
- * ---- 桌面布局（≥ 1024px）----
- * 还是一格一条的吸附滚动、铺满页面，但每一条画成页面正中的一张 9:16 卡片（上下各留 --sv-gap、圆角 --sv-r），
- * 右侧一列按钮在卡片外面（ShortItem），「推荐 / 专题」和全屏 / 小窗 / 换一批 / 声音浮在卡片顶上，
- * 页面最右边是上一个 / 下一个。全屏时卡片顶天立地（没有留白和圆角），其余不变。
- *
- * 卡片宽度按高度算（9:16）：页面高度 = 窗口高度 − 顶栏 − 安全区，不依赖 aspect-ratio（Chrome 87 没有）；
- * --sv-cw 里的 100% 在用到它的地方才换算（卡片、顶上那一条、骨架都是按页面宽度算的，结果一样），
- * 窗口很窄很高时卡片宽度封顶，两边给右侧按钮和上 / 下按钮留出位置（画面在卡片里 contain，不变形）。
+ * ---- 桌面布局（≥ 1024px，参照抖音网页版的推荐流）----
+ * 还是一格一条的吸附滚动，每一条画成一个铺满页面的圆角大画框：顶栏下面、左侧导航右边、窗口右边和底边都只留 --sv-gap，
+ * 不限最宽，右边也不留按钮的位置（屏幕都给画面）。每条一样大，翻页（滚轮 / 触控板、↑ ↓ / J K）时整个画框上下滑。
+ * 画框里的东西都在 ShortItem 里：最底下一条常驻的控制栏（--sv-bar 高），上面是画面区；左上角的频道、左下角的文字、
+ * 右边一列对齐同一组内边距 --sv-in，文字和右边一列的底边在 --sv-lift（控制栏上面一点）。
+ * 全屏时画框铺满屏幕：没有留白和圆角，里面的排法不变。
  */
 @media (min-width: 1024px) {
   .sv-page {
-    --sv-gap: 16px;
-    --sv-r: 12px;
-    --sv-vh: 100vh;
-    --sv-top: calc(var(--desk-top) + var(--safe-t));
-    --sv-cw: min(calc((var(--sv-vh) - var(--sv-top) - 2 * var(--sv-gap)) * 9 / 16), calc(100% - 360px));
+    --sv-gap: 12px;
+    --sv-r: 14px;
+    --sv-in: 20px;
+    --sv-bar: 48px;
+    /* 比进度条上悬停时间的那一行（控制栏上沿往上 6–26px）高：鼠标在进度条两头时，时间标签不压住右边一列最下面的字、话题和「看完整版」 */
+    --sv-lift: calc(var(--sv-bar) + 26px);
     background: var(--bg);
   }
-  .sv-page.fs { --sv-gap: 0px; --sv-r: 0px; --sv-top: 0px; --sv-side-b: 20px; }
-  /* 无尽的流用不着滚动条（也免得它占掉宽度、卡片偏左）：滚轮、键盘、右边的按钮翻页 */
+  .sv-page.fs { --sv-gap: 0px; --sv-r: 0px; }
+  /* 无尽的流用不着滚动条（也免得它占掉宽度）：滚轮、触控板、键盘翻页 */
   .sv-feed { background: var(--bg); scrollbar-width: none; }
   .sv-feed::-webkit-scrollbar { display: none; }
-  .sv-slot { padding: var(--sv-gap) 0; }
+  .sv-slot { padding: var(--sv-gap); }
 
-  /* 卡片顶上的一条：左边全屏 / 小窗，中间「推荐 / 专题」，右边换一批 / 声音（和卡片一样宽、一样居中） */
-  .sv-top { top: calc(var(--safe-t) + var(--sv-gap)); width: var(--sv-cw); margin: 0 auto; }
-  .sv-top .l { left: 8px; top: 8px; gap: 2px; }
-  .sv-top .r { right: 8px; top: 8px; display: flex; gap: 2px; }
-  .sv-top .l button,
-  .sv-top .r button { width: 36px; height: 36px; border-radius: 50%; transition: background-color var(--dur-2) var(--ease-out); }
-  .sv-top .l svg,
-  .sv-top .r svg { width: 18px; height: 18px; }
-  .sv-top .tt2 { top: 9px; gap: 28px; }
-  /* 平滑翻页途中（stepping）很快淡出、滚到位再淡入：不压在滚过去的卡片的文字和卡片间的空隙上；淡出时不接点击 */
-  .sv-top { transition: opacity var(--dur-2) var(--ease-out); }
-  .sv-top.off { opacity: 0; transition-duration: var(--dur-1); }
-  .sv-top.off .l,
-  .sv-top.off .r,
-  .sv-top.off .sv-tab { pointer-events: none; }
+  /* 手机的顶上一条：桌面上这些都在画框里 */
+  .sv-top { display: none; }
 
-  .sv-refresh { top: calc(var(--safe-t) + var(--sv-gap) + 62px); }
+  /* 画框左上角（ShortItem 的 .sv-dtop 里）：推荐 / 专题 · 换一批 */
+  .sv-feeds { display: flex; gap: 22px; }
+  .sv-feeds .sv-tab { line-height: 32px; }
+  .sv-dsep { width: 1px; height: 14px; margin: 0 8px 0 18px; background: rgba(255, 255, 255, .3); }
+  .sv-rf {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    height: 32px;
+    padding: 0 10px;
+    border-radius: 16px;
+    color: rgba(255, 255, 255, .78);
+    font-size: 14px;
+    font-weight: 500;
+    text-shadow: 0 1px 6px rgba(0, 0, 0, .35);
+  }
+  .sv-rf svg { width: 15px; height: 15px; stroke-width: 2.3; }
 
-  /* 页面右边：上一个 / 下一个 */
-  .sv-nav {
-    position: absolute;
-    right: var(--desk-pad);
-    top: 50%;
-    z-index: 6;
+  /* 换一批的提示：画框上沿往下（和「2X 快进中」同一行）；画框左右留白一样，水平正中就是页面正中 */
+  .sv-refresh { top: calc(var(--safe-t) + var(--sv-gap) + var(--sv-in) + 50px); }
+
+  /* 最后一格、第一页的骨架、空状态：也是同一个画框 */
+  .sv-tail { background: var(--bg); }
+  .sv-tail-in { justify-content: center; width: 100%; height: 100%; border-radius: var(--sv-r); background: var(--panel); font-size: 14px; }
+  .sv-skel { inset: var(--sv-gap); overflow: hidden; border-radius: var(--sv-r); background: linear-gradient(180deg, #161616, #101010); }
+  /* 底边一条和真的一样的控制栏位置：数据回来时画面区不变大小 */
+  .sv-skel::after { content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: var(--sv-bar); background: #000; }
+  /*
+   * 右边一列、左下角文字的位置和真的一样（数据回来时不跳）：头像，下面五个按钮，每个是图标 + 一行字。
+   * 圆点在图标那一格（44px）的正中，圆点下面一小截横条在字的位置；头像用 ::before 画（手机的骨架没有头像，不多加元素）
+   */
+  .sk-side { right: var(--sv-in); bottom: var(--sv-lift); align-items: center; gap: 10px; width: 48px; }
+  .sk-side::before { content: ''; flex: none; width: 48px; height: 48px; margin-bottom: 8px; border-radius: 50%; background: #1d1d1d; animation: sk 1.2s ease-in-out infinite; }
+  .sk-side i { position: relative; width: 36px; height: 36px; margin: 4px 4px 23px; }
+  .sk-side i::after { content: ''; position: absolute; left: 50%; top: calc(100% + 10px); width: 24px; height: 8px; margin-left: -12px; border-radius: 4px; background: inherit; }
+  /* 三条：作者、标题、话题那三行的位置 */
+  .sk-meta { left: var(--sv-in); bottom: var(--sv-lift); gap: 14px; width: min(40%, 440px); padding-bottom: 5px; }
+  /* 中间的转圈 / 「网络有点慢」：画面区正中（和缓冲转圈、暂停时的播放键同一个位置） */
+  .sk-c { top: calc((100% - var(--sv-bar)) / 2); }
+  .sv-empty {
+    inset: var(--sv-gap);
     display: flex;
     flex-direction: column;
-    gap: 12px;
-    transform: translateY(-50%);
-  }
-  .sv-nav button {
-    display: grid;
-    place-items: center;
-    width: 48px;
-    height: 48px;
-    border-radius: 50%;
-    background: #1f1f1f;
-    color: var(--t1);
-    transition: background-color var(--dur-2) var(--ease-out), opacity var(--dur-2) var(--ease-out), transform var(--dur-2) var(--ease-spring);
-  }
-  .sv-nav svg { width: 22px; height: 22px; stroke-width: 2.2; }
-  .sv-nav button:active:not(:disabled) { transform: scale(var(--press-scale-sm)); transition-duration: var(--dur-1); transition-timing-function: var(--ease-out); }
-  .sv-nav button:disabled { opacity: .3; cursor: default; }
-
-  /* 最后一格、第一页的骨架：也是正中的一张卡片 */
-  .sv-tail { background: var(--bg); }
-  .sv-tail-in { justify-content: center; width: var(--sv-cw); height: 100%; border-radius: var(--sv-r); background: var(--panel); font-size: 14px; }
-  .sv-skel {
-    top: var(--sv-gap);
-    bottom: var(--sv-gap);
-    width: var(--sv-cw);
-    margin: 0 auto;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 0;
     border-radius: var(--sv-r);
-    background: linear-gradient(180deg, #161616, #101010);
+    background: var(--panel);
+    font-size: 14px;
   }
-  /* 右侧一列的位置和真的一样：卡片外面右边、底边对齐（圆 48px，下面一行字） */
-  .sk-side { right: auto; left: calc(100% + 20px); bottom: 22px; gap: 36px; }
-  .sk-side i { width: 48px; height: 48px; }
-  .sk-meta { left: 16px; bottom: 60px; width: 70%; }
-  .sv-empty { font-size: 14px; }
+  .sv-empty .retry { height: 30px; margin: 4px 0 0; padding: 0 18px; border-radius: 15px; font-size: 13px; }
+  /* 还没有内容时左上角的「推荐 / 专题 · 换一批」：和每一条画框里的那一份同一个位置（画框左上角往里 --sv-in） */
+  .sv-ftop { position: absolute; left: calc(var(--sv-gap) + var(--sv-in)); top: calc(var(--sv-gap) + var(--sv-in) - 6px); z-index: 6; display: flex; align-items: center; }
 
   /* 播放设置里的键盘快捷键 */
   .sv-keys { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
@@ -1593,37 +1647,33 @@ function setSpeed(speed) {
   }
   .sv-keys dd { overflow: hidden; color: var(--t2); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
 }
-@supports (height: 100dvh) {
-  @media (min-width: 1024px) {
-    .sv-page { --sv-vh: 100dvh; }
-  }
-}
-/* 很高的窗口（卡片 1100px 以上）：卡片顶上的按钮、上 / 下按钮、骨架都大一号（和 ShortItem 里同一档） */
+/* 很高的窗口（画框 1100px 以上，如 2560×1440）：内边距、控制栏、频道都大一号（和 ShortItem 里同一档） */
 @media (min-width: 1024px) and (min-height: 1200px) {
-  .sv-top .l { left: 10px; top: 10px; }
-  .sv-top .r { right: 10px; top: 10px; }
-  .sv-top .l button,
-  .sv-top .r button { width: 40px; height: 40px; }
-  .sv-top .l svg,
-  .sv-top .r svg { width: 20px; height: 20px; }
-  .sv-top .tt2 { top: 13px; gap: 32px; }
-  .sv-tab { font-size: 17px; }
-  .sv-nav { gap: 14px; }
-  .sv-nav button { width: 56px; height: 56px; }
-  .sv-nav svg { width: 26px; height: 26px; }
-  .sk-side { left: calc(100% + 24px); bottom: 26px; gap: 44px; }
-  .sk-side i { width: 56px; height: 56px; }
-  .sk-meta { left: 20px; bottom: 76px; }
+  .sv-page { --sv-in: 24px; --sv-bar: 56px; --sv-lift: calc(var(--sv-bar) + 30px); }
+  .sv-feeds .sv-tab { font-size: 18px; line-height: 36px; }
+  .sv-rf { height: 36px; font-size: 15px; }
+  .sv-rf svg { width: 17px; height: 17px; }
+  .sk-side { gap: 14px; width: 56px; }
+  .sk-side::before { width: 56px; height: 56px; }
+  .sk-side i { width: 44px; height: 44px; margin-bottom: 25px; }
+  .sk-side i::after { top: calc(100% + 11px); }
+}
+/* 窗口比较矮（和 ShortItem 里同一档，右边一列收小一号） */
+@media (min-width: 1024px) and (max-height: 700px) {
+  .sk-side { gap: 6px; }
+  .sk-side::before { width: 42px; height: 42px; }
+  .sk-side i { width: 32px; height: 32px; }
 }
 @media (min-width: 1024px) and (hover: hover) {
-  .sv-top .l button:hover,
-  .sv-top .r button:hover { background: rgba(255, 255, 255, .14); }
   .sv-tab { transition: color var(--dur-2) var(--ease-out); }
   .sv-tab:not(.on):hover { color: rgba(255, 255, 255, .92); }
-  .sv-nav button:not(:disabled):hover { background: #2c2c2c; }
+  .sv-rf { transition: background-color var(--dur-2) var(--ease-out), color var(--dur-2) var(--ease-out); }
+  .sv-rf:hover { background: rgba(255, 255, 255, .12); color: #fff; }
   .sv-tail .retry,
-  .sk-c .retry { transition: background-color var(--dur-2) var(--ease-out); }
+  .sk-c .retry,
+  .sv-empty .retry { transition: background-color var(--dur-2) var(--ease-out); }
   .sv-tail .retry:hover,
-  .sk-c .retry:hover { background: #262626; }
+  .sk-c .retry:hover,
+  .sv-empty .retry:hover { background: #262626; color: var(--t1); }
 }
 </style>

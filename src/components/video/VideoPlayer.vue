@@ -903,7 +903,13 @@ onMounted(() => {
   if (orientationTarget) orientationTarget.addEventListener('change', onOrientation)
   else window.addEventListener('orientationchange', onOrientation)
   document.addEventListener('keydown', onKey)
-  // 桌面上调过的音量（手机上不动，音量交给系统按键）
+  // 桌面上调过的音量（手机上不动，音量交给系统按键）：短视频页的音量条也记在 reel:volume 里，按最新记下的来
+  if (isDesktop.value) {
+    try {
+      const v = parseFloat(localStorage.getItem(VOL_KEY))
+      if (Number.isFinite(v)) volume.value = deskVolume = Math.max(0, Math.min(1, v))
+    } catch { /* 读不到就用这次打开时读到的 */ }
+  }
   if (isDesktop.value && el.value && volume.value !== 1) el.value.volume = volume.value
   if (!releaseAfter && !reducedMotion()) releaseAfter = Math.max(cssDuration('--dur-push', 440), cssDuration('--dur-pop', 380)) + 60
   const carry = Date.now() - carryFullscreenAt < 10000
