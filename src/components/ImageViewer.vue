@@ -4,6 +4,8 @@ import { useRouter, onBeforeRouteLeave } from 'vue-router'
 import { useBackDismiss } from '@/composables/useBackDismiss'
 import { reducedMotion } from '@/utils/motion'
 import { dur, ease } from '@/components/home/motion'
+import { isDesktop } from '@/composables/useDesktop'
+import { trapTab } from '@/components/desk/modal'
 import Icon from '@/components/Icon.vue'
 import RollNum from '@/components/video/RollNum.vue'
 
@@ -11,6 +13,9 @@ import RollNum from '@/components/video/RollNum.vue'
  * 全屏看大图（帖子配图、社区卡片缩略图）：
  *   左右滑切换，双指缩放、双击放大 / 还原，放大后单指拖动查看；单击、上下滑、返回键 / 返回手势、Esc 关闭。
  *   顶部显示「2 / 6」。键盘左右方向键切换，桌面上 Ctrl + 滚轮（触控板双指）缩放。
+ *   桌面布局（≥ 1024px）：左右两边有 ‹ › 按钮，关闭键在右上角，Tab 只在查看器里循环；
+ *   触控板横着两指划一下换一张（不会被浏览器当成「后退」把查看器关掉），放大后滚轮 / 两指滑动拖着看；
+ *   竖着滚滚轮什么都不做（不会误关）。
  *
  *   <ImageViewer v-if="viewer" :images="viewer.images" :index="viewer.index" :origin="i => 缩略图元素" @close="viewer = null" />
  *
@@ -66,6 +71,8 @@ const root = ref(null)
 const stage = ref(null)
 const bg = ref(null)
 const top = ref(null)
+/* 桌面布局的 ‹ › 按钮（一层，打开时和顶栏一起淡入） */
+const nav = ref(null)
 /* 每张图的外框（按下标存，不依赖 v-for ref 数组的顺序） */
 const slides = []
 const size = { w: 0, h: 0 }
@@ -89,6 +96,17 @@ watch(cur, i => {
   tx.value = ty.value = 0
   hideThumb(i)
 })
+/*
+ * 桌面布局的 ‹ ›：翻到头时那一边的按钮淡出后 visibility: hidden，焦点要是在它上面，浏览器会把焦点丢到 <body> 上，
+ * 查看器的方向键、Esc、Tab 循环就都收不到了。所以每次翻页（点按钮、方向键、触控板横划都算）渲染完，
+ * 焦点在要藏起来的按钮上、或者已经不在查看器里，就先还给查看器本身
+ */
+watch(cur, () => {
+  const el = root.value
+  if (!isDesktop.value || !el) return
+  const a = document.activeElement
+  if ((a instanceof Element && a.matches('.iv-arrow.hide')) || !el.contains(a)) el.focus({ preventScroll: true })
+}, { flush: 'post' })
 
 function onImgLoad(i, e) {
   const { naturalWidth: w, naturalHeight: h } = e.target
@@ -282,7 +300,7 @@ async function zoomIn() {
   const duration = dur('--dur-3')
   const easing = ease('--ease-out')
   const fade = [{ opacity: 0 }, { opacity: 1 }]
-  opening = [bg.value, top.value].filter(Boolean).map(el => el.animate(fade, { duration, easing }))
+  opening = [bg.value, top.value, nav.value].filter(Boolean).map(el => el.animate(fade, { duration, easing }))
   const slide = slides[i]
   if (!slide) return
   const thumb = thumbOf(i)
@@ -525,37 +543,104 @@ function onTap(e) {
   tapTimer = setTimeout(close, DOUBLE_MS)
 }
 
-/* 桌面：Ctrl + 滚轮 / 触控板双指缩放 */
+/*
+ * 滚轮 / 触控板：
+ *   Ctrl + 滚轮、触控板双指捏合：以指针为中心缩放；
+ *   放大着：滚轮、触控板两指滑动拖着看（跟手，不加过渡，停下来 120ms 后恢复）；
+ *   没放大、横着划：一次手势（停下 160ms 算结束，触控板的惯性也算在这一次里）最多换一张；
+ *   同时拦下来，不让浏览器把横划当成「后退 / 前进」（那样会关掉查看器、甚至离开这一页）；
+ *   竖着滚：什么都不做。
+ */
+const WHEEL_STEP = 40
+let wheelSum = 0
+let wheelUsed = false
+let wheelIdle = 0
+let wheelPan = 0
+/* 滚轮的一格可能按行 / 按页算（Firefox 的鼠标滚轮）：换成像素 */
+const wheelPx = (e, d) => d * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? size.h || 800 : 1)
 function onWheel(e) {
-  if (!e.ctrlKey) return
+  if (e.ctrlKey) {
+    e.preventDefault()
+    measure()
+    const p = local({ x: e.clientX, y: e.clientY })
+    setZoom(...zoomAt(scale.value * Math.exp(-e.deltaY * 0.01), p.x, p.y))
+    return
+  }
+  const dx = wheelPx(e, e.deltaX)
+  const dy = wheelPx(e, e.deltaY)
+  if (scale.value > 1.01) {
+    e.preventDefault()
+    if (pointers.size) return // 正在用手指 / 鼠标拖，不抢
+    measure()
+    dragging.value = true
+    clearTimeout(wheelPan)
+    wheelPan = setTimeout(() => { if (!pointers.size) dragging.value = false }, 120)
+    const [x, y] = clamp(scale.value, tx.value - dx, ty.value - dy)
+    tx.value = x
+    ty.value = y
+    return
+  }
+  if (Math.abs(dx) <= Math.abs(dy)) return
   e.preventDefault()
-  measure()
-  const p = local({ x: e.clientX, y: e.clientY })
-  setZoom(...zoomAt(scale.value * Math.exp(-e.deltaY * 0.01), p.x, p.y))
+  clearTimeout(wheelIdle)
+  wheelIdle = setTimeout(() => { wheelSum = 0; wheelUsed = false }, 160)
+  if (wheelUsed || pointers.size) return
+  wheelSum += dx
+  if (Math.abs(wheelSum) >= WHEEL_STEP) {
+    wheelUsed = true
+    go(cur.value + (wheelSum > 0 ? 1 : -1))
+  }
 }
 
 function onKey(e) {
   if (e.key === 'Escape') { e.preventDefault(); close() }
   else if (e.key === 'ArrowLeft') { e.preventDefault(); go(cur.value - 1) }
   else if (e.key === 'ArrowRight') { e.preventDefault(); go(cur.value + 1) }
+  else if (isDesktop.value) trapTab(e, root.value)
 }
+/*
+ * 兜底（桌面布局）：焦点还是掉到了 <body> 上（比如 Tab 正好落在淡出中、马上要藏起来的箭头上），
+ * 按键从 <body> 发出、到不了查看器：在 document 上接住，方向键、Esc 照常管用，Tab 回到查看器里
+ */
+function onDocKey(e) {
+  if (e.defaultPrevented || !isDesktop.value) return
+  if (e.target !== document.body && e.target !== document.documentElement) return
+  onKey(e)
+}
+
+/* 桌面布局的 ‹ ›（翻到头时焦点的去处见上面 watch(cur)） */
+const step = d => go(cur.value + d)
 
 /* 打开时焦点移进来，关掉后还给原来的按钮 */
 let returnFocus = null
 onMounted(async () => {
   returnFocus = document.activeElement
+  document.addEventListener('keydown', onDocKey)
   await nextTick()
   measure()
   zoomIn()
   root.value?.focus({ preventScroll: true })
-  stage.value?.addEventListener('wheel', onWheel, { passive: false })
+  // 挂在整个查看器上：指针在顶栏、‹ › 按钮上时横划也不会被浏览器当成「后退」
+  root.value?.addEventListener('wheel', onWheel, { passive: false })
   window.addEventListener('resize', measure)
 })
 onBeforeUnmount(() => {
   clearTimeout(tapTimer)
+  clearTimeout(wheelIdle)
+  clearTimeout(wheelPan)
   window.removeEventListener('resize', measure)
+  document.removeEventListener('keydown', onDocKey)
   if (!flying) showThumb()
-  if (returnFocus && returnFocus.isConnected) returnFocus.focus({ preventScroll: true })
+  let back = returnFocus
+  // 桌面布局：从缩略图打开、翻到了别的图再关掉——焦点回到当前这张的缩略图（大图也是缩回它那里），不回最开始点的那张。
+  // 手机上照旧回到打开时的那个按钮（老 iOS 不认 preventScroll，聚焦屏幕外的缩略图会把页面滚过去）
+  const opener = isDesktop.value ? thumbOf(props.index) : null
+  const now = opener && back && (back === opener || opener.contains(back)) ? thumbOf(cur.value) : null
+  if (now && now !== opener) {
+    now.focus({ preventScroll: true })
+    if (document.activeElement === now) back = null
+  }
+  if (back && back.isConnected) back.focus({ preventScroll: true })
 })
 </script>
 
@@ -575,6 +660,7 @@ onBeforeUnmount(() => {
       <div
         ref="stage"
         class="iv-stage"
+        :class="{ zoomed: scale > 1.01, held: dragging }"
         @pointerdown="onDown"
         @pointermove="onMove"
         @pointerup="onUp"
@@ -610,6 +696,12 @@ onBeforeUnmount(() => {
             </template>
           </div>
         </div>
+      </div>
+
+      <!-- 桌面布局：左右两边的 ‹ ›（翻到头的那一边藏起来；往下拖的时候和顶栏一起让开） -->
+      <div v-if="isDesktop && count > 1" ref="nav" class="iv-nav" :class="{ off: dragY }">
+        <button type="button" class="iv-arrow l m-press-sm" :class="{ hide: cur === 0 }" aria-label="上一张" @click="step(-1)"><Icon name="chevL" /></button>
+        <button type="button" class="iv-arrow r m-press-sm" :class="{ hide: cur === count - 1 }" aria-label="下一张" @click="step(1)"><Icon name="chevR" /></button>
       </div>
 
       <div ref="top" class="iv-top" :class="{ off: dragY }">
@@ -696,5 +788,51 @@ onBeforeUnmount(() => {
 /* iOS 14 / 安卓 WebView 87 不认 aspect-ratio（Safari 15、Chrome 88 才有）：里面全是绝对定位的东西，高度会是 0，用 ::before 的 padding 撑出同样的比例 */
 @supports not (aspect-ratio: 1 / 1) {
   .iv-fb::before { content: ''; display: block; padding-top: 75%; }
+}
+
+/*
+ * 桌面布局（≥ 1024px）：照样铺满整个窗口（盖住顶栏和左侧导航）。
+ *   关闭键挪到右上角（桌面上的习惯），计数照旧在顶部正中；左右两边是 48px 的圆形 ‹ ›，翻到头的那一边淡出藏起来。
+ *   鼠标：图上单击照旧是关闭（光标是「缩小」），双击放大；放大后光标是「抓手」，按住拖动看细节。
+ */
+@media (min-width: 1024px) {
+  /*
+   * 宽窗口里横图按「宽度占满」算出来的高度会超过窗口：网格那一行跟着撑高，图片不再居中、下面一截被裁掉。
+   * 这里让图片铺满整张舞台再按比例 contain（中心点不变，放大 / 拖动的算法照旧）；占位图按 4:3 放进窗口里居中。
+   */
+  .iv-img { position: absolute; inset: 0; }
+  .iv-fb { position: absolute; inset: 0; width: min(100%, 133.3333vh); height: auto; margin: auto; }
+  .iv-top { height: 64px; padding: 0 16px; }
+  .iv-close { margin-left: auto; }
+  .iv-close svg { padding: 8px; }
+  .iv-nav { position: absolute; inset: 0; pointer-events: none; transition: opacity var(--dur-2) var(--ease-out); }
+  .iv-nav.off { opacity: 0; transition-duration: var(--dur-1); }
+  .iv-arrow {
+    position: absolute;
+    top: 50%;
+    display: grid;
+    place-items: center;
+    width: 48px;
+    height: 48px;
+    margin-top: -24px;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, .42);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .08);
+    color: #fff;
+    pointer-events: auto;
+    transition: opacity var(--dur-2) var(--ease-out), background-color var(--dur-2) var(--ease-out), visibility 0s;
+  }
+  .iv-arrow.l { left: 24px; }
+  .iv-arrow.r { right: 24px; }
+  .iv-arrow svg { width: 24px; height: 24px; stroke-width: 2.4; }
+  /* 翻到头：淡出后再 visibility: hidden（不能点、也不进 Tab 顺序） */
+  .iv-arrow.hide { opacity: 0; visibility: hidden; pointer-events: none; transition: opacity var(--dur-2) var(--ease-out), background-color var(--dur-2) var(--ease-out), visibility 0s linear var(--dur-2); }
+}
+@media (min-width: 1024px) and (hover: hover) {
+  .iv-stage { cursor: zoom-out; }
+  .iv-stage.zoomed { cursor: grab; }
+  .iv-stage.zoomed.held { cursor: grabbing; }
+  .iv-arrow:hover, .iv-close:hover svg { background: rgba(48, 48, 48, .72); }
+  .iv-close svg { transition: transform var(--dur-2) var(--ease-spring), background-color var(--dur-2) var(--ease-out); }
 }
 </style>

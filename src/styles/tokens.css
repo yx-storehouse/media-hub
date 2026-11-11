@@ -19,3 +19,28 @@
   --safe-b: env(safe-area-inset-bottom, 0px);
   --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
 }
+
+/*
+ * 桌面布局（窗口 ≥ 1024px，见 src/composables/useDesktop.js）的尺寸，只在桌面上有定义：
+ *   --desk-top   顶栏高度（顶栏横跨整个窗口）
+ *   --desk-side  左侧导航现在的宽度：展开 232px，收成图标栏 72px（<html> 上的 .desk-rail，见 composables/useDeskSide.js）
+ *   --desk-pad   内容区左右留白（≥ 1600px 时 32px）
+ *   --desk-max   内容最大宽度（含左右留白，居中）
+ *   --desk-col   单栏页面（信息流、文章、设置）的内容宽度
+ *   --desk-card  视频卡片的最小宽度（.grid 按它自动排列数）
+ * 每一页（.page）占满顶栏下面、导航右边的那一块，见 styles/base.css。
+ */
+@media (min-width: 1024px) {
+  :root {
+    --desk-top: 56px;
+    --desk-side: 232px;
+    --desk-pad: 24px;
+    --desk-max: 1760px;
+    --desk-col: 720px;
+    --desk-card: 232px;
+  }
+  :root.desk-rail { --desk-side: 72px; }
+}
+@media (min-width: 1600px) {
+  :root { --desk-pad: 32px; }
+}

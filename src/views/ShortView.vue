@@ -5,6 +5,8 @@ import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { toast } from '@/composables/useToast'
 import { useTabRetap } from '@/composables/useTabRetap'
+import { isDesktop } from '@/composables/useDesktop'
+import { scrollBehavior } from '@/utils/motion'
 import Icon from '@/components/Icon.vue'
 import BottomSheet from '@/components/BottomSheet.vue'
 import ShortItem from '@/components/short/ShortItem.vue'
@@ -33,6 +35,18 @@ const SLOW_MS = 6000
 const PULL_TRIGGER = 80
 /** 点「不喜欢」后停一下再翻到下一条：先让人看到图标变化和提示 */
 const DISLIKE_NEXT_MS = 600
+/** 桌面：← / → 一次跳几秒 */
+const KEY_SEEK = 5
+/** 桌面：播放设置里列出来的键盘快捷键（处理在 onDeskKey） */
+const KEYS = [
+  { keys: ['↑', 'K'], label: '上一个' },
+  { keys: ['↓', 'J'], label: '下一个' },
+  { keys: ['空格'], label: '播放 / 暂停' },
+  { keys: ['←', '→'], label: `后退 / 前进 ${KEY_SEEK} 秒` },
+  { keys: ['M'], label: '静音 / 恢复声音' },
+  { keys: ['F'], label: '全屏' },
+  { keys: ['双击画面'], label: '点赞', mouse: true }
+]
 
 const store = useAppStore()
 const auth = useAuthStore()
@@ -52,6 +66,8 @@ const failed = ref(false)
 const refreshing = ref(false)
 /** 下一页的状态，显示在最后一条下面的那一格：'' 平常 / 'loading' / 'failed' / 'end' */
 const moreState = ref('')
+/** 停在最后那一格上（和下面的 atTail 一样，桌面的「下一个」按钮要读，所以单独留一份响应式的） */
+const onTail = ref(false)
 
 const settingsOpen = ref(false)
 
@@ -176,6 +192,8 @@ async function load() {
   players.value = list.map(newPlayer)
   current = 0
   atTail = false
+  onTail.value = false
+  navTo = -1
   active.value = 0
   advancingTo = -1
   boosted = -1
@@ -669,6 +687,8 @@ function scrollToClip(i, behavior = 'auto') {
 function enterTail() {
   if (atTail) return
   atTail = true
+  onTail.value = true
+  if (navTo === clips.value.length) navTo = -1
   leaveView()
   pauseAll()
   if (moreState.value !== 'loading') loadMore()
@@ -692,6 +712,8 @@ function observe(reset = true) {
       }
       current = Number(e.target.dataset.index)
       atTail = false
+      onTail.value = false
+      if (navTo === current) navTo = -1
       active.value = current
       advancingTo = -1
       play(current)
@@ -768,6 +790,8 @@ function restoreSound(e) {
   if (!store.sound || !store.muted || !visible) return
   // 点的就是静音 / 恢复声音按钮：交给按钮自己处理
   if (e.target.closest?.('[data-sound]')) return
+  // 桌面上按 M 就是在切静音：交给快捷键自己处理（不然这里先恢复了声音，快捷键又把它静音回去）
+  if (e.type === 'keydown' && isDesktop.value && (e.key === 'm' || e.key === 'M')) return
   // 浏览器认可的用户操作之后才能有声播放；不支持这个判断的浏览器只认真正的点击
   const ua = navigator.userActivation
   if (ua ? !ua.hasBeenActive : e.type !== 'click') return
@@ -825,11 +849,192 @@ async function togglePip() {
   }
 }
 
+/*
+ * ---------- 桌面布局（≥ 1024px）：滚轮 / 触控板、键盘、右侧的上 / 下按钮翻页 ----------
+ * 手机上是手指上下滑（吸附滚动），这些都不挂 / 不生效。
+ */
+
+/**
+ * 桌面翻页正要去的那一格（平滑滚动途中又翻了一下：从这里往后数，不会因为还没滚到而少翻）；
+ * 滚到了（观察者认出这一条）就清掉，万一被打断，NAV_HOLD 之后也不再算
+ */
+let navTo = -1
+let navAt = 0
+const NAV_HOLD = 900
+
+/** 往下（1）/ 往上（-1）翻一条；最后一格（加载中 / 失败 / 没有更多）的下标是 clips.length */
+function step(dir) {
+  const n = clips.value.length
+  if (!visible || !n) return
+  const here = navTo >= 0 && performance.now() - navAt < NAV_HOLD ? navTo : atTail ? n : current
+  const to = Math.min(n, Math.max(0, here + dir))
+  if (to === here) return
+  navTo = to
+  navAt = performance.now()
+  const behavior = scrollBehavior()
+  if (behavior === 'smooth') holdTop(to)
+  scrollToClip(to, behavior)
+}
+
+/*
+ * 卡片顶上那一条（全屏 / 小窗、推荐 / 专题、换一批 / 声音）固定在页面上，不跟着卡片走：平滑翻页的途中卡片从它下面滚过去，
+ * 它会压在上一条的文字、进度条和两张卡片之间的空隙上。翻页途中先淡出（stepping），滚到要去的那一格再淡入。
+ * 到没到看滚动位置（观察者在这一格露出 60% 时就认了，那时还在滚）；被打断（拖动、改窗口大小）的话 STEP_MAX 之后照样回来
+ */
+const stepping = ref(false)
+const STEP_MAX = 1200
+let stepTop = 0
+let stepTimer = 0
+let stepFeed = null
+function holdTop(to) {
+  const f = feedEl.value
+  const el = f?.querySelector(to < clips.value.length ? `.sv-slot[data-index="${to}"]` : '.sv-tail')
+  if (!el) return
+  stepTop = el.offsetTop
+  if (stepFeed !== f) {
+    stepFeed?.removeEventListener('scroll', onStepScroll)
+    stepFeed = f
+    f.addEventListener('scroll', onStepScroll, { passive: true })
+  }
+  stepping.value = true
+  clearTimeout(stepTimer)
+  stepTimer = setTimeout(endStep, STEP_MAX)
+}
+function onStepScroll() {
+  if (stepFeed && Math.abs(stepFeed.scrollTop - stepTop) < 2) endStep()
+}
+function endStep() {
+  clearTimeout(stepTimer)
+  stepFeed?.removeEventListener('scroll', onStepScroll)
+  stepFeed = null
+  stepping.value = false
+}
+
+/*
+ * 滚轮 / 触控板：一次手势只翻一条，不会一下滚过好几条。
+ *  - 滚轮一格一个事件：连着转的几格（间隔不到 WHEEL_GAP）算同一次手势；
+ *  - 触控板一次轻扫是一串越来越小的事件（松手后的惯性）：整串算一次；惯性还没停又扫了一下，
+ *    事件会重新变大（比翻页后最小的那个大 4 倍以上、并且够 WHEEL_MIN），算新的一次；
+ *  - 反方向滚：马上算新的一次。
+ * 页面上能自己滚的地方（展开的长标题）还能滚时交给它；Ctrl + 滚轮是浏览器缩放，不管。
+ */
+const WHEEL_MIN = 24
+const WHEEL_GAP = 200
+const WHEEL_SURGE_AFTER = 300
+const wheel = { sum: 0, last: -1e9, used: false, dir: 0, at: 0, floor: Infinity }
+
+function scrollsInside(target, dy) {
+  for (let el = target; el && el !== feedEl.value && el !== pageEl.value; el = el.parentElement) {
+    if (el.scrollHeight <= el.clientHeight + 1) continue
+    const oy = getComputedStyle(el).overflowY
+    if (oy !== 'auto' && oy !== 'scroll') continue
+    if (dy < 0 ? el.scrollTop > 0 : el.scrollTop + el.clientHeight < el.scrollHeight - 1) return true
+  }
+  return false
+}
+
+function onWheel(e) {
+  if (!isDesktop.value || !visible || e.ctrlKey) return
+  let dy = e.deltaY
+  if (e.deltaMode === 1) dy *= 40
+  else if (e.deltaMode === 2) dy *= feedEl.value?.clientHeight || 800
+  if (!dy || Math.abs(dy) < Math.abs(e.deltaX)) return
+  if (scrollsInside(e.target, dy)) return
+  e.preventDefault()
+  const now = performance.now()
+  const abs = Math.abs(dy)
+  const fresh = now - wheel.last > WHEEL_GAP ||
+    (wheel.used && Math.sign(dy) !== wheel.dir) ||
+    (wheel.used && now - wheel.at > WHEEL_SURGE_AFTER && abs >= WHEEL_MIN && abs > wheel.floor * 4)
+  wheel.last = now
+  if (fresh) {
+    wheel.sum = 0
+    wheel.used = false
+  }
+  if (wheel.used) {
+    wheel.floor = Math.min(wheel.floor, abs)
+    return
+  }
+  wheel.sum += dy
+  if (Math.abs(wheel.sum) < WHEEL_MIN) return
+  wheel.used = true
+  wheel.dir = Math.sign(wheel.sum)
+  wheel.at = now
+  wheel.floor = Infinity
+  step(wheel.dir)
+}
+
+/* 只在桌面布局时挂滚轮监听（要能 preventDefault，所以不是 passive；手机上不挂，不影响滚动性能） */
+let wheelOn = null
+function bindWheel(on) {
+  const el = on ? pageEl.value : null
+  if (wheelOn === el) return
+  wheelOn?.removeEventListener('wheel', onWheel)
+  wheelOn = el
+  el?.addEventListener('wheel', onWheel, { passive: false })
+}
+watch(isDesktop, bindWheel)
+/* 窗口拉窄到手机布局：翻页途中淡出的顶上那一条马上回来（手机上它一直在） */
+watch(isDesktop, d => { if (!d) endStep() })
+
+/* 屏幕上这一条的 ShortItem（键盘快捷键通过它操作，和用鼠标点一样带动效）：feedKey → 组件 */
+const items = new Map()
+function setItem(key, inst) {
+  if (inst) items.set(key, inst)
+  else items.delete(key)
+}
+const curItem = () => (atTail ? null : items.get(clips.value[current]?.feedKey) || null)
+
+const isTyping = t => !!t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))
+/* 键盘聚焦（Tab 过来）的按钮：空格照常按下它；鼠标点过留着焦点的按钮（比如刚点了赞），空格还是播放 / 暂停 */
+function keyboardButton(t) {
+  if (!t?.closest?.('button, [role="button"], [role="switch"], [role="tab"], [role="menuitem"]')) return false
+  try { return t.matches(':focus-visible') } catch { return true }
+}
+
+/*
+ * 键盘：↑ / K 上一个，↓ / J 下一个，空格 播放 / 暂停，← / → 后退 / 前进 KEY_SEEK 秒，M 静音，F 全屏。
+ * 在输入框里打字、开着弹层（播放设置、登录框等）时不管；按住不放只算一下（← / → 除外，可以一直跳）。
+ */
+function onDeskKey(e) {
+  if (!isDesktop.value || !visible || e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey || e.isComposing) return
+  if (isTyping(e.target) || document.querySelector('[aria-modal="true"]')) return
+  // 焦点在顶栏的下拉菜单（头像菜单）、搜索建议里：按键归它们（和 VideoPlayer 一样）
+  if (e.target instanceof Element && e.target.closest('[role="menu"], [role="listbox"]')) return
+  const k = e.key
+  const once = !e.repeat
+  if (k === 'ArrowDown' || k === 'j' || k === 'J' || k === 'PageDown') {
+    if (once) step(1)
+  } else if (k === 'ArrowUp' || k === 'k' || k === 'K' || k === 'PageUp') {
+    if (once) step(-1)
+  } else if (k === ' ' || k === 'Spacebar') {
+    if (keyboardButton(e.target)) return
+    if (once) togglePlay()
+  } else if (k === 'ArrowLeft' || k === 'ArrowRight') {
+    if (clips.value[current]?.src) curItem()?.seekBy(k === 'ArrowLeft' ? -KEY_SEEK : KEY_SEEK)
+  } else if (k === 'm' || k === 'M') {
+    if (once) setMuted(!store.muted)
+  } else if (k === 'f' || k === 'F') {
+    if (once && canFullscreen && (fullscreen.value || curHasFile.value)) toggleFullscreen()
+  } else return
+  e.preventDefault()
+  // 按键也是用户操作：被浏览器临时静音的，顺便恢复声音（M 自己就是切静音，不在这里恢复）
+  if (k !== 'm' && k !== 'M') restoreSound(e)
+}
+
+function togglePlay() {
+  const it = curItem()
+  if (it) it.userToggle()
+  else toggle(current)
+}
+
 /* ---------- lifecycle (kept alive between tab switches) ---------- */
 
 function stop() {
   visible = false
   boosted = -1
+  navTo = -1
+  endStep()
   clearInterval(timer)
   timer = 0
   io?.disconnect()
@@ -839,10 +1044,12 @@ function stop() {
   exitFullscreen()
   window.removeEventListener('online', onOnline)
   document.removeEventListener('visibilitychange', onHidden)
+  document.removeEventListener('keydown', onDeskKey)
 }
 
 onMounted(() => {
   load()
+  bindWheel(isDesktop.value)
   document.addEventListener('fullscreenchange', onFullscreenChange)
   document.addEventListener('webkitfullscreenchange', onFullscreenChange)
   if ('ResizeObserver' in window && feedEl.value) {
@@ -866,6 +1073,7 @@ onActivated(() => {
   timer = setInterval(tick, TICK_MS)
   window.addEventListener('online', onOnline)
   document.addEventListener('visibilitychange', onHidden)
+  document.addEventListener('keydown', onDeskKey)
   if (!clips.value.length) {
     // first activation: load() starts the observer once the feed is rendered; a failed first page retries here
     if (failed.value) retry()
@@ -890,6 +1098,7 @@ onDeactivated(stop)
 
 onUnmounted(() => {
   stop()
+  bindWheel(false)
   clearTimeout(slowTimer)
   ro?.disconnect()
   flickEl?.removeEventListener('touchstart', onFlickStart)
@@ -937,18 +1146,27 @@ function setSpeed(speed) {
     @click.capture="restoreSound"
     @keydown.capture="restoreSound"
   >
-    <div class="sv-top">
+    <div class="sv-top" :class="{ off: stepping }">
       <div class="l">
         <!-- 只有能真正播放的条目才有全屏 / 小窗；全屏时一直留着退出键 -->
         <button
           v-if="canFullscreen && (fullscreen || curHasFile)"
           type="button"
           :aria-label="fullscreen ? '退出全屏' : '全屏'"
+          :title="isDesktop ? (fullscreen ? '退出全屏（F）' : '全屏（F）') : undefined"
           @click="toggleFullscreen"
         >
           <Icon :name="fullscreen ? 'fullscreenExit' : 'expand'" />
         </button>
-        <button v-if="canPip && curHasFile" type="button" aria-label="小窗播放" @click="togglePip"><Icon name="pip" /></button>
+        <button
+          v-if="canPip && curHasFile"
+          type="button"
+          aria-label="小窗播放"
+          :title="isDesktop ? '小窗播放' : undefined"
+          @click="togglePip"
+        >
+          <Icon name="pip" />
+        </button>
       </div>
       <div class="tt2" role="tablist">
         <button
@@ -965,10 +1183,30 @@ function setSpeed(speed) {
         </button>
       </div>
       <div class="r">
-        <button type="button" data-sound :aria-label="store.muted ? '恢复声音' : '静音'" @click="setMuted(!store.muted)">
+        <!-- 桌面：手机上的「下拉刷新」换成这个按钮（再点一次左侧的「短视频」也一样） -->
+        <button v-if="isDesktop" type="button" aria-label="换一批" title="换一批" @click="refresh('tap')">
+          <Icon name="refresh" />
+        </button>
+        <button
+          type="button"
+          data-sound
+          :aria-label="store.muted ? '恢复声音' : '静音'"
+          :title="isDesktop ? (store.muted ? '恢复声音（M）' : '静音（M）') : undefined"
+          @click="setMuted(!store.muted)"
+        >
           <Icon :name="store.muted ? 'mute' : 'vol'" />
         </button>
       </div>
+    </div>
+
+    <!-- 桌面：页面右边的上一个 / 下一个（手机上是手指上下滑） -->
+    <div v-if="isDesktop && clips.length" class="sv-nav">
+      <button type="button" aria-label="上一个" title="上一个（↑ / K）" :disabled="active === 0 && !onTail" @click="step(-1)">
+        <Icon name="chevU" />
+      </button>
+      <button type="button" aria-label="下一个" title="下一个（↓ / J）" :disabled="onTail" @click="step(1)">
+        <Icon name="chevD" />
+      </button>
     </div>
 
     <!--
@@ -996,8 +1234,11 @@ function setSpeed(speed) {
     >
       <!-- 每条一个整屏的格子；只有当前这条附近的才真正渲染，其余是空格子（滚动位置不受影响） -->
       <div v-for="(clip, i) in clips" :key="clip.feedKey" class="sv-slot" :data-index="i">
+        <!-- 桌面：只有屏幕上这一条能用 Tab 聚焦 / 点（上下两条露出来的一截不接操作，Tab 也不会跳到屏幕外的那几条去） -->
         <ShortItem
           v-if="Math.abs(i - active) <= RENDER_AROUND"
+          :ref="inst => setItem(clip.feedKey, inst)"
+          :inert="isDesktop && i !== active ? true : undefined"
           :clip="clip"
           :liked="!!clip.liked"
           :faved="!!clip.faved"
@@ -1094,6 +1335,17 @@ function setSpeed(speed) {
           :aria-checked="store.playback.loop"
           @click="store.playback.loop = !store.playback.loop"
         />
+      </div>
+      <!-- 桌面：键盘快捷键一览 -->
+      <div v-if="isDesktop" class="sv-keys">
+        <h5>键盘快捷键</h5>
+        <dl>
+          <div v-for="k in KEYS" :key="k.label">
+            <dt v-if="k.mouse" class="mouse">{{ k.keys[0] }}</dt>
+            <dt v-else><kbd v-for="c in k.keys" :key="c">{{ c }}</kbd></dt>
+            <dd>{{ k.label }}</dd>
+          </div>
+        </dl>
       </div>
     </BottomSheet>
   </div>
@@ -1235,4 +1487,143 @@ function setSpeed(speed) {
 .sv-page.fs { bottom: 0; padding-top: 0; }
 
 .speeds { margin-bottom: 12px; }
+
+/*
+ * ---- 桌面布局（≥ 1024px）----
+ * 还是一格一条的吸附滚动、铺满页面，但每一条画成页面正中的一张 9:16 卡片（上下各留 --sv-gap、圆角 --sv-r），
+ * 右侧一列按钮在卡片外面（ShortItem），「推荐 / 专题」和全屏 / 小窗 / 换一批 / 声音浮在卡片顶上，
+ * 页面最右边是上一个 / 下一个。全屏时卡片顶天立地（没有留白和圆角），其余不变。
+ *
+ * 卡片宽度按高度算（9:16）：页面高度 = 窗口高度 − 顶栏 − 安全区，不依赖 aspect-ratio（Chrome 87 没有）；
+ * --sv-cw 里的 100% 在用到它的地方才换算（卡片、顶上那一条、骨架都是按页面宽度算的，结果一样），
+ * 窗口很窄很高时卡片宽度封顶，两边给右侧按钮和上 / 下按钮留出位置（画面在卡片里 contain，不变形）。
+ */
+@media (min-width: 1024px) {
+  .sv-page {
+    --sv-gap: 16px;
+    --sv-r: 12px;
+    --sv-vh: 100vh;
+    --sv-top: calc(var(--desk-top) + var(--safe-t));
+    --sv-cw: min(calc((var(--sv-vh) - var(--sv-top) - 2 * var(--sv-gap)) * 9 / 16), calc(100% - 360px));
+    background: var(--bg);
+  }
+  .sv-page.fs { --sv-gap: 0px; --sv-r: 0px; --sv-top: 0px; --sv-side-b: 20px; }
+  /* 无尽的流用不着滚动条（也免得它占掉宽度、卡片偏左）：滚轮、键盘、右边的按钮翻页 */
+  .sv-feed { background: var(--bg); scrollbar-width: none; }
+  .sv-feed::-webkit-scrollbar { display: none; }
+  .sv-slot { padding: var(--sv-gap) 0; }
+
+  /* 卡片顶上的一条：左边全屏 / 小窗，中间「推荐 / 专题」，右边换一批 / 声音（和卡片一样宽、一样居中） */
+  .sv-top { top: calc(var(--safe-t) + var(--sv-gap)); width: var(--sv-cw); margin: 0 auto; }
+  .sv-top .l { left: 8px; top: 8px; gap: 2px; }
+  .sv-top .r { right: 8px; top: 8px; display: flex; gap: 2px; }
+  .sv-top .l button,
+  .sv-top .r button { width: 36px; height: 36px; border-radius: 50%; transition: background-color var(--dur-2) var(--ease-out); }
+  .sv-top .l svg,
+  .sv-top .r svg { width: 18px; height: 18px; }
+  .sv-top .tt2 { top: 9px; gap: 28px; }
+  /* 平滑翻页途中（stepping）很快淡出、滚到位再淡入：不压在滚过去的卡片的文字和卡片间的空隙上；淡出时不接点击 */
+  .sv-top { transition: opacity var(--dur-2) var(--ease-out); }
+  .sv-top.off { opacity: 0; transition-duration: var(--dur-1); }
+  .sv-top.off .l,
+  .sv-top.off .r,
+  .sv-top.off .sv-tab { pointer-events: none; }
+
+  .sv-refresh { top: calc(var(--safe-t) + var(--sv-gap) + 62px); }
+
+  /* 页面右边：上一个 / 下一个 */
+  .sv-nav {
+    position: absolute;
+    right: var(--desk-pad);
+    top: 50%;
+    z-index: 6;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    transform: translateY(-50%);
+  }
+  .sv-nav button {
+    display: grid;
+    place-items: center;
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    background: #1f1f1f;
+    color: var(--t1);
+    transition: background-color var(--dur-2) var(--ease-out), opacity var(--dur-2) var(--ease-out), transform var(--dur-2) var(--ease-spring);
+  }
+  .sv-nav svg { width: 22px; height: 22px; stroke-width: 2.2; }
+  .sv-nav button:active:not(:disabled) { transform: scale(var(--press-scale-sm)); transition-duration: var(--dur-1); transition-timing-function: var(--ease-out); }
+  .sv-nav button:disabled { opacity: .3; cursor: default; }
+
+  /* 最后一格、第一页的骨架：也是正中的一张卡片 */
+  .sv-tail { background: var(--bg); }
+  .sv-tail-in { justify-content: center; width: var(--sv-cw); height: 100%; border-radius: var(--sv-r); background: var(--panel); font-size: 14px; }
+  .sv-skel {
+    top: var(--sv-gap);
+    bottom: var(--sv-gap);
+    width: var(--sv-cw);
+    margin: 0 auto;
+    border-radius: var(--sv-r);
+    background: linear-gradient(180deg, #161616, #101010);
+  }
+  /* 右侧一列的位置和真的一样：卡片外面右边、底边对齐（圆 48px，下面一行字） */
+  .sk-side { right: auto; left: calc(100% + 20px); bottom: 22px; gap: 36px; }
+  .sk-side i { width: 48px; height: 48px; }
+  .sk-meta { left: 16px; bottom: 60px; width: 70%; }
+  .sv-empty { font-size: 14px; }
+
+  /* 播放设置里的键盘快捷键 */
+  .sv-keys { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
+  .sv-keys h5 { margin-bottom: 10px; color: var(--t2); font-size: 13px; font-weight: 500; line-height: 18px; }
+  .sv-keys dl { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 24px; }
+  .sv-keys dl > div { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  .sv-keys dt { display: flex; flex: none; gap: 4px; }
+  .sv-keys dt.mouse { color: var(--t3); font-size: 12px; line-height: 22px; }
+  .sv-keys kbd {
+    min-width: 24px;
+    height: 22px;
+    padding: 0 6px;
+    border: 1px solid #333;
+    border-radius: 5px;
+    background: #1a1a1a;
+    color: var(--t3);
+    font: 600 12px/20px var(--font);
+    text-align: center;
+  }
+  .sv-keys dd { overflow: hidden; color: var(--t2); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+}
+@supports (height: 100dvh) {
+  @media (min-width: 1024px) {
+    .sv-page { --sv-vh: 100dvh; }
+  }
+}
+/* 很高的窗口（卡片 1100px 以上）：卡片顶上的按钮、上 / 下按钮、骨架都大一号（和 ShortItem 里同一档） */
+@media (min-width: 1024px) and (min-height: 1200px) {
+  .sv-top .l { left: 10px; top: 10px; }
+  .sv-top .r { right: 10px; top: 10px; }
+  .sv-top .l button,
+  .sv-top .r button { width: 40px; height: 40px; }
+  .sv-top .l svg,
+  .sv-top .r svg { width: 20px; height: 20px; }
+  .sv-top .tt2 { top: 13px; gap: 32px; }
+  .sv-tab { font-size: 17px; }
+  .sv-nav { gap: 14px; }
+  .sv-nav button { width: 56px; height: 56px; }
+  .sv-nav svg { width: 26px; height: 26px; }
+  .sk-side { left: calc(100% + 24px); bottom: 26px; gap: 44px; }
+  .sk-side i { width: 56px; height: 56px; }
+  .sk-meta { left: 20px; bottom: 76px; }
+}
+@media (min-width: 1024px) and (hover: hover) {
+  .sv-top .l button:hover,
+  .sv-top .r button:hover { background: rgba(255, 255, 255, .14); }
+  .sv-tab { transition: color var(--dur-2) var(--ease-out); }
+  .sv-tab:not(.on):hover { color: rgba(255, 255, 255, .92); }
+  .sv-nav button:not(:disabled):hover { background: #2c2c2c; }
+  .sv-tail .retry,
+  .sk-c .retry { transition: background-color var(--dur-2) var(--ease-out); }
+  .sv-tail .retry:hover,
+  .sk-c .retry:hover { background: #262626; }
+}
 </style>

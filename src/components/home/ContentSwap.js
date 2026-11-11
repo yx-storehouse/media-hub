@@ -32,7 +32,7 @@ export const HOLD_MS = 250
 /* 一格一格淡掉的最多这么多格（一屏多一点），再往后的在屏幕外，直接藏起来 */
 const WAVE_MAX = 12
 /* 离开的网格里，轮到这一格时先藏起来的文字 */
-const TEXT = '.tt, .dur, .sk-tt'
+const TEXT = '.tt, .dur, .sk-tt, .vc-meta, .sk-meta'
 
 /* 离开 / 进来的那块里的网格（自己就是 .grid，或者第一层里的 .grid）；没有返回 null */
 function gridOf(el) {

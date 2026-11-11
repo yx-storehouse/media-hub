@@ -135,4 +135,42 @@ onBeforeUnmount(saveSnapshot)
 @supports not (aspect-ratio: 1 / 1) {
   .cat::after { content: ''; flex: none; width: 0; padding-top: calc(50% - 8px); }
 }
+
+/*
+ * ---- 桌面布局（≥ 1024px）----
+ * 专题瓷砖按 260px 起自动排列数（1024 宽 3 列、1440 宽 4 列、1920 宽 6 列），比例换成 16:9（2:1 在宽屏上像一条条横幅）；
+ * 网格和 BackHeader 的标题左右对齐（最宽 --desk-max，左右 --desk-pad）。鼠标移上去照片在圆角里放大一点。
+ */
+@media (min-width: 1024px) {
+  .cat-grid {
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 20px 16px;
+    max-width: var(--desk-max);
+    margin: 0 auto;
+    padding: 8px var(--desk-pad) 24px;
+  }
+  .cat { aspect-ratio: 16 / 9; padding: 14px 16px; border-radius: 12px; }
+  .cat-l { border-radius: 12px; }
+  /* 名字最多两行（很长的专题名不会把整张卡片铺满），「n部」不折行 */
+  .cat b {
+    display: -webkit-box;
+    min-width: 0;
+    overflow: hidden;
+    font-size: 16px;
+    line-height: 22px;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+  }
+  .cat span { flex: none; padding-left: 12px; font-size: 13px; line-height: 22px; white-space: nowrap; }
+  /* 老引擎的比例兜底跟着比例、内边距改：总高 = 宽 × 9 / 16（padding 按内容宽 = 总宽 - 32px 算） */
+  @supports not (aspect-ratio: 1 / 1) {
+    .cat::after { padding-top: calc(56.25% - 10px); }
+  }
+}
+@media (min-width: 1024px) and (hover: hover) {
+  /* 照片在 Cover 组件里（不带本组件的 scoped 标记）：用 :deep 选到；缓存里直接显示的图（.now）也要有放大的过渡 */
+  .cat :deep(img) { transition: opacity var(--dur-3) var(--ease-out), filter var(--dur-3) var(--ease-out), transform var(--dur-4) var(--ease-out); }
+  .cat :deep(img.now) { transition: transform var(--dur-4) var(--ease-out); }
+  .cat-l:hover .cat :deep(img) { transform: scale(1.04); }
+}
 </style>

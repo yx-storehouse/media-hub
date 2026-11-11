@@ -117,4 +117,28 @@ const videoLabel = m => `播放视频：${m.title || '未命名'}${m.dur ? `，�
   text-shadow: 0 1px 2px rgba(0, 0, 0, .4);
 }
 .mg-meta svg { flex: none; width: 10px; height: 10px; }
+
+/*
+ * 桌面布局（≥ 1024px）：照片墙不再贴边，和网格同宽、左右对齐；格子按 180px 起自动排列数（1440 宽 6 列，1920 宽 8 列），
+ * 缝 6px、小圆角。鼠标移上去照片在格子里放大一点（只放大加载好的照片，占位图不动）。
+ */
+@media (min-width: 1024px) {
+  .mg {
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 6px;
+    max-width: var(--desk-max);
+    margin: 0 auto;
+    padding: 0 var(--desk-pad);
+  }
+  .mg-t { border-radius: 8px; }
+  .mg-t:focus-visible { outline-offset: 2px; }
+  .mg-meta { right: 8px; bottom: 7px; gap: 4px; font-size: 12px; line-height: 16px; }
+  .mg-meta svg { width: 11px; height: 11px; }
+}
+@media (min-width: 1024px) and (hover: hover) {
+  /* 照片在 Cover 组件里（不带本组件的 scoped 标记）：用 :deep 选到 */
+  .mg-cv :deep(img) { transition: opacity var(--dur-3) var(--ease-out), filter var(--dur-3) var(--ease-out), transform var(--dur-4) var(--ease-out); }
+  .mg-cv :deep(img.now) { transition: transform var(--dur-4) var(--ease-out); }
+  .mg-t:hover .mg-cv :deep(img) { transform: scale(1.04); }
+}
 </style>

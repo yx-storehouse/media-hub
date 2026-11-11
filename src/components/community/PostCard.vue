@@ -29,6 +29,7 @@ import { useAuthStore } from '@/stores/auth'
 import { usePostStore } from '@/stores/posts'
 import { haptic } from '@/utils/motion'
 import { pop } from '@/components/home/motion'
+import { isDesktop } from '@/composables/useDesktop'
 import Cover from '@/components/Cover.vue'
 import Icon from '@/components/Icon.vue'
 import ImageViewer from '@/components/ImageViewer.vue'
@@ -78,10 +79,30 @@ const stats = computed(() => {
   return auth.ready && !auth.loggedIn ? { ...s, faved: false } : s
 })
 
-/* 点卡片任意位置（文字、话题）进详情；图片、分享 / 收藏按钮、标题链接、头像 / 名字（作者主页）自己处理点击 */
+/*
+ * 点卡片任意位置（文字、话题）进详情；图片、分享 / 收藏按钮、标题链接、头像 / 名字（作者主页）自己处理点击。
+ * 桌面布局（鼠标）：按着 Ctrl / ⌘ / Shift 点、或者用中键点，和链接一样在新标签页打开；
+ * 刚在卡片里拖选了文字（想复制）时松手不跳转。
+ */
 function open(e) {
   if (e.target.closest('button, a')) return
+  if (e.ctrlKey || e.metaKey || e.shiftKey) return openTab()
+  if (isDesktop.value && selecting()) return
   router.push(detailTo.value)
+}
+function openAux(e) {
+  if (e.button !== 1 || e.target.closest('button, a')) return
+  e.preventDefault()
+  openTab()
+}
+/* 中键按下：Windows 上浏览器会进「自动滚动」，松手就不再有 auxclick；卡片自己处理中键（链接、按钮照旧） */
+function onDown(e) {
+  if (e.button === 1 && !e.target.closest('button, a')) e.preventDefault()
+}
+const openTab = () => window.open(router.resolve(detailTo.value).href, '_blank', 'noopener')
+function selecting() {
+  const sel = window.getSelection?.()
+  return !!sel && !sel.isCollapsed && !!root.value && root.value.contains(sel.anchorNode)
 }
 
 /* ---------- 图片：视频帖的主图去播放页，其余打开大图 ---------- */
@@ -149,7 +170,7 @@ function toggleFav() {
 </script>
 
 <template>
-  <article ref="root" class="post m-hold" @click="open">
+  <article ref="root" class="post m-hold" @click="open" @mousedown="onDown" @auxclick="openAux">
     <!--
       按压反馈（全局 components/motion/press.js）：按在卡片上（会进详情）时卡片底色微亮（m-hold → .m-pressed）；
       按在图片、按钮、头像 / 名字上时只有它们自己有反馈（离手指最近的那个接手），卡片不亮；一滑动就撤掉
@@ -182,6 +203,7 @@ function toggleFav() {
         ref="mainBtn"
         type="button"
         class="md-b m-hold"
+        :class="{ play: playable }"
         :aria-label="playable ? `播放视频：${post.text}` : `查看大图，共 ${gallery.length} 张`"
         @click="onMain"
       >
@@ -279,5 +301,59 @@ function toggleFav() {
 @supports not (aspect-ratio: 1 / 1) {
   .md::before { content: ''; display: block; padding-top: 56.25%; }
   .tn::before { content: ''; display: block; padding-top: 88.9831%; }
+}
+
+/*
+ * 桌面布局（≥ 1024px）：每条帖子是一张圆角卡片（深灰底 + 很淡的描边），卡片之间留 12px。
+ * 社区、搜索、收藏、创作者主页里都是这个样子，不依赖外面的容器（外面只管这一栏多宽）。
+ * 主图仍是 16:9、缩略图三张一排，跟着卡片宽度变大；「›」是手机上「点卡片能进去」的提示，桌面上有悬停效果，不要了。
+ * 鼠标：卡片底色微亮，图片在自己的圆角里放大一点（只放大加载好的照片），操作按钮有圆角底色。
+ */
+@media (min-width: 1024px) {
+  .post {
+    gap: 12px;
+    padding: 18px 20px 10px;
+    border-bottom: 0;
+    border-radius: 16px;
+    background-color: var(--panel);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .06);
+  }
+  .post + .post { margin-top: 12px; }
+  .post.m-pressed { background-color: #171717; }
+  .meta { gap: 6px; height: 22px; }
+  .nm { font-weight: 600; }
+  .go { display: none; }
+  .tx { margin-top: 4px; word-break: break-word; }
+  .tg { gap: 0 12px; margin-top: 4px; font-size: 14px; line-height: 22px; }
+
+  .md-b { margin-top: 12px; border-radius: 12px; cursor: zoom-in; }
+  .md-b.play { cursor: pointer; }
+  .md { border-radius: 12px; }
+  .md .pl { width: 60px; height: 60px; margin: -30px 0 0 -30px; transition: background-color var(--dur-2) var(--ease-out), transform var(--dur-2) var(--ease-out); }
+  .md .pl svg { width: 26px; height: 26px; }
+  .md .dur { right: 12px; bottom: 12px; height: 22px; padding: 0 8px; line-height: 22px; }
+  .th { gap: 6px; margin-top: 6px; }
+  .tg + .th { margin-top: 12px; }
+  .tn-b { border-radius: 10px; cursor: zoom-in; }
+  .tn { border-radius: 10px; }
+  .more { font-size: 24px; }
+
+  /* 操作：阅读 / 分享 / 收藏是三个带圆角底色（悬停时）的小胶囊，往左挪出 10px 让图标和正文左边对齐 */
+  .act { gap: 4px; height: 34px; margin: 10px 0 0 -10px; }
+  .ai { align-self: center; height: 34px; padding: 0 10px; border-radius: 17px; transition: color var(--dur-1) var(--ease-out), background-color var(--dur-2) var(--ease-out); }
+}
+@media (min-width: 1024px) and (hover: hover) {
+  /* 悬停：底色亮一档、描边也亮一点（指针在文字上时也看得出来）；按下时再暗回一点 */
+  .post { transition: background-color var(--dur-2) var(--ease-out), box-shadow var(--dur-2) var(--ease-out); }
+  .post:hover { background-color: #191919; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .09); }
+  .post.m-pressed { background-color: #151515; }
+  .av-l:hover .av { opacity: .85; }
+  .nm-l:hover .nm { text-decoration: underline; text-underline-offset: 3px; }
+  .md > :deep(img), .tn > :deep(img) { transition: opacity var(--dur-3) var(--ease-out), filter var(--dur-3) var(--ease-out), transform var(--dur-4) var(--ease-out); }
+  .md > :deep(img.now), .tn > :deep(img.now) { transition: transform var(--dur-4) var(--ease-out); }
+  .md-b:hover .md > :deep(img.on), .tn-b:hover .tn > :deep(img.on) { transform: scale(1.03); }
+  .md-b:hover .pl { background: rgba(20, 20, 20, .72); transform: scale(1.06); }
+  button.ai:hover { background: rgba(255, 255, 255, .08); color: var(--t3); }
+  button.ai.on:hover { color: var(--accent); }
 }
 </style>

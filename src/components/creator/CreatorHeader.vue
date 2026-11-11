@@ -6,11 +6,16 @@ import Icon from '@/components/Icon.vue'
 import RollNum from '@/components/video/RollNum.vue'
 import FollowBtn from './FollowBtn.vue'
 import { vRise } from '@/components/home/motion'
+import { isDesktop } from '@/composables/useDesktop'
+import { useBack } from '@/composables/useBack'
 
 /*
  * 创作者主页头部：头图（最近作品拼成的一排图，没有作品时用按 id 生成的灰色渐变）→ 压在头图上的头像 + 关注按钮
  * → 名字、认证 → 一行灰色数据（窄屏自动换行，行首不会出现「·」）→ 简介。
  * creator 为空时是加载骨架。
+ *
+ * 桌面布局（≥ 1024px）：头图是内容区里的一条圆角横幅（返回键在它左上角），下面一行是「大头像 | 名字、数据、简介 | 关注」，
+ * 和下面的标签栏、网格左右对齐；没有视差 / 回弹放大（鼠标滚轮下那样晃没有意义）。DOM 和手机一样，只是样式换成网格排布。
  */
 const props = defineProps({
   /** getCreator() 的结果；null = 加载中 */
@@ -21,6 +26,7 @@ const props = defineProps({
   calm: Boolean
 })
 defineEmits(['follow'])
+const back = useBack()
 
 /* 和 CreatorView 的 BANNER 一致 */
 const BANNER = 150
@@ -33,6 +39,11 @@ const bg = ref(null)
 function parallax(top) {
   const el = bg.value
   if (!el) return
+  // 桌面布局：头图不跟着滚动变（窗口从手机宽度拉宽过来时，把留下的样式清掉）
+  if (isDesktop.value) {
+    el.style.transform = el.style.opacity = ''
+    return
+  }
   if (top < 0) {
     el.style.transform = `scale(${1 + -top / BANNER})`
     el.style.opacity = ''
@@ -77,6 +88,8 @@ const stats = computed(() => {
           <Cover v-for="(c, i) in banner" :key="i" v-bind="c" eager />
         </div>
       </div>
+      <!-- 桌面布局的返回键（手机上的返回键在页面顶栏里） -->
+      <button v-if="isDesktop" type="button" class="cr-dback m-press-sm" aria-label="返回" @click="back"><Icon name="chevL" /></button>
     </div>
 
     <template v-if="creator">
@@ -111,6 +124,8 @@ const stats = computed(() => {
       </div>
       <div class="sk sk-n" />
       <div class="sk sk-s" />
+      <!-- 桌面布局多一条简介：骨架和真头部一样高，数据回来时下面的标签栏、网格不往下跳 -->
+      <div v-if="isDesktop" class="sk sk-b" />
     </template>
   </header>
 </template>
@@ -181,5 +196,81 @@ const stats = computed(() => {
 @keyframes sk { 50% { opacity: .5; } }
 @media (prefers-reduced-motion: reduce) {
   .sk { animation: none; }
+}
+
+/*
+ * ---- 桌面布局（≥ 1024px）----
+ * 头图：内容区里的一条圆角横幅（高度随窗口宽度在 160–240px 之间），和网格左右对齐。
+ * 下面一行用网格排：大头像 | 名字 / 数据 / 简介 | 关注按钮。头像和关注按钮在手机上同在 .cr-row 里（压在头图上），
+ * 桌面上 .cr-row 用 display: contents 拆开，各占一格；上下两条 1fr 的空行让文字和头像竖直居中（简介很长时空行收成 0）。
+ */
+@media (min-width: 1024px) {
+  .cr-hd {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-rows: auto 1fr auto auto auto 1fr;
+    grid-template-areas:
+      'banner banner banner'
+      'av . follow'
+      'av name follow'
+      'av stats follow'
+      'av bio follow'
+      'av . follow';
+    column-gap: 24px;
+    max-width: var(--desk-max);
+    margin: 0 auto;
+    padding: 16px var(--desk-pad) 28px;
+  }
+  .cr-banner {
+    grid-area: banner;
+    height: clamp(160px, 13vw, 240px);
+    margin-bottom: 24px;
+    border-radius: 16px;
+    clip-path: inset(0 round 16px);
+  }
+  .cr-banner::after { background: linear-gradient(180deg, rgba(0, 0, 0, .28) 0%, rgba(0, 0, 0, 0) 34%, rgba(0, 0, 0, 0) 62%, rgba(0, 0, 0, .3) 100%); }
+  .cr-dback {
+    position: absolute;
+    top: 14px;
+    left: 14px;
+    z-index: 2;
+    display: grid;
+    place-items: center;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, .42);
+    -webkit-backdrop-filter: blur(6px);
+    backdrop-filter: blur(6px);
+    color: #fff;
+    transition: background-color var(--dur-2) var(--ease-out);
+  }
+  .cr-dback svg { width: 20px; height: 20px; stroke-width: 2.8; }
+
+  .cr-row { display: contents; }
+  .cr-av { grid-area: av; align-self: center; width: 112px; height: 112px; box-shadow: 0 0 0 1px rgba(255, 255, 255, .08); }
+  .cr-follow { grid-area: follow; align-self: center; min-width: 108px; height: 40px; margin: 0; padding: 0 22px; border-radius: 20px; font-size: 15px; }
+
+  .cr-name { grid-area: name; margin: 0; font-size: 24px; line-height: 32px; }
+  .cr-name .vf { margin-left: 8px; vertical-align: -2px; }
+  .cr-name .vf svg { width: 20px; height: 20px; }
+  /*
+   * 行首的「·」改用 clip-path 裁（不用 overflow: hidden）：overflow 不是 visible 的网格项最小高度算 0，
+   * 浏览器排跨行的头像时会把上下两条 1fr 空行各多撑出 11px（头部比头像高出 22px，骨架没有这一行为，数据回来时下面整体往下跳）
+   */
+  .cr-stats { grid-area: stats; margin: 6px 0 0; overflow: visible; -webkit-clip-path: inset(0); clip-path: inset(0); font-size: 14px; line-height: 22px; }
+  .cr-bio { grid-area: bio; max-width: var(--desk-col); margin: 8px 0 0; font-size: 14px; line-height: 22px; }
+
+  .cr-av.sk { box-shadow: none; }
+  .cr-follow.sk { width: 108px; }
+  /* 三条骨架各占的高度（含上下边距）和真的名字 32、数据行 6 + 22、一行简介 8 + 22 一样，条竖直落在那一行文字的位置上 */
+  .sk-n { grid-area: name; width: 180px; height: 24px; margin: 4px 0; }
+  .sk-s { grid-area: stats; width: 320px; height: 14px; margin: 10px 0 4px; }
+  .sk-b { grid-area: bio; width: 360px; max-width: 100%; height: 14px; margin: 12px 0 4px; }
+}
+@media (min-width: 1024px) and (hover: hover) {
+  .cr-dback:hover { background: rgba(0, 0, 0, .62); }
+  .cr-follow:not(.sk):hover { background: #dcdcdc; }
+  .cr-follow.on:hover { background: #1f1f1f; color: var(--t3); }
 }
 </style>

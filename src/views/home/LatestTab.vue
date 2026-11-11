@@ -1,5 +1,5 @@
 <script setup>
-import { ref, shallowRef } from 'vue'
+import { ref, shallowRef, watch } from 'vue'
 import { getLatestFilters, getLatestVideos } from '@/api'
 import VideoCard from '@/components/VideoCard.vue'
 import SkeletonGrid from '@/components/home/SkeletonGrid.vue'
@@ -8,6 +8,8 @@ import ContentSwap from '@/components/home/ContentSwap'
 import { createHomeFeed, useAutoMore, refreshFeed, toTopOrRefresh } from '@/components/home/list'
 import { useKeepScroll } from '@/composables/useKeepScroll'
 import { useSlider, cover, vRise } from '@/components/home/motion'
+import { useScrollEdge } from '@/components/motion/scrollEdge'
+import { isDesktop } from '@/composables/useDesktop'
 
 /*
  * 最新：最近 7 天 × 地区。地区第一项是「全部」（默认）；地区上的数字是所选那一天的条数，
@@ -38,6 +40,14 @@ const regionBar = ref(null)
 useSlider(dateRow, dateBar, cover('.dchip.on'), { key: () => date.value, deps: () => filters.value })
 // 地区是描边的框：拉长会把左右两条边拉粗、圆头压扁，所以只平移、宽度渐变，不拉长
 useSlider(regionRow, regionBar, cover('.rp.on'), { key: () => region.value, deps: () => [filters.value, date.value], stretch: false })
+
+/*
+ * 桌面布局：日期行平时没有底线（同上面的分类标签行），列表滚到它下面时才出现细线和淡阴影（m-edge）。
+ * 手机上日期行一直有底线，不挂这个（返回 null：不往滚动区里插哨兵）。
+ */
+const datebarEl = ref(null)
+const edge = useScrollEdge(datebarEl, () => (isDesktop.value ? scroller.value : null))
+watch(isDesktop, () => edge.refresh(), { flush: 'post' })
 
 async function loadFilters() {
   filtersFailed.value = false
@@ -82,9 +92,9 @@ load()
 
 <template>
   <div>
-    <!-- date bar stays fixed above the list -->
-    <div class="datebar">
-      <div ref="dateRow" class="row hs">
+    <!-- date bar stays fixed above the list（桌面上 7 天一行摆得下，d-wrap：不再是横向滚动行） -->
+    <div ref="datebarEl" class="datebar" :class="{ 'm-edge': isDesktop }">
+      <div ref="dateRow" class="row hs d-wrap">
         <span ref="dateBar" class="m-bar dbar" aria-hidden="true" />
         <template v-if="filters">
           <button
@@ -113,7 +123,7 @@ load()
         <button type="button" class="retry" @click="load()">重试</button>
       </div>
       <template v-else>
-        <div ref="regionRow" class="pills hs">
+        <div ref="regionRow" class="pills hs d-wrap">
           <span ref="regionBar" class="m-bar rbar" aria-hidden="true" />
           <template v-if="filters">
             <button
@@ -134,7 +144,7 @@ load()
         </div>
         <!-- 换日期 / 地区：旧列表留着等新的，快的直接换成新列表（错峰浮现），慢了（250ms）才淡入骨架 -->
         <ContentSwap :pending="feed.total === null">
-          <SkeletonGrid v-if="feed.total === null" :count="10" gap="g16" />
+          <SkeletonGrid v-if="feed.total === null" :count="10" gap="g16" fill />
           <div v-else-if="!feed.list.length" v-rise.self class="empty">这一天还没有新视频</div>
           <div v-else :key="batch">
             <div v-rise class="grid g16">
@@ -231,5 +241,31 @@ load()
 @keyframes sk { 50% { opacity: .5; } }
 @media (prefers-reduced-motion: reduce) {
   .sk { animation: none; }
+}
+
+/*
+ * ---- 桌面布局（≥ 1024px）----
+ * 日期行（滚动区外面）左边用 HomeView 的 --home-x，地区行和网格在滚动区里面，按同一个算法对齐（100% 是滚动区的内容宽）。
+ * 两行都是 d-wrap：一行摆得下就一行，摆不下折行，不藏在横向滚动里。日期块、地区胶囊放大一点（鼠标好点），
+ * 滑块的位置 / 高度跟着改。日期行平时没有底线，列表滚上去才出现（m-edge）。
+ */
+@media (min-width: 1024px) {
+  .datebar { border-bottom-color: transparent; }
+  .datebar .row { gap: 12px; min-height: 52px; padding: 8px var(--home-x) 12px; }
+  .dbar { top: 8px; height: 32px; }
+  .dchip { width: 60px; height: 32px; font-size: 13px; }
+  .dchip .bd { top: -6px; right: -6px; }
+
+  .pills { gap: 10px; padding: 12px max(var(--desk-pad), calc((100% - var(--desk-max)) / 2 + var(--desk-pad))) 20px; }
+  .rbar { top: 12px; height: 32px; border-radius: 16px; }
+  .rp { height: 32px; padding: 0 16px; border-radius: 16px; font-size: 13px; }
+  .rp .n { font-size: 12px; }
+}
+@media (min-width: 1024px) and (hover: hover) {
+  /* 日期字是 difference 混合：灰底变亮时字要换成白色才是跟着变亮（|#ff - #1f| ≈ #e0），照旧用 #a2 反而变暗 */
+  .dchip:not(.on):hover { background: #1f1f1f; }
+  [data-slider] > .dchip:not(.on):hover .lb { color: #fff; }
+  .dchip .lb { transition: opacity var(--dur-1) var(--ease-out), color var(--dur-2) var(--ease-out); }
+  .rp:not(.on):hover { background: #1f1f1f; color: var(--t3); }
 }
 </style>

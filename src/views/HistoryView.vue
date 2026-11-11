@@ -5,7 +5,7 @@ import { getHistory, removeHistory, clearHistory, getVideo } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 import { useAppStore } from '@/stores/app'
 import { toast } from '@/composables/useToast'
-import { formatClock } from '@/utils/format'
+import { formatClock, formatCount } from '@/utils/format'
 import { createFeed } from '@/components/creator/feed'
 import { useAutoMore } from '@/components/home/list'
 import { pickResume, setResume } from '@/components/video/resume'
@@ -17,6 +17,7 @@ import Icon from '@/components/Icon.vue'
 import ListFoot from '@/components/home/ListFoot.vue'
 import ConfirmSheet from '@/components/me/ConfirmSheet.vue'
 import { cameBack, vRise, leave } from '@/components/home/motion'
+import { isDesktop } from '@/composables/useDesktop'
 
 defineOptions({ name: 'HistoryView' })
 
@@ -62,6 +63,14 @@ function progress(v) {
   return { pct: len ? Math.min(100, (sec / len) * 100) : 0, text: `看到 ${formatClock(sec)}` }
 }
 
+/* 桌面布局多一行：作者 · 播放数（宽屏上标题右边空着，像视频网站的观看记录那样补上出处） */
+function byline(v) {
+  const parts = []
+  if (v.creator?.name) parts.push(v.creator.name)
+  if (Number(v.playCount) > 0) parts.push(`${formatCount(v.playCount)}次播放`)
+  return parts.join(' · ')
+}
+
 const pad = n => String(n).padStart(2, '0')
 /* 观看时间：今天 / 昨天带时分，更早的只写日期 */
 function when(ts) {
@@ -93,15 +102,26 @@ const committing = reactive(new Set())
 const isRemoved = id => removing.has(id) || committing.has(id)
 const shownTotal = computed(() => Math.max(0, (feed.total ?? 0) - removing.size - committing.size))
 
-function remove(v) {
+function remove(v, e) {
   if (removing.has(v.id)) return
   removing.set(v.id, setTimeout(() => commit(v.id), UNDO_MS))
+  // 桌面上用键盘删的：× 按钮随这一行换成撤销条消失了，焦点交给「撤销」，接着按回车就能撤销
+  if (isDesktop.value && e?.currentTarget === document.activeElement) refocus(v.id, '.undo')
 }
 
-function undo(v) {
+function undo(v, e) {
   if (committing.has(v.id)) return
   clearTimeout(removing.get(v.id))
   removing.delete(v.id)
+  if (isDesktop.value && e?.currentTarget === document.activeElement) refocus(v.id, '.hi-del')
+}
+
+/* 等这一行换好（撤销条 ⇄ 记录）再把焦点放到新出现的按钮上 */
+function refocus(id, sel) {
+  nextTick(() => {
+    const row = [...(listEl.value?.$el?.children || [])].find(el => el.dataset.hid === String(id))
+    row?.querySelector(sel)?.focus({ preventScroll: true })
+  })
 }
 
 async function commit(id) {
@@ -227,7 +247,7 @@ onBeforeUnmount(() => {
     </BackHeader>
 
     <!-- 还在校验登录状态 / 第一页还没回来：骨架 -->
-    <div v-if="session === null || (session && feed.total === null && !feed.error)" class="scroll" aria-busy="true">
+    <div v-if="session === null || (session && feed.total === null && !feed.error)" class="scroll hi-sk" aria-busy="true">
       <div v-for="i in 6" :key="i" class="hi sk-row" aria-hidden="true">
         <div class="hi-cv sk" />
         <div class="hi-bd"><div class="sk l1" /><div class="sk l2" /><div class="sk l3" /></div>
@@ -259,11 +279,11 @@ onBeforeUnmount(() => {
       -->
       <TransitionGroup ref="listEl" v-rise tag="div" name="hi" class="hi-list">
         <!-- class 里读一下删除状态：换成撤销条时列表也跟着重新排一次位置，下面的记录才会平滑补位 -->
-        <div v-for="v in feed.list" :key="v.id" class="hi" :class="{ removed: isRemoved(v.id) }">
+        <div v-for="v in feed.list" :key="v.id" class="hi" :class="{ removed: isRemoved(v.id) }" :data-hid="v.id">
           <Transition name="hi-swap">
             <div v-if="isRemoved(v.id)" class="hi-undo" role="status">
               <span>已删除「{{ v.title }}」</span>
-              <button type="button" class="undo" :disabled="committing.has(v.id)" @click="undo(v)">撤销</button>
+              <button type="button" class="undo" :disabled="committing.has(v.id)" @click="undo(v, $event)">撤销</button>
             </div>
             <div v-else class="hi-row">
               <RouterLink class="hi-link" :to="`/video/${encodeURIComponent(v.id)}`" @click="open(v)">
@@ -273,11 +293,12 @@ onBeforeUnmount(() => {
                 </Cover>
                 <div class="hi-bd">
                   <div class="hi-tt">{{ v.title }}</div>
+                  <div v-if="isDesktop && byline(v)" class="hi-by">{{ byline(v) }}</div>
                   <div class="hi-pg" :class="{ done: progress(v).pct === 100 }">{{ progress(v).text }}</div>
                   <div class="hi-at">{{ when(v.watchedAt) }}</div>
                 </div>
               </RouterLink>
-              <button type="button" class="hi-del m-hold" :aria-label="`删除观看记录：${v.title}`" @click="remove(v)"><Icon name="close" /></button>
+              <button type="button" class="hi-del m-hold" :aria-label="`删除观看记录：${v.title}`" :title="isDesktop ? '删除这条记录' : undefined" @click="remove(v, $event)"><Icon name="close" /></button>
             </div>
           </Transition>
         </div>
@@ -378,5 +399,68 @@ onBeforeUnmount(() => {
 /* iOS 14 / 安卓 WebView 87 不认 aspect-ratio（Safari 15、Chrome 88 才有）：里面全是绝对定位的东西，高度会是 0，用 ::before 的 padding 撑出同样的比例 */
 @supports not (aspect-ratio: 1 / 1) {
   .hi-cv::before { content: ''; display: block; padding-top: 62.5%; }
+}
+
+/*
+ * ---- 桌面布局（≥ 1024px）----
+ * 居中的一列（内容最宽 --desk-col，和「我的」「我的关注」同一栏，侧边栏里一组页面挨个点过去标题不左右跳；标题行和它对齐）：
+ * 大封面（240px 宽）+ 标题 + 看到哪 + 什么时候看的，像视频网站的观看记录。
+ * 用列表不用网格：每条都有进度文字和观看时间要读，删掉后原地换成「已删除 · 撤销」，列表里补位最自然。
+ * 鼠标移到一行上：整行浅底、封面放大一点、标题变亮，右上角出现 ×（键盘 Tab 到这一行时也出现）；没有鼠标的设备 × 一直显示。
+ * 整行的浅底往两边各多出 12px，封面和标题行的返回键对齐在内容边上。
+ */
+@media (min-width: 1024px) {
+  .history { --hi-w: var(--desk-col); --desk-hd-w: var(--hi-w); }
+  /* 左右各留出滚动条的位置：Windows 的常驻滚动条不会让居中的列表和标题行错开（同社区、帖子详情） */
+  .scroll { scrollbar-gutter: stable both-edges; }
+  .hd-n { font-size: 14px; }
+  .hd-act { height: 36px; padding: 0 16px; border-radius: 18px; background: var(--chip); color: var(--t3); font-size: 14px; }
+  .hd-act::after { inset: -4px; }
+
+  .hi-list, .sk-row { width: 100%; max-width: calc(var(--hi-w) + 2 * var(--desk-pad)); margin: 0 auto; }
+  .hi-list { padding: 4px var(--desk-pad) 8px; }
+  .hi-link { gap: 16px; margin: 0 -12px; padding: 10px 12px; border-radius: 12px; }
+  .hi-cv { width: 240px; border-radius: 10px; }
+  .hi-cv .dur { right: 8px; bottom: 9px; height: 20px; padding: 0 7px; font-size: 12px; line-height: 20px; }
+  .hi-track { height: 4px; }
+  .hi-bd { padding: 2px 48px 0 0; }
+  .hi-tt { font-size: 16px; line-height: 24px; }
+  .hi-by { margin-top: 6px; overflow: hidden; color: var(--t2); font-size: 13px; line-height: 20px; text-overflow: ellipsis; white-space: nowrap; }
+  .hi-pg { margin-top: 2px; font-size: 13px; line-height: 20px; }
+  .hi-at { margin-top: 2px; font-size: 13px; line-height: 20px; }
+  .hi-del { top: 10px; right: 0; bottom: auto; width: 40px; height: 40px; border-radius: 50%; color: var(--t2); }
+  .hi-del svg { width: 18px; height: 18px; }
+
+  .hi-undo { height: 64px; margin: 8px 0; padding: 0 8px 0 20px; border-radius: 12px; font-size: 14px; }
+  .undo { height: 40px; padding: 0 16px; border-radius: 20px; }
+
+  .em-ic { width: 40px; height: 40px; margin-bottom: 16px; }
+  .em-sub { margin-top: 8px; font-size: 13px; }
+
+  .sk-row { gap: 16px; padding: 10px var(--desk-pad); }
+  /* 整块骨架往下 4px，对上列表的上内边距（滚动区的第一个子元素是顶边细线的哨兵，:first-child 选不到第一行） */
+  .hi-sk { padding-top: 4px; }
+  .sk-row .l1 { height: 16px; margin-top: 6px; }
+  .sk-row .l2 { width: 30%; height: 13px; margin-top: 18px; }
+  .sk-row .l3 { width: 22%; height: 13px; margin-top: 10px; margin-bottom: 0; }
+  .hi-cv.sk { border-radius: 10px; }
+}
+@media (min-width: 1024px) and (hover: hover) {
+  .hd-act { transition: background-color var(--dur-2) var(--ease-out), opacity var(--dur-1) var(--ease-out); }
+  .hd-act:not(:disabled):hover { background: #1f1f1f; }
+  .hi-link { transition: background-color var(--dur-2) var(--ease-out); }
+  .hi-row:hover .hi-link { background: #121212; }
+  .hi-tt { transition: color var(--dur-2) var(--ease-out); }
+  .hi-row:hover .hi-tt { color: var(--t1); }
+  /* 封面在自己的圆角里放大一点（和视频卡片一样，只放大照片） */
+  .hi-cv > :deep(img) { transition: opacity var(--dur-3) var(--ease-out), filter var(--dur-3) var(--ease-out), transform var(--dur-4) var(--ease-out); }
+  .hi-cv > :deep(img.now) { transition: transform var(--dur-4) var(--ease-out); }
+  .hi-row:hover .hi-cv > :deep(img) { transform: scale(1.03); }
+  /* × 平时藏着，移到这一行上（或键盘聚焦到这一行里）才出现 */
+  .hi-del { opacity: 0; transition: opacity var(--dur-2) var(--ease-out), color var(--dur-1) var(--ease-out), background-color var(--dur-2) var(--ease-out); }
+  .hi-row:hover .hi-del, .hi-row:focus-within .hi-del { opacity: 1; }
+  .hi-del:hover { background: #1f1f1f; color: var(--t1); }
+  .undo { transition: background-color var(--dur-2) var(--ease-out), opacity var(--dur-1) var(--ease-out); }
+  .undo:not(:disabled):hover { background: #1f1f1f; }
 }
 </style>

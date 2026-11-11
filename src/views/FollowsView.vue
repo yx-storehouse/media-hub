@@ -140,7 +140,7 @@ onBeforeUnmount(() => {
     </BackHeader>
 
     <!-- 还在校验登录状态 / 第一页还没回来：骨架 -->
-    <div v-if="session === null || (session && feed.total === null && !feed.error)" class="scroll" aria-busy="true">
+    <div v-if="session === null || (session && feed.total === null && !feed.error)" class="scroll fl-sk" aria-busy="true">
       <div v-for="i in 7" :key="i" class="fl sk-row" aria-hidden="true">
         <div class="fl-av sk" />
         <div class="fl-bd"><div class="sk l1" /><div class="sk l2" /></div>
@@ -251,5 +251,47 @@ onBeforeUnmount(() => {
 @keyframes sk { 50% { opacity: .5; } }
 @media (prefers-reduced-motion: reduce) {
   .sk { animation: none; }
+}
+
+/*
+ * ---- 桌面布局（≥ 1024px）----
+ * 居中的一栏（内容 720px，标题行和它对齐）：头像 56px、名字 16px、说明 13px；
+ * 鼠标移到一行上整行浅底（浅底往两边各多出 12px，头像和标题行的返回键对齐在内容边上），关注按钮自己也有悬停态。
+ */
+@media (min-width: 1024px) {
+  .follows { --desk-hd-w: var(--desk-col); }
+  /* 左右各留出滚动条的位置：Windows 的常驻滚动条不会让居中的一栏和标题行错开（同社区、帖子详情） */
+  .scroll { scrollbar-gutter: stable both-edges; }
+  .hd-n { font-size: 14px; }
+
+  .fl-list, .sk-row { width: 100%; max-width: calc(var(--desk-col) + 2 * var(--desk-pad)); margin: 0 auto; }
+  .fl-list { padding: 4px var(--desk-pad) 8px; }
+  .fl { gap: 16px; margin: 0 -12px; padding-right: 16px; border-radius: 12px; }
+  .fl-main { gap: 16px; padding: 14px 0 14px 12px; }
+  .fl-av { width: 56px; height: 56px; }
+  .fl-nm { gap: 6px; font-size: 16px; line-height: 24px; }
+  .fl-nm .vf svg { width: 16px; height: 16px; }
+  .fl-meta { margin-top: 2px; font-size: 13px; line-height: 20px; }
+  .fl-bio { font-size: 13px; line-height: 20px; }
+  .fl-btn { min-width: 88px; height: 36px; padding: 0 16px; border-radius: 18px; font-size: 14px; }
+  .fl-btn::after { inset: -4px; }
+
+  .em-ic { width: 40px; height: 40px; margin-bottom: 16px; }
+  .em-sub { margin-top: 8px; font-size: 13px; }
+
+  /*
+   * 骨架行同时带着 .fl：上面 .fl 的 margin: 0 -12px 会盖掉居中，这里再居中一次（和标题、列表同一栏，数据回来时不往右跳）。
+   * 一行 94px 高、整块往下 4px：和带简介的真行（名字 + 数据 + 简介）、列表的上内边距一样，头像落在同一个位置
+   */
+  .fl-sk { padding-top: 4px; }
+  .sk-row { gap: 16px; margin: 0 auto; padding: 19px var(--desk-pad); }
+  .sk-row .l1 { width: 30%; height: 16px; }
+  .sk-row .l2 { width: 50%; height: 13px; margin-top: 10px; }
+}
+@media (min-width: 1024px) and (hover: hover) {
+  .fl { transition: background-color var(--dur-2) var(--ease-out); }
+  .fl:hover { background: #121212; }
+  .fl-btn:hover { background: #e6e6e6; }
+  .fl-btn.on:hover { background: #1f1f1f; color: var(--t3); }
 }
 </style>

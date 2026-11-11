@@ -53,11 +53,15 @@ import RollNum from '@/components/video/RollNum.vue'
 import { rememberVideo } from '@/components/video/preview'
 import { haptic, reducedMotion } from '@/utils/motion'
 import { cameBack, pop, vRise, dur, ease } from '@/components/home/motion'
+import { useScrollEdge } from '@/components/motion/scrollEdge'
+import { isDesktop } from '@/composables/useDesktop'
 
 /*
  * 帖子详情：作者栏（关注）→ 标题、关联视频（紧跟标题）、正文、配图、话题、发布时间 →「下一篇」，底部是阅读数 / 分享 / 收藏。
  * 收藏状态和阅读数放在 stores/posts.js，社区列表（常驻）读同一份，返回列表时两边一致。
  * 配图点开是全屏大图（左右滑、双指 / 双击放大）；正文里的网址、邮箱、电话可以点。
+ * 桌面布局（≥ 1024px）：作者栏和正文是居中的一栏（--desk-col），阅读数 / 分享 / 收藏挪到作者栏里（没有底部栏），
+ * 配图排成网格（见 imgGrid）。
  */
 defineOptions({ name: 'PostView' })
 
@@ -232,6 +236,25 @@ const openImage = i => { viewer.value = { images: post.value?.images || [], inde
 const imgBtns = []
 const imageEl = i => imgBtns[i] || null
 
+/*
+ * 桌面布局（≥ 1024px）：配图排成网格——1 张按原比例（太高的限高、按比例变窄），2 张、4 张两列，3 张及以上三列
+ * （格子里裁成固定比例，点开看完整的大图）。手机上不加这些类和变量，照旧一张张按原比例竖着排。
+ */
+const imgGrid = computed(() => {
+  const n = post.value?.images?.length || 0
+  return n === 1 ? 'g1' : n === 2 || n === 4 ? 'g2' : 'g3'
+})
+/* 单张配图的宽高比（数字）：限高时按它算宽度 */
+const ratioK = r => { const [w, h] = String(r || '4 / 3').split('/').map(Number); return w > 0 && h > 0 ? +(w / h).toFixed(4) : 4 / 3 }
+
+/*
+ * 桌面布局：作者栏平时没有底线，正文从它下面滚过去时才出现细线和淡阴影（components/motion/scrollEdge.js）。
+ * 手机布局不看（底线一直都在）；窗口跨过 1024px 时重新取一次。
+ */
+const hd = ref(null)
+const edge = useScrollEdge(hd, () => (isDesktop.value ? [scroller.value] : []))
+watch(isDesktop, () => nextTick(edge.refresh))
+
 /* ---------- 关注 / 收藏：乐观更新 → 一次请求（带明确的 on）→ 以返回为准，失败回滚并提示 ---------- */
 
 const failText = e => (e?.code === 'demo' ? e.message : '操作失败，请稍后重试')
@@ -376,7 +399,7 @@ onBeforeRouteUpdate(to => {
 
 <template>
   <div class="page post-pg">
-    <header class="pd-hd">
+    <header ref="hd" class="pd-hd" :class="{ 'm-edge': isDesktop }">
       <button type="button" class="pd-back hit-44" aria-label="返回" @click="back"><Icon name="chevL" /></button>
       <template v-if="post">
         <!-- 按帖子换 key：「下一篇」换了作者时新的作者栏淡入，不是原地跳字 -->
@@ -391,6 +414,8 @@ onBeforeRouteUpdate(to => {
             <div class="pd-sub">
               <span v-if="author?.handle" class="hd">@{{ author.handle }}</span>
               <span v-if="post.time" class="tm">{{ post.time }}</span>
+              <!-- 桌面布局：阅读数在这里（手机上在底部栏） -->
+              <span v-if="isDesktop" class="rd">阅读 {{ formatCount(stats.read) }}</span>
             </div>
           </div>
         </component>
@@ -403,6 +428,17 @@ onBeforeRouteUpdate(to => {
           :aria-label="following ? `已关注 ${author.name}，点按取消关注` : `关注 ${author.name}`"
           @click="onFollow"
         />
+        <!--
+          桌面布局：分享 / 收藏在作者栏右边，一直看得见（手机上的底部栏不显示）；
+          不放在窗口底部：桌面的提示条在内容区底部正中，会压在底栏上。和底部栏一样按帖子 id 重新挂上
+        -->
+        <div v-if="isDesktop" :key="`acts${post.id}`" class="pd-acts">
+          <button type="button" class="pd-share m-press-sm" aria-label="分享" title="分享" @click="share({ title: post.title })"><Icon name="shareUp" /></button>
+          <button type="button" class="pd-fav m-press" :class="{ on: stats.faved }" :aria-pressed="stats.faved" @click="onFav">
+            <span class="ico"><Icon ref="favIcon" name="bookmark" /><ActBurst v-if="favBurst" :key="favBurst" @done="favBurst = 0" /></span>
+            <span>收藏 <RollNum :value="formatCount(stats.fav)" :n="stats.fav" /></span>
+          </button>
+        </div>
       </template>
       <!-- 加载中：作者栏骨架 -->
       <template v-else-if="!failed">
@@ -458,13 +494,14 @@ onBeforeRouteUpdate(to => {
               </div>
 
               <!-- 配图：点开全屏看大图 -->
-              <div v-if="post.images?.length" class="pd-imgs">
+              <div v-if="post.images?.length" class="pd-imgs" :class="isDesktop ? imgGrid : null">
                 <button
                   v-for="(img, i) in post.images"
                   :key="i"
                   :ref="el => { imgBtns[i] = el }"
                   type="button"
                   class="pd-img-b m-hold"
+                  :style="isDesktop ? { '--ar-k': ratioK(ratios[i]) } : null"
                   :aria-label="`查看大图：第 ${i + 1} 张，共 ${post.images.length} 张`"
                   @click="openImage(i)"
                 >
@@ -510,7 +547,7 @@ onBeforeRouteUpdate(to => {
     </div>
 
     <!-- 按帖子 id 重新挂上：「下一篇」时底栏一直在，收藏数直接换成新帖子的，不会像点了收藏那样翻过去、胶囊也不会渐变填满 -->
-    <footer v-if="post" :key="`bar${post.id}`" class="pd-bar">
+    <footer v-if="post && !isDesktop" :key="`bar${post.id}`" class="pd-bar">
       <span class="pd-read">阅读 {{ formatCount(stats.read) }}</span>
       <button type="button" class="pd-share m-press-sm" aria-label="分享" @click="share({ title: post.title })"><Icon name="shareUp" /></button>
       <button type="button" class="pd-fav m-press" :class="{ on: stats.faved }" :aria-pressed="stats.faved" @click="onFav">
@@ -687,5 +724,95 @@ onBeforeRouteUpdate(to => {
   .sk-img::before { content: ''; display: block; padding-top: 75%; }
   /* 配图：比例在行内样式的 --ar-pad 里 */
   .pd-img::before { content: ''; display: block; padding-top: var(--ar-pad, 75%); }
+}
+
+/*
+ * ---------- 桌面布局（≥ 1024px）----------
+ * 作者栏和正文是居中的一栏（--desk-col，720px），左边缘对齐（返回键往左挪出 8px，箭头和标题的左边对齐）。
+ *   作者栏 72px：返回、头像 + 名字（@账号 · 时间 · 阅读数）、关注，最右边是分享 / 收藏；平时没有底线，
+ *   正文滚过去时 m-edge 的细线和淡阴影出现。没有底部栏。
+ *   正文：标题 26px，正文 16px / 1.8；关联视频 16:9 占满这一栏；配图排成网格（imgGrid）；「下一篇」卡片同宽。
+ *   滚动区左右各留出滚动条的位置（scrollbar-gutter both-edges）：Windows 的常驻滚动条不会让正文和作者栏错开。
+ */
+@media (min-width: 1024px) {
+  .pd-hd {
+    position: relative;
+    z-index: 1;
+    gap: 12px;
+    height: 72px;
+    padding: 0 max(var(--desk-pad), calc((100% - var(--desk-col)) / 2));
+    border-bottom-color: transparent;
+  }
+  .pd-back { width: 36px; height: 36px; margin-left: -8px; border-radius: 50%; transition: background-color var(--dur-2) var(--ease-out); }
+  .pd-back svg { width: 22px; height: 22px; }
+  .pd-author { flex: 0 1 auto; gap: 12px; }
+  .pd-av { width: 40px; height: 40px; }
+  .pd-who { gap: 2px; }
+  .pd-nm span { font-size: 15px; font-weight: 600; line-height: 21px; }
+  .pd-sub .hd + .rd::before, .pd-sub .tm + .rd::before { content: '·'; padding: 0 4px; }
+  .pd-sub .rd { flex: none; font-variant-numeric: tabular-nums; }
+  .pd-follow { height: 36px; margin-left: 4px; padding: 0 18px; border-radius: 18px; }
+  .pd-acts { display: flex; flex: none; align-items: center; gap: 10px; margin-left: auto; }
+  .pd-acts .pd-share { width: 36px; height: 36px; }
+  .pd-acts .pd-share svg { width: 17px; height: 17px; }
+  .pd-acts .pd-fav { gap: 6px; height: 36px; padding: 0 16px 0 13px; border-radius: 18px; font-size: 14px; }
+  .pd-acts .pd-fav svg { width: 16px; height: 16px; }
+
+  .post-pg .scroll { padding: 0 var(--desk-pad); scrollbar-gutter: stable both-edges; }
+  .post-pg .m-swap { max-width: var(--desk-col); margin: 0 auto; }
+
+  .pd-body { padding: 12px 0 0; }
+  .pd-title { font-size: 26px; line-height: 1.4; text-wrap: balance; }
+  .pd-video { margin-top: 20px; }
+  .pd-video + .pd-text { margin-top: 20px; }
+  .pd-text { margin-top: 14px; line-height: 1.8; }
+  .pd-text p + p { margin-top: 14px; }
+  .pd-vcv .pl { width: 68px; height: 68px; margin: -34px 0 0 -34px; transition: background-color var(--dur-2) var(--ease-out), transform var(--dur-2) var(--ease-out); }
+  .pd-vcv .pl svg { width: 30px; height: 30px; margin-left: 4px; }
+  .pd-vcv .dur { right: 12px; bottom: 12px; }
+
+  /* 配图网格：格子里统一裁成方形（两列时 4:3），行内样式里的原始比例只给单张用 */
+  .pd-imgs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 24px; }
+  .pd-imgs.g2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .pd-imgs.g1 { display: block; }
+  .pd-imgs.g1 .pd-img-b { width: min(100%, calc(560px * var(--ar-k, 1.3333))); }
+  .pd-imgs.g2 .pd-img { aspect-ratio: 4 / 3 !important; }
+  .pd-imgs.g3 .pd-img { aspect-ratio: 1 / 1 !important; }
+  .pd-imgs.g2 .pd-img-b, .pd-imgs.g3 .pd-img-b, .pd-imgs.g2 .pd-img, .pd-imgs.g3 .pd-img { border-radius: 10px; }
+
+  .pd-tags { gap: 4px 16px; margin-top: 24px; }
+  .pd-time { margin-top: 12px; }
+  .pd-div { margin: 28px 0 20px; }
+  .pd-next { gap: 16px; margin: 0; padding: 14px 14px 14px 18px; }
+  .pd-next .th { width: 128px; height: 72px; }
+  .pd-end { padding: 8px 0; }
+  .post-pg .pad-b { height: 64px; }
+
+  .sk-t { height: 30px; margin-bottom: 10px; }
+  .sk-p { height: 16px; margin-top: 14px; }
+  .sk-img { margin-top: 24px; aspect-ratio: 16 / 9; }
+}
+@media (min-width: 1024px) and (hover: hover) {
+  .pd-back:hover, .pd-share:hover { background: var(--chip); }
+  .pd-author[href]:hover .pd-nm span { text-decoration: underline; text-underline-offset: 3px; }
+  .pd-follow:not(.on):hover { background: #e6e6e6; }
+  .pd-follow.on:hover { background: #1f1f1f; color: var(--t3); }
+  .pd-fav:not(.on):hover { background: rgba(255, 255, 255, .08); }
+  .pd-fav.on:hover { background: #e6e6e6; }
+  .pd-tag:hover { text-decoration: underline; text-underline-offset: 4px; }
+  .pd-link:hover { text-decoration-color: currentColor; }
+  .pd-next:hover { background: #161616; }
+  .pd-video:hover .pl { background: rgba(20, 20, 20, .72); transform: scale(1.06); }
+  .pd-img > :deep(img), .pd-vcv > :deep(img), .pd-half > :deep(img) { transition: opacity var(--dur-3) var(--ease-out), filter var(--dur-3) var(--ease-out), transform var(--dur-4) var(--ease-out); }
+  .pd-img > :deep(img.now), .pd-vcv > :deep(img.now), .pd-half > :deep(img.now) { transition: transform var(--dur-4) var(--ease-out); }
+  .pd-img-b:hover .pd-img > :deep(img.on), .pd-video:hover .pd-vcv > :deep(img.on), .pd-video:hover .pd-half > :deep(img.on) { transform: scale(1.03); }
+}
+/* 老引擎（不认 aspect-ratio）的桌面布局：网格里的格子同样用 padding 撑出方形 / 4:3 */
+@supports not (aspect-ratio: 1 / 1) {
+  @media (min-width: 1024px) {
+    .pd-imgs.g2 .pd-img::before { padding-top: 75%; }
+    .pd-imgs.g3 .pd-img::before { padding-top: 100%; }
+    .sk-img::before { padding-top: 56.25%; }
+  }
 }
 </style>

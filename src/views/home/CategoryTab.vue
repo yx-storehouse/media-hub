@@ -101,7 +101,7 @@ load()
         </div>
         <!-- 换筛选：旧列表留着等新的，快的直接换成新列表（错峰浮现），慢了（250ms）才淡入骨架 -->
         <ContentSwap :pending="feed.total === null">
-          <SkeletonGrid v-if="feed.total === null" :count="10" gap="g16" />
+          <SkeletonGrid v-if="feed.total === null" :count="10" gap="g16" fill />
           <div v-else-if="!feed.list.length" v-rise.self class="empty">这里还没有视频</div>
           <div v-else :key="batch">
             <div v-rise class="grid g16">
@@ -137,5 +137,25 @@ load()
 @keyframes sk { 50% { opacity: .5; } }
 @media (prefers-reduced-motion: reduce) {
   .chip-sk { animation: none; }
+}
+
+/*
+ * ---- 桌面布局（≥ 1024px）----
+ * 筛选胶囊一行（接口给的筛选项不多，摆不下时折行，不横着滚），左边和网格对齐（同 .grid 的算法，100% 是滚动区的内容宽）；
+ * 胶囊放大一点（鼠标好点），滑块跟着改。
+ */
+@media (min-width: 1024px) {
+  .chips { flex-wrap: wrap; gap: 10px; padding: 8px max(var(--desk-pad), calc((100% - var(--desk-max)) / 2 + var(--desk-pad))) 20px; }
+  .cbar { top: 8px; height: 32px; border-radius: 16px; }
+  /* 胶囊尺寸用公共的桌面值（common.css）；骨架胶囊的宽度这里的手机值优先级更高，要在这里改 */
+  .chip-sk { width: 64px; }
+}
+@media (min-width: 1024px) and (hover: hover) {
+  /*
+   * 胶囊的字是 difference 混合（见上面）：公共样式把没选中的胶囊悬停底色变成 #1f1f1f 时，
+   * 字要跟着换成白色才是变亮（|#ff - #1f| ≈ #e0），照旧用 #b9 反而变暗
+   */
+  .chip .lb { transition: opacity var(--dur-1) var(--ease-out), color var(--dur-2) var(--ease-out); }
+  [data-slider] > .chip:not(.on):hover .lb { color: #fff; }
 }
 </style>

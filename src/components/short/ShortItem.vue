@@ -6,6 +6,7 @@ import { share } from '@/composables/useShare'
 import { setResume } from '@/components/video/resume'
 import { rememberVideo } from '@/components/video/preview'
 import { cssDuration, haptic } from '@/utils/motion'
+import { isDesktop } from '@/composables/useDesktop'
 import Cover from '@/components/Cover.vue'
 import Icon from '@/components/Icon.vue'
 import ActBurst from '@/components/video/ActBurst.vue'
@@ -30,6 +31,10 @@ import RollNum from '@/components/video/RollNum.vue'
  *   ended    播完（循环播放时 <video loop> 自己从头来，不会触发）
  *   failed   文件打不开：父组件把这条退回封面预览
  * clip.src 为空时如实显示：清晰的封面 +「暂无视频源 · 看详情」，父组件只用一个很短的计时让自动连播往下走。
+ *
+ * 桌面布局（≥ 1024px）：这一条是页面正中的一张 9:16 卡片（尺寸由 ShortView 的 --sv-cw / --sv-gap 给），
+ * 右侧一列按钮放在卡片外面的右边；鼠标双击按系统的双击间隔认（见 onTap），进度条上悬停显示那个位置的时间。
+ * 父组件用键盘快捷键时通过 defineExpose 的 userToggle / seekBy 操作屏幕上这一条（和点按钮一样带动效）。
  */
 const props = defineProps({
   /** Short: { id, tags, title, len, cover, src, likes, favs, liked, faved, creator: { id, name, handle, avatar } | null } */
@@ -321,6 +326,7 @@ function scrubStart(e) {
   Object.assign(drag, { id: e.pointerId, t: timeAt(e, e.currentTarget), x: e.clientX, y: e.clientY, moved: false })
 }
 function scrubMove(e) {
+  scrubHover(e)
   if (e.pointerId !== drag.id) return
   e.stopPropagation()
   drag.t = timeAt(e, e.currentTarget)
@@ -339,7 +345,22 @@ function scrubEnd(e) {
 function scrubCancel(e) {
   if (e.pointerId === drag.id) drag.id = null
 }
+
+/* 桌面：鼠标停在进度条上时，指针上方显示那个位置的时间（拖动时中间有大号时间，这个让开） */
+const hover = reactive({ on: false, x: 0, t: 0 })
+function scrubHover(e) {
+  if (e.pointerType !== 'mouse' || !isDesktop.value) return
+  const rect = e.currentTarget.getBoundingClientRect()
+  hover.x = Math.min(rect.width, Math.max(0, e.clientX - rect.left))
+  hover.t = rect.width ? (hover.x / rect.width) * length.value : 0
+  hover.on = true
+}
+function scrubLeave() {
+  if (hover.on) hover.on = false
+}
 function scrubKey(e) {
+  // 桌面：↑ / ↓ 留给短视频页翻上一条 / 下一条（鼠标点过进度条后焦点留在这里，按 ↓ 也不会变成后退 5 秒）
+  if (isDesktop.value && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) return
   const step = { ArrowLeft: -KEY_STEP, ArrowDown: -KEY_STEP, ArrowRight: KEY_STEP, ArrowUp: KEY_STEP }[e.key]
   if (step) seekTo(props.time + step)
   else if (e.key === 'Home') seekTo(0)
@@ -361,10 +382,15 @@ let downAt = 0
 /** 上一次点击（判断双击）和还没执行的单击 */
 let lastTap = null
 let tapTimer = 0
+/** 这次按下的是鼠标还是手指（鼠标双击另有规则，见 onTap） */
+let downType = ''
+/** 鼠标双击最长认多久（系统的双击间隔，Windows 默认 500ms；浏览器在 click 的 detail 里告诉我们是不是双击） */
+const MOUSE_DBL_MS = 600
 
 function pressStart(e) {
   if (!e.isPrimary || e.button !== 0) return
   downAt = e.timeStamp
+  downType = e.pointerType || ''
   swallowClick = false
   endPress()
   if (!hasVideo.value) return   // 封面预览没有可快进的内容
@@ -413,11 +439,19 @@ function onTap(e) {
   const x = e.clientX - rect.left
   const y = e.clientY - rect.top
   const prev = lastTap
-  lastTap = { at: e.timeStamp, x, y }
-  if (prev && e.timeStamp - prev.at < TAP_MS && Math.hypot(x - prev.x, y - prev.y) < DOUBLE_SLOP) {
+  const tap = { at: e.timeStamp, x, y, fired: false }
+  lastTap = tap
+  /*
+   * 鼠标双击：系统的双击间隔可能比 TAP_MS 长，浏览器认作双击的（detail ≥ 2）也算。
+   * 两下之间超过 TAP_MS 时第一下的单击已经切换过播放了：再切回来，双击前后播放状态不变
+   */
+  const gap = prev ? e.timeStamp - prev.at : Infinity
+  const mouseDbl = downType === 'mouse' && e.detail >= 2 && gap < MOUSE_DBL_MS
+  if (prev && (gap < TAP_MS || mouseDbl) && Math.hypot(x - prev.x, y - prev.y) < DOUBLE_SLOP) {
     // 双击（连点时每一下都算）：撤销还没执行的单击，点赞
     clearTimeout(tapTimer)
     tapTimer = 0
+    if (prev.fired && props.current) userToggle()
     burst(x, y)
     emit('dbllike')
     return
@@ -425,6 +459,7 @@ function onTap(e) {
   clearTimeout(tapTimer)
   tapTimer = setTimeout(() => {
     tapTimer = 0
+    tap.fired = true
     if (props.current) userToggle()
   }, TAP_MS)
 }
@@ -461,11 +496,11 @@ function userToggle() {
 
 /* ---------- ±10 秒：按钮上的箭头转一下，同一侧冒出一道向外的箭头 ---------- */
 
-/** { dir: -1 | 1, key }：key 递增让连点时从头再播 */
+/** { dir: -1 | 1, sec: 跳了几秒, key }：key 递增让连点时从头再播 */
 const seekFx = ref(null)
 let seekFxSeq = 0
 function seekBy(delta) {
-  seekFx.value = { dir: Math.sign(delta), key: ++seekFxSeq }
+  seekFx.value = { dir: Math.sign(delta), sec: Math.abs(delta), key: ++seekFxSeq }
   seekTo(props.time + delta)
 }
 
@@ -616,6 +651,12 @@ const actions = computed(() => [
     { id: 'share', icon: 'shareNodes', label: '分享', run: () => tapPlain('share', () => share({ title: props.clip.title, url: shareUrl() })) },
     { id: 'settings', icon: 'gear', label: speedLabel.value, roll: true, aria: `播放设置，当前 ${store.playback.speed} 倍速`, run: () => tapPlain('settings', () => emit('settings')) }
 ])
+
+/*
+ * 桌面的键盘快捷键（父组件管按键，操作屏幕上这一条）：空格 = 点一下播放键，← / → = 跳几秒，
+ * 和用鼠标点一样带播放键 / 箭头的动效
+ */
+defineExpose({ userToggle, seekBy })
 </script>
 
 <template>
@@ -694,7 +735,7 @@ const actions = computed(() => [
       @animationend.self="seekFx = null"
     >
       <svg class="ic" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6" /><path d="m3 6 6 6-6 6" /></svg>
-      <span>{{ seekFx.dir < 0 ? '-' : '+' }}10秒</span>
+      <span>{{ seekFx.dir < 0 ? '-' : '+' }}{{ seekFx.sec }}秒</span>
     </i>
 
     <div class="sv-ctl" :class="ctlFx && `fx-${ctlFx}`">
@@ -752,11 +793,20 @@ const actions = computed(() => [
         @pointerup="scrubEnd"
         @pointercancel="scrubCancel"
         @lostpointercapture="scrubCancel"
+        @pointerleave="scrubLeave"
         @keydown="scrubKey"
       >
         <!-- 线（拖动时用 scaleY 变粗）和圆点（按住时回弹长出来）分开：圆点不跟着线一起被压扁 -->
         <div class="bar"><i :style="{ transform: `translateX(${pct - 100}%)` }" /></div>
         <span class="knob" :style="{ transform: `translateX(${pct}%)` }"><b /></span>
+        <!-- 桌面：鼠标悬停处的时间 -->
+        <span
+          v-if="isDesktop"
+          class="tip"
+          :class="{ on: hover.on && !dragging }"
+          :style="{ transform: `translateX(${hover.x}px)` }"
+          aria-hidden="true"
+        ><b>{{ mmss(hover.t) }}</b></span>
       </div>
       <span>{{ mmss(length) }}</span>
     </div>
@@ -1326,5 +1376,118 @@ const actions = computed(() => [
 @media (prefers-reduced-motion: reduce) {
   .sv-boost .chev path,
   .sv-buf { animation: none; }
+}
+
+/*
+ * ---- 桌面布局（≥ 1024px）：每一条是页面正中的一张 9:16 卡片 ----
+ * 卡片宽 --sv-cw、上下留 --sv-gap、圆角 --sv-r，都由 ShortView 给（全屏时没有留白和圆角）。
+ * 卡片本身不裁切（overflow: visible）：右侧一列按钮放到卡片外面的右边，圆底按钮 + 下面一行字，和卡片底边对齐；
+ * 会超出卡片的只有模糊底图（inset -10%），用 clip-path 裁回卡片的圆角矩形（clip-path 在 filter 之后，模糊边缘不露出来）。
+ * 卡片里的文字、进度条离卡片四边 16px。这几段放在样式的最后：和上面「手机横过来」那段同名的规则以这里为准
+ * （窗口矮到 500px 以下时那段藏头像、标题只留一行照样生效）。
+ */
+@media (min-width: 1024px) {
+  .sv { width: var(--sv-cw); margin: 0 auto; overflow: visible; border-radius: var(--sv-r); }
+  .sv::before { border-radius: var(--sv-r); }
+  .sv-bg,
+  .sv-video,
+  .sv-poster { border-radius: var(--sv-r); }
+  /* inset -10%：底图比卡片四边各大出卡片尺寸的 10%，裁掉 10 / 120 */
+  .sv.real .sv-bg,
+  .sv.still.poster-ok .sv-bg { clip-path: inset(8.3333% round var(--sv-r)); }
+  .sv-click { cursor: pointer; }
+
+  .sv-meta { left: 16px; right: 16px; bottom: 52px; }
+  .sv-name { font-size: 16px; line-height: 22px; }
+  .sv-tags button { font-size: 13px; }
+  .sv-title { font-size: 14px; line-height: 20px; }
+  .sv-prog { left: 16px; right: 16px; bottom: 12px; font-size: 12px; }
+
+  /* 进度条上悬停的时间：外层跟着鼠标平移，里层居中 */
+  .sv-prog .tip {
+    position: absolute;
+    left: 0;
+    bottom: 50%;
+    margin-bottom: 9px;
+    opacity: 0;
+    transition: opacity var(--dur-1) var(--ease-out);
+    pointer-events: none;
+  }
+  .sv-prog .tip.on { opacity: 1; }
+  .sv-prog .tip b {
+    display: block;
+    padding: 0 7px;
+    border-radius: 6px;
+    background: rgba(22, 22, 22, .88);
+    color: #fff;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 22px;
+    transform: translateX(-50%);
+  }
+
+  /* 右侧一列在卡片外面（底边和卡片对齐，全屏时离屏幕底边留一点）：拖进度条时不用让开 */
+  .sv-side { right: auto; left: calc(100% + 12px); bottom: var(--sv-side-b, 0px); gap: 14px; width: 64px; }
+  .sv.scrubbing .sv-side { opacity: 1; }
+  .sv-au { margin-bottom: 4px; }
+  .sv-author { width: 48px; height: 48px; }
+  .sv-act { gap: 6px; color: var(--t3); font-size: 12px; line-height: 16px; text-shadow: none; }
+  .sv-act.on { color: var(--accent); }
+  .sv-act .ico {
+    display: grid;
+    place-items: center;
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    background: #1f1f1f;
+    color: var(--t1);
+    transition: transform var(--dur-2) var(--ease-spring), background-color var(--dur-2) var(--ease-out);
+  }
+  .sv-act svg { width: 24px; height: 24px; stroke-width: 2; }
+}
+/* 窗口比较矮（右侧一列放不下 48px 的圆）：收小一号 */
+@media (min-width: 1024px) and (max-height: 700px) {
+  .sv-side { gap: 10px; }
+  .sv-author { width: 42px; height: 42px; }
+  .sv-act { gap: 4px; }
+  .sv-act .ico { width: 40px; height: 40px; }
+  .sv-act svg { width: 21px; height: 21px; }
+}
+/* 很高的窗口（卡片 1100px 以上，如 2560×1440）：卡片里的字、右侧一列都大一号，不让手机尺寸的小字飘在大卡片里 */
+@media (min-width: 1024px) and (min-height: 1200px) {
+  .sv-meta { left: 20px; right: 20px; bottom: 64px; }
+  .sv-unmute,
+  .sv-chip { height: 34px; margin-bottom: 16px; padding: 0 15px 0 14px; border-radius: 11px; font-size: 13px; }
+  .sv-unmute svg { width: 16px; height: 16px; }
+  .sv-chip { padding-right: 10px; }
+  .sv-full { height: 32px; margin-top: 12px; }
+  .sv-name { margin-bottom: 8px; font-size: 18px; line-height: 26px; }
+  .sv-tags button { font-size: 14px; line-height: 20px; }
+  .sv-title { font-size: 16px; line-height: 24px; }
+  .sv-prog { left: 20px; right: 20px; bottom: 16px; font-size: 13px; }
+  .sv-ctl { gap: 44px; }
+  .sv-ctl .pb { width: 64px; height: 64px; }
+  .sv-ctl .pb svg { width: 29px; height: 29px; }
+  .sv-ctl .sk { width: 32px; height: 32px; }
+  .sv-side { left: calc(100% + 16px); gap: 18px; width: 72px; }
+  .sv-author { width: 56px; height: 56px; }
+  .sv-act { gap: 8px; font-size: 13px; line-height: 18px; }
+  .sv-act .ico { width: 56px; height: 56px; }
+  .sv-act svg { width: 27px; height: 27px; }
+}
+@media (min-width: 1024px) and (hover: hover) {
+  .sv-act:hover .ico { background: #2c2c2c; }
+  .sv-name:hover { text-decoration: underline; text-underline-offset: 3px; }
+  .sv-tags button { transition: color var(--dur-2) var(--ease-out); }
+  .sv-tags button:hover { color: #fff; }
+  .sv-unmute,
+  .sv-chip { transition: background-color var(--dur-2) var(--ease-out); }
+  .sv-unmute:hover,
+  .sv-nosrc:hover { background: rgba(48, 48, 48, .9); }
+  .sv-full:hover { background: rgba(255, 255, 255, .26); }
+  .sv-ctl .pb:hover { background: rgba(84, 84, 84, .6); }
+  /* 鼠标移到进度条上：线变粗一点、露出圆点（拖动时是 2 倍粗） */
+  .sv-prog .track:hover .bar { transform: scaleY(1.67); }
+  .sv-prog .track:hover .knob b { transform: scale(1); transition: transform var(--dur-2) var(--ease-spring); }
 }
 </style>

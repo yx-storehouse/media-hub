@@ -26,11 +26,15 @@ import { useAuthStore } from '@/stores/auth'
 import { rememberVideo } from '@/components/video/preview'
 import { haptic } from '@/utils/motion'
 import { cameBack, useSlider, cover, vRise, pop, scrollBehavior } from '@/components/home/motion'
+import { isDesktop } from '@/composables/useDesktop'
 
 /*
  * 专题页（#/topic/:id?sort=1）：头图 + 播放 / 收藏数 +「播放全部」「收藏」，下面是排序标签和两列视频，滚到底自动加载下一页。
  * 排序记在地址栏（replace，不多一条历史），刷新 / 返回还是同一个排序；省略 = 第一个（默认）。
  * 从这里打开的视频带上所在列表（?list=topic:专题id&i=第几条&sort=排序），播放页据此接着播下一条。
+ *
+ * 桌面布局（≥ 1024px）：头图是内容区里的一条圆角横幅（高度随窗口在 200–300px 之间），标题、按钮放大；
+ * 「视频 (n)」、吸顶的排序栏、网格都和横幅左边对齐（同 BackHeader 的对齐算法）。只改样式，DOM 和手机一样。
  */
 defineOptions({ name: 'TopicView' })
 
@@ -300,7 +304,8 @@ onBeforeRouteUpdate(to => {
           </div>
           <div v-rise.self="{ delay: 80 }" class="info">
             <div class="ti">
-              <h1>{{ topic.name }}</h1>
+              <!-- 名字太长时一行放不下（省略号）：鼠标停上去看全名 -->
+              <h1 :title="topic.name">{{ topic.name }}</h1>
               <div class="st">{{ stats }}</div>
             </div>
             <div class="btns">
@@ -318,7 +323,7 @@ onBeforeRouteUpdate(to => {
         <button v-if="failed.retry" type="button" class="retry" @click="load(route.params.id)">重试</button>
         <button v-else type="button" class="retry" @click="back">返回</button>
       </div>
-      <SkeletonGrid v-else-if="!topic" class="tp-sk" :count="6" gap="g11" />
+      <SkeletonGrid v-else-if="!topic" class="tp-sk" :count="isDesktop ? 12 : 6" gap="g11" />
       <template v-else>
         <div ref="listEl" class="vtitle">视频 ({{ videoCount }})</div>
         <!-- 排序吸顶：滚到下面也能换排序；再点当前排序回到列表开头 -->
@@ -338,14 +343,15 @@ onBeforeRouteUpdate(to => {
         </div>
         <!--
           换排序：旧列表留着等新的，快的直接换成新列表（错峰浮现），慢了（250ms）才淡入骨架。
-          骨架 10 张（5 行，比一屏高）：排序吸顶时点排序会滚到列表开头，骨架矮了页面就短了，滚动位置被压回顶上、排序条往下跳
+          骨架 10 张（5 行，比一屏高）：排序吸顶时点排序会滚到列表开头，骨架矮了页面就短了，滚动位置被压回顶上、排序条往下跳。
+          桌面布局一行 4–6 张：36 张（2560 宽也有 6 行）才比一屏高
         -->
         <ContentSwap :pending="videos.total === null && !videos.error">
           <div v-if="videos.total === null && videos.error" class="empty">
             加载失败，请检查网络
             <button type="button" class="retry" @click="videos.more()">重试</button>
           </div>
-          <SkeletonGrid v-else-if="videos.total === null" :count="10" gap="g11" />
+          <SkeletonGrid v-else-if="videos.total === null" :count="isDesktop ? 36 : 10" gap="g11" />
           <div v-else-if="!videos.list.length" v-rise.self class="empty">专题里还没有视频</div>
           <div v-else :key="`list${sortKey}`">
             <div v-rise class="grid g11">
@@ -431,4 +437,61 @@ onBeforeRouteUpdate(to => {
 .tp-chips .chip:active .lb { opacity: .6; }
 /* 专题信息还没回来：骨架接在头图下面，位置和真列表差不多 */
 .tp-sk { padding-top: 88px; }
+
+/*
+ * ---- 桌面布局（≥ 1024px）----
+ * 内容左边缘：至少 --desk-pad，宽屏时跟着居中的 --desk-max 内容走（和 .grid / BackHeader 一样的算法）。
+ * 横幅用外边距对齐；吸顶的排序栏要铺满整行（盖住滚过去的卡片），所以用内边距对齐。
+ */
+@media (min-width: 1024px) {
+  .hero {
+    height: clamp(200px, 17vw, 300px);
+    margin: 16px max(var(--desk-pad), calc((100% - var(--desk-max)) / 2 + var(--desk-pad))) 0;
+    border-radius: 16px;
+    /* 圆角裁住正在缩放的封面（老 Safari 只认 overflow 时，合成层动画期间会露出直角） */
+    clip-path: inset(0 round 16px);
+  }
+  .hero::after { background: linear-gradient(180deg, rgba(0, 0, 0, .28) 0%, rgba(10, 10, 10, 0) 30%, rgba(10, 10, 10, .55) 66%, rgba(10, 10, 10, .9) 100%); }
+  .back { left: 14px; top: 14px; width: 36px; height: 36px; transition: background-color var(--dur-2) var(--ease-out); }
+  .back svg { width: 20px; height: 20px; stroke-width: 2.8; }
+  .info { left: 28px; right: 24px; bottom: 22px; gap: 24px; }
+  .info h1 { font-size: 28px; line-height: 38px; }
+  .info .st { margin-top: 2px; font-size: 14px; line-height: 22px; }
+  .btns { gap: 12px; }
+  .b-play { width: auto; height: 40px; padding: 0 22px 0 18px; border-radius: 20px; gap: 6px; font-size: 14px; }
+  .b-play svg { width: 14px; height: 14px; }
+  .b-fav { width: auto; height: 40px; padding: 0 18px 0 16px; border-radius: 20px; gap: 6px; font-size: 14px; transition: border-color var(--dur-2) var(--ease-out), background-color var(--dur-2) var(--ease-out); }
+  .b-fav svg { width: 16px; height: 16px; }
+
+  /* 「视频 (n)」：和首页、搜索、播放页的分区标题同一个样子（前面一条 3×16 的竖条，16px / 600） */
+  .vtitle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0 max(var(--desk-pad), calc((100% - var(--desk-max)) / 2 + var(--desk-pad)));
+    padding: 28px 0 0;
+    border-top: 0;
+    font-size: 16px;
+    font-weight: 600;
+    line-height: 24px;
+  }
+  .vtitle::before { content: ''; flex: none; width: 3px; height: 16px; border-radius: 2px; background: var(--accent); }
+  .tp-chips { gap: 10px; padding: 14px max(var(--desk-pad), calc((100% - var(--desk-max)) / 2 + var(--desk-pad))) 18px; }
+  .tp-bar { top: 14px; }
+  .tp-chips + .m-swap { padding-top: 6px; }
+  /* 骨架接在横幅下面：「视频 (n)」+ 排序栏的高度（胶囊是公共的 32px 高） */
+  .tp-sk { padding-top: 122px; }
+}
+@media (min-width: 1024px) and (hover: hover) {
+  .back:hover { background: rgba(0, 0, 0, .62); }
+  .b-play { transition: background-color var(--dur-2) var(--ease-out); }
+  .b-play:hover { background: #dcdcdc; }
+  .b-fav:hover { border-color: rgba(255, 255, 255, .75); background: rgba(0, 0, 0, .5); }
+  /*
+   * 排序胶囊的字是 difference 混合（见上面）：底色由公共样式变成 #1f1f1f 时，字要跟着换成白色才是变亮（|#ff - #1f| ≈ #e0），
+   * 照旧用 #b9 反而变暗
+   */
+  .tp-chips[data-slider] > .chip:not(.on) .lb { transition: opacity var(--dur-1) var(--ease-out), color var(--dur-2) var(--ease-out); }
+  .tp-chips[data-slider] > .chip:not(.on):hover .lb { color: #fff; }
+}
 </style>

@@ -1,7 +1,8 @@
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import { START_LOCATION } from 'vue-router'
 import { MAIN_TABS } from '@/config/nav'
 import { reducedMotion, Z } from '@/utils/motion'
+import { isDesktop } from '@/composables/useDesktop'
 
 /*
  * 页面切换用哪种动效（App.vue 的路由出口和底部导航用同一个名字，样式在 styles/motion.css）：
@@ -19,7 +20,14 @@ import { reducedMotion, Z } from '@/utils/motion'
  *   - 代码里 push / replace：比较跳转前后的 position。
  * 「下一篇」「下一个」这类替换当前记录、但还是同一个页面组件的跳转，页面组件不换，路由出口不做动画，
  * 由页面自己处理内容的更替。
+ *
+ * 桌面布局（窗口 ≥ 1024px，composables/useDesktop.js）：顶栏和左侧导航不动，内容区不做横向滑动——
+ * pg-fwd / pg-back / pg-tab 在路由出口上一律换成 pgd（旧页很快淡出，新页晚半拍淡入、从下面 8px 浮上来，样式在 motion.css），
+ * pg-hero / pg-hero-back 不变。pageMotion.name 记的仍然是上面那些「语义」名字，别处的判断不用分桌面 / 手机。
  */
+
+/** 桌面布局下路由出口实际用的动效名 */
+export const deskTransitionName = n => (!n || n === 'pg-hero' || n === 'pg-hero-back' ? n : 'pgd')
 
 /** 最近一次页面切换：列表入场动效（v-rise）、共享元素过渡等用它判断这一次是怎么切过来的 */
 export const pageMotion = {
@@ -45,17 +53,26 @@ export const HERO_Z = Z.hero
  *   1.5 秒内没有跳转就自动作废，不会留到之后某次不相干的跳转上；
  * - 系统开了「减少动态效果」、或者浏览器自己已经滑过（iOS 边缘右滑返回）时不用它，照常规则（这两种都是 ''）；
  * - 跳转完成后看 pageMotion.name 才知道实际用的是什么；样式见 styles/motion.css 的「共享元素过渡」。
+ * - 桌面布局（≥ 1024px）上默认不接受（返回 false，走普通的 pgd 换页）：hero.js 的落点是按「页面贴着 #app 左上角」
+ *   算的，桌面上页面让出了顶栏和左侧导航，封面会飞到错的位置、盖过顶栏。hero.js 改好桌面的落点以后，
+ *   在模块里调一次 allowDeskHero() 就打开。
  */
 const HERO_NAMES = ['pg-hero', 'pg-hero-back']
 const OVERRIDE_TTL = 1500
 let override = ''
 let overrideTimer = 0
+let deskHero = false
+
+/** hero.js 支持桌面布局以后调一次：桌面上也接受 pg-hero / pg-hero-back */
+export function allowDeskHero(on = true) {
+  deskHero = !!on
+}
 
 /** 指定下一次页面切换的动效（一次性），返回是否接受 */
 export function overrideNextTransition(name) {
   clearTimeout(overrideTimer)
   override = ''
-  if (!HERO_NAMES.includes(name) || reducedMotion()) return false
+  if (!HERO_NAMES.includes(name) || reducedMotion() || (isDesktop.value && !deskHero)) return false
   override = name
   overrideTimer = setTimeout(() => { override = '' }, OVERRIDE_TTL)
   return true
@@ -131,13 +148,19 @@ export function usePageTransition(router) {
       if (d === 0) d = isTab(to) && !isTab(from) ? -1 : 1
       n = d < 0 ? 'pg-back' : 'pg-fwd'
     }
-    name.value = n
+    name.value = isDesktop.value ? deskTransitionName(n) : n
     pageMotion.name = n
     pageMotion.at = performance.now()
     pageMotion.rendering = true
     // 新页面在这之后的微任务里渲染、挂载；一个宏任务之后就不算「首次渲染」了
     setTimeout(() => { pageMotion.rendering = false })
   })
+
+  /*
+   * 窗口跨过桌面断点（1024px）时：上一次的动效名作废。不然底部导航（拉窄时重新出现）会带着上一次换页的类名
+   * 「进场」——比如从右边滑进来；路由出口下一次换页时会重新算。
+   */
+  watch(isDesktop, () => { name.value = '' })
 
   return name
 }

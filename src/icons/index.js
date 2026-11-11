@@ -76,5 +76,22 @@ export const icons = {
   iHelp: s('<circle cx="12" cy="12" r="9"/><path d="M9.4 9.4a2.7 2.7 0 1 1 3.6 2.5c-.7.3-1 .8-1 1.6M12 17h.01"/>'),
   iInfo: s('<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.6h.01"/>'),
   /* password field */
-  lock: s('<rect x="4.5" y="10.5" width="15" height="10.5" rx="2.4"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3M12 14.6v2.6"/>')
+  lock: s('<rect x="4.5" y="10.5" width="15" height="10.5" rx="2.4"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3M12 14.6v2.6"/>'),
+
+  /* desktop layout (top bar, sidebar, pages on wide screens) */
+  menu: s('<path d="M3.8 6.5h16.4M3.8 12h16.4M3.8 17.5h16.4"/>'),
+  chevU: s('<path d="m5 15 7-7 7 7"/>'),
+  arrowUp: s('<path d="M12 19.5v-15M5.6 10.9 12 4.5l6.4 6.4"/>'),
+  arrowDown: s('<path d="M12 4.5v15M5.6 13.1 12 19.5l6.4-6.4"/>'),
+  arrowL: s('<path d="M19.5 12h-15M10.9 5.6 4.5 12l6.4 6.4"/>'),
+  arrowR: s('<path d="M4.5 12h15M13.1 5.6l6.4 6.4-6.4 6.4"/>'),
+  logout: s('<path d="M9.6 20.5H6.2a2.2 2.2 0 0 1-2.2-2.2V5.7a2.2 2.2 0 0 1 2.2-2.2h3.4"/><path d="M15.6 16.6 20.2 12l-4.6-4.6M20.2 12H9.4"/>'),
+  external: s('<path d="M14 3.6h6.4V10M20.4 3.6l-9 9"/><path d="M18.4 13.8v4.5a2.2 2.2 0 0 1-2.2 2.2H5.7a2.2 2.2 0 0 1-2.2-2.2V7.8a2.2 2.2 0 0 1 2.2-2.2h4.5"/>'),
+  user: s('<circle cx="12" cy="8" r="4.2"/><path d="M4.6 20.6a7.4 7.4 0 0 1 14.8 0"/>'),
+  userCheck: s('<circle cx="9.6" cy="7.8" r="4"/><path d="M2.6 20.4a7 7 0 0 1 11.6-5.3"/><path d="m15.4 18.2 2.3 2.3 4.4-4.5"/>'),
+  check: s('<path d="m4.8 12.6 4.6 4.6L19.2 7.4"/>'),
+  sort: s('<path d="M7.2 4.5v15M3.8 16.1l3.4 3.4 3.4-3.4M16.8 19.5v-15M13.4 7.9l3.4-3.4 3.4 3.4"/>'),
+  grid: s('<rect x="3.5" y="3.5" width="7" height="7" rx="1.8"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.8"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.8"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.8"/>'),
+  theater: s('<rect x="2.5" y="6" width="19" height="12" rx="2.4"/>'),
+  keyboard: s('<rect x="2.5" y="5.5" width="19" height="13" rx="2.4"/><path d="M6.5 9.5h.01M10 9.5h.01M14 9.5h.01M17.5 9.5h.01M6.5 13h.01M17.5 13h.01M10 13h4" stroke-width="2.2"/>')
 }

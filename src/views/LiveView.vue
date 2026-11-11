@@ -1,8 +1,10 @@
 <script setup>
-import { ref, shallowRef } from 'vue'
+import { ref, shallowRef, watch, nextTick } from 'vue'
 import { getLiveTabs, getLives } from '@/api'
 import { toast } from '@/composables/useToast'
 import { useKeepScroll } from '@/composables/useKeepScroll'
+import { useScrollEdge } from '@/components/motion/scrollEdge'
+import { isDesktop } from '@/composables/useDesktop'
 import Cover from '@/components/Cover.vue'
 import Icon from '@/components/Icon.vue'
 
@@ -36,11 +38,19 @@ function selectTab(i) {
 
 getLiveTabs().then(list => { tabs.value = list }).catch(() => {})
 loadLives()
+
+/*
+ * 桌面布局：标签行平时没有底线，卡片从它下面滚过去时才出现细线和淡阴影（和社区、BackHeader 一样，
+ * components/motion/scrollEdge.js）。手机布局不看（底线一直都在，也不往滚动区里放哨兵）；窗口跨过 1024px 时重新取一次。
+ */
+const hd = ref(null)
+const edge = useScrollEdge(hd, () => (isDesktop.value ? [scroller.value] : []))
+watch(isDesktop, () => nextTick(edge.refresh))
 </script>
 
 <template>
   <div class="page live">
-    <header class="bar-hd">
+    <header ref="hd" class="bar-hd" :class="{ 'm-edge': isDesktop }">
       <div class="ct-tabs" role="tablist">
         <button
           v-for="(name, i) in tabs"
@@ -54,7 +64,8 @@ loadLives()
           {{ name }}
         </button>
       </div>
-      <button class="ct-search round" aria-label="搜索" @click="toast('搜索功能即将上线')"><Icon name="search" /></button>
+      <!-- 桌面布局顶栏里就有搜索框：这个手机上的搜索按钮藏起来（.m-only） -->
+      <button class="ct-search round m-only" aria-label="搜索" @click="toast('搜索功能即将上线')"><Icon name="search" /></button>
     </header>
 
     <div ref="scroller" class="scroll">
@@ -132,5 +143,42 @@ loadLives()
 /* iOS 14 / WebView 87 兜底：3:4（common.css 的 .cv::before 改个比例） */
 @supports not (aspect-ratio: 1 / 1) {
   .lv .cv::before { padding-top: 133.3333%; }
+}
+
+/*
+ * ---- 桌面布局（≥ 1024px）----
+ * 分类标签一行靠左（和下面的卡片、其他页面的内容边对齐），64px 高、平时没有底线（和社区的标签行一样）；
+ * 3:4 的直播卡片按 200px 自动排列数（1440 宽的窗口一行 5 张），最宽 --desk-max、居中。
+ * 鼠标移到卡片上封面在圆角里放大一点（和视频卡片一样）。
+ */
+@media (min-width: 1024px) {
+  .live .bar-hd {
+    position: relative;
+    z-index: 1;
+    height: 64px;
+    padding: 0 max(var(--desk-pad), calc((100% - var(--desk-max)) / 2 + var(--desk-pad)));
+    border-bottom-color: transparent;
+  }
+  .live .ct-tabs { gap: 28px; }
+
+  .lv-grid {
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 24px 16px;
+    max-width: var(--desk-max);
+    margin: 0 auto;
+    padding: 8px var(--desk-pad) 0;
+  }
+  .lv .cv { border-radius: 12px; }
+  .badge { left: 10px; top: 10px; height: 20px; padding: 0 8px 0 7px; border-radius: 10px; font-size: 11px; }
+  .vw { right: 10px; top: 10px; height: 20px; padding: 0 8px; border-radius: 10px; font-size: 12px; line-height: 20px; }
+  .bt { left: 12px; right: 12px; bottom: 12px; }
+  .bt b { font-size: 15px; line-height: 22px; }
+  .bt span { font-size: 13px; line-height: 18px; }
+  .live .pad-b { height: 32px; }
+}
+@media (min-width: 1024px) and (hover: hover) {
+  .lv .cv > :deep(img) { transition: opacity var(--dur-3) var(--ease-out), filter var(--dur-3) var(--ease-out), transform var(--dur-4) var(--ease-out); }
+  .lv .cv > :deep(img.now) { transition: transform var(--dur-4) var(--ease-out); }
+  .lv:hover .cv > :deep(img) { transform: scale(1.03); }
 }
 </style>

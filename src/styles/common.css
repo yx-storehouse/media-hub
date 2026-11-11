@@ -179,3 +179,99 @@
 .m-skel-leave-active.sk-grid { transition-delay: calc(var(--stagger) * 7); }
 /* 跟着选中项滑动的块（useSlider）：位置、宽度由脚本放好之前不显示 */
 .m-bar { position: absolute; left: 0; opacity: 0; transform-origin: 0 0; pointer-events: none; }
+
+/*
+ * ---- 桌面布局（窗口 ≥ 1024px）的公共样式 ----
+ * 只在桌面上生效，手机上这些类什么都不做（可以直接加在已有元素上）。尺寸变量见 styles/tokens.css。
+ *   .grid        视频网格：按 --desk-card（232px）自动排列数，列间距 16px、行间距 28px，最宽 --desk-max、居中
+ *   .vc / .tt    卡片：鼠标移上去封面在圆角里放大一点、标题变亮；标题 14px / 20px，固定占两行
+ *   .desk-wrap   居中的内容块：最宽 --desk-max（含左右 --desk-pad 留白）
+ *   .desk-col    居中的单栏：内容宽 --desk-col（720px），左右至少留 --desk-pad
+ *   .desk-hd     页面标题行（没有 BackHeader 的页面用）：64px 高、20px 标题，和 .desk-wrap 的内容对齐
+ *   .desk-title / .desk-sec   页面标题 20px / 600、分区标题 16px / 600
+ *   .hs.d-wrap   横向滚动的标签行：桌面上直接折行显示全部（不用横着滚）；要保留单行就用 components/desk/HsArrows.vue
+ *   .m-only / .d-only         只在手机 / 只在桌面显示（base.css）
+ */
+@media (min-width: 1024px) {
+  .grid {
+    grid-template-columns: repeat(auto-fill, minmax(var(--desk-card), 1fr));
+    column-gap: 16px;
+    row-gap: 28px;
+    max-width: var(--desk-max);
+    margin-left: auto;
+    margin-right: auto;
+    padding: 0 var(--desk-pad);
+  }
+  .grid.g16, .grid.g11 { row-gap: 28px; }
+  /* 手机上占满一行的大卡片：桌面上整行宽的 16:10 封面比窗口还高，和别的卡片一样大 */
+  .vc.big { grid-column: auto; }
+  .cv { border-radius: 10px; }
+  .dur { right: 8px; bottom: 8px; height: 20px; padding: 0 7px; font-size: 12px; line-height: 20px; }
+  .tt { min-height: 40px; margin-top: 10px; font-size: 14px; line-height: 20px; }
+  .vc.big .tt { min-height: 40px; }
+
+  .desk-wrap {
+    width: 100%;
+    max-width: var(--desk-max);
+    margin-left: auto;
+    margin-right: auto;
+    padding-left: var(--desk-pad);
+    padding-right: var(--desk-pad);
+  }
+  .desk-col {
+    width: 100%;
+    max-width: calc(var(--desk-col) + 2 * var(--desk-pad));
+    margin-left: auto;
+    margin-right: auto;
+    padding-left: var(--desk-pad);
+    padding-right: var(--desk-pad);
+  }
+  .desk-hd {
+    display: flex;
+    flex: none;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    max-width: var(--desk-max);
+    height: 64px;
+    margin: 0 auto;
+    padding: 0 var(--desk-pad);
+    font-size: 20px;
+    font-weight: 600;
+    line-height: 28px;
+  }
+  .desk-title { font-size: 20px; font-weight: 600; line-height: 28px; }
+  .desk-sec { font-size: 16px; font-weight: 600; line-height: 24px; }
+
+  /* 横向标签行折行显示：不用横着滚，也就不需要 shift + 滚轮 */
+  .hs.d-wrap { flex-wrap: wrap; overflow: visible; }
+
+  /*
+   * 筛选胶囊：桌面上各页统一一个尺寸（32px 高、圆角 16、左右 16px），鼠标好点，首页分类、同城、创作者、专题一样大。
+   * 跟着选中项滑动的白底（.chips 里的 .m-bar，useSlider 只放位置和宽度）高度、圆角跟着改；
+   * 它的 top 各页按自己的上边距给。[data-slider] 是滑块第一次放好时加上的（之前滑块不显示），用它把优先级抬过各页 scoped 的手机值。
+   */
+  .chip { height: 32px; padding: 0 16px; border-radius: 16px; }
+  .chips[data-slider] > .m-bar { height: 32px; border-radius: 16px; }
+
+  /* 空状态 / 加载失败：桌面上留白多一点 */
+  .empty { padding: 96px 0; font-size: 14px; }
+  .empty .retry { height: 36px; margin-top: 16px; padding: 0 20px; border-radius: 18px; font-size: 14px; }
+}
+
+/* 鼠标悬停（只在桌面、真的有鼠标时）：能点的东西都有反应，但都很克制 */
+@media (min-width: 1024px) and (hover: hover) {
+  .vc .tt { transition: color var(--dur-2) var(--ease-out); }
+  .vc:hover .tt { color: var(--t1); }
+  /* 封面在自己的圆角里放大一点（只放大照片，时长角标不动）；缓存里直接显示的图（.now）也要有这段过渡 */
+  .vc .cv > img { transition: opacity var(--dur-3) var(--ease-out), filter var(--dur-3) var(--ease-out), transform var(--dur-4) var(--ease-out); }
+  .vc .cv > img.now { transition: transform var(--dur-4) var(--ease-out); }
+  .vc:hover .cv > img { transform: scale(1.03); }
+
+  .chip, .pill, .opt, .btn-soft, .empty .retry, .ct-search { transition: background-color var(--dur-2) var(--ease-out), color var(--dur-2) var(--ease-out); }
+  .chip:not(.on):hover, .opt:not(.on):hover { background: #1f1f1f; color: var(--t3); }
+  .pill:hover, .empty .retry:hover, .ct-search:hover { background: #1f1f1f; color: var(--t3); }
+  .btn-soft:hover { background: #262626; color: var(--t3); }
+  .ct-tab { transition: color var(--dur-2) var(--ease-out); }
+  .ct-tab:not(.on):hover { color: var(--t3); }
+}

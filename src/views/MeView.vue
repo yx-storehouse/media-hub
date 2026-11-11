@@ -11,6 +11,8 @@ import Icon from '@/components/Icon.vue'
 import ConfirmSheet from '@/components/me/ConfirmSheet.vue'
 import { countUp } from '@/components/home/motion'
 import { inApp, openServerSettings, hasAndroidApk, APK_URL } from '@/utils/shell'
+import { isDesktop } from '@/composables/useDesktop'
+import { trapTab } from '@/components/desk/modal'
 
 defineOptions({ name: 'MeView' })
 
@@ -60,6 +62,9 @@ const vCount = {
     cancelAnimationFrame(el._countRaf)
   }
 }
+
+/* 桌面布局：登录了但没有头像时，和顶栏右上角一样显示名字的第一个字 */
+const initial = computed(() => [...(auth.displayName || '?').trim()][0] || '?')
 
 const stats = computed(() => {
   const got = profile.value?.stats || []
@@ -127,6 +132,9 @@ const formErr = ref('')
 const changing = ref(false)
 const inputs = {}
 let returnFocus = null
+/* 桌面上改密码是居中的对话框：键盘 Tab 只在它里面循环（components/desk/modal.js） */
+const pwdSheet = ref(null)
+const onPwdKey = e => { if (isDesktop.value) trapTab(e, pwdSheet.value) }
 
 function resetPwd() {
   for (const f of PWD_FIELDS) {
@@ -230,90 +238,100 @@ onActivated(() => {
     </div>
 
     <div v-else ref="scroller" class="scroll">
-      <!-- 未登录：一个入口，点开登录弹层 -->
-      <div v-if="!auth.loggedIn" class="me-top">
-        <div class="me-av guest"><Icon name="tMe" /></div>
-        <div>
-          <div class="me-nm">未登录</div>
-          <div class="me-id">登录后可收藏、同步观看记录</div>
+      <!--
+        桌面布局（≥ 1024px）：整页是居中的一栏（.desk-col，内容 720px）；头像、名字和下面三格统计拼成一张账号卡片。
+        手机上这一层没有任何样式（不影响原来的排版）
+      -->
+      <div class="me-col desk-col">
+        <!-- 未登录：一个入口，点开登录弹层 -->
+        <div v-if="!auth.loggedIn" class="me-top">
+          <div class="me-av guest"><Icon name="tMe" /></div>
+          <div>
+            <div class="me-nm">未登录</div>
+            <div class="me-id">登录后可收藏、同步观看记录</div>
+          </div>
+          <button class="me-login m-press" @click="auth.requireLogin()">登录</button>
         </div>
-        <button class="me-login m-press" @click="auth.requireLogin()">登录</button>
-      </div>
 
-      <div v-else class="me-top">
-        <Cover v-if="profile?.avatar?.src || profile?.avatar?.fallback" class="me-av" v-bind="profile.avatar" eager />
-        <div v-else class="me-av guest"><Icon name="tMe" /></div>
-        <div class="me-who">
-          <div class="me-nm">{{ auth.displayName }}</div>
-          <div class="me-id">
-            账号 {{ auth.user?.uid }}
-            <em v-if="auth.isAdmin" class="role">管理员</em>
+        <div v-else class="me-top">
+          <Cover v-if="profile?.avatar?.src || profile?.avatar?.fallback" class="me-av" v-bind="profile.avatar" eager />
+          <div v-else-if="isDesktop" class="me-av ini" aria-hidden="true">{{ initial }}</div>
+          <div v-else class="me-av guest"><Icon name="tMe" /></div>
+          <div class="me-who">
+            <div class="me-nm">{{ auth.displayName }}</div>
+            <div class="me-id">
+              账号 {{ auth.user?.uid }}
+              <em v-if="auth.isAdmin" class="role">管理员</em>
+            </div>
           </div>
         </div>
-      </div>
 
-      <!-- 观看历史 / 我的收藏 / 我的关注：数字是实时统计，点进对应列表 -->
-      <nav class="me-stat" aria-label="我的内容">
-        <template v-for="s in stats" :key="s.key">
-          <RouterLink v-if="auth.loggedIn" class="m-hold" :to="s.to">
-            <b v-count="s.value" />
-            <span>{{ s.label }}</span>
-          </RouterLink>
-          <button v-else type="button" class="m-hold" @click="go(s.to)">
-            <b v-count="s.value" />
-            <span>{{ s.label }}</span>
-          </button>
-        </template>
-      </nav>
+        <!-- 观看历史 / 我的收藏 / 我的关注：数字是实时统计，点进对应列表 -->
+        <nav class="me-stat" aria-label="我的内容">
+          <template v-for="s in stats" :key="s.key">
+            <RouterLink v-if="auth.loggedIn" class="m-hold" :to="s.to">
+              <b v-count="s.value" />
+              <span>{{ s.label }}</span>
+            </RouterLink>
+            <button v-else type="button" class="m-hold" @click="go(s.to)">
+              <b v-count="s.value" />
+              <span>{{ s.label }}</span>
+            </button>
+          </template>
+        </nav>
 
-      <div class="me-list">
-        <button v-for="c in CELLS" :key="c.label" class="m-hold me-cell" @click="open(c)">
-          <Icon :name="c.icon" />
-          <span>{{ c.label }}</span>
-          <Icon name="chevR" class="go" />
-        </button>
-      </div>
-
-      <!-- App 里：回到 App 的启动页换服务器地址；安卓浏览器里：下载安卓 App（服务器上有安装包时） -->
-      <div v-if="inApp || showApk" class="me-list">
-        <button v-if="inApp" class="m-hold me-cell" @click="openServerSettings">
-          <Icon name="refresh" />
-          <span>切换服务器</span>
-          <em class="me-sub">{{ serverHost }}</em>
-          <Icon name="chevR" class="go" />
-        </button>
-        <a v-else class="m-hold me-cell" :href="APK_URL" download="Reel.apk">
-          <Icon name="iDownload" />
-          <span>下载安卓 App</span>
-          <Icon name="chevR" class="go" />
-        </a>
-      </div>
-
-      <!-- 账号相关：管理入口、修改密码；退出登录单独放在最下面，点了先确认，避免误触 -->
-      <template v-if="auth.loggedIn">
         <div class="me-list">
-          <!-- 管理后台是独立页面（admin.html，桌面布局），新窗口打开，不打断手机端的浏览状态 -->
-          <a v-if="auth.isAdmin" class="m-hold me-cell" href="./admin.html" target="_blank" rel="noopener">
-            <Icon name="gear" />
-            <span>管理后台</span>
+          <button v-for="c in CELLS" :key="c.label" class="m-hold me-cell" @click="open(c)">
+            <Icon :name="c.icon" />
+            <span>{{ c.label }}</span>
+            <Icon name="chevR" class="go" />
+          </button>
+        </div>
+
+        <!-- App 里：回到 App 的启动页换服务器地址；安卓浏览器里：下载安卓 App（服务器上有安装包时） -->
+        <div v-if="inApp || showApk" class="me-list">
+          <button v-if="inApp" class="m-hold me-cell" @click="openServerSettings">
+            <Icon name="refresh" />
+            <span>切换服务器</span>
+            <em class="me-sub">{{ serverHost }}</em>
+            <Icon name="chevR" class="go" />
+          </button>
+          <a v-else class="m-hold me-cell" :href="APK_URL" download="Reel.apk">
+            <Icon name="iDownload" />
+            <span>下载安卓 App</span>
             <Icon name="chevR" class="go" />
           </a>
-          <button v-if="auth.isAdmin" class="m-hold me-cell" @click="router.push('/admin/users')">
-            <Icon name="iHelp" />
-            <span>账号管理</span>
-            <Icon name="chevR" class="go" />
-          </button>
-          <button class="m-hold me-cell" @click="openPwd">
-            <Icon name="lock" />
-            <span>修改密码</span>
-            <Icon name="chevR" class="go" />
-          </button>
         </div>
-        <div class="me-list">
-          <button class="m-hold me-cell me-out" @click="askLogout = true">退出登录</button>
-        </div>
-      </template>
 
+        <!-- 账号相关：管理入口、修改密码；退出登录单独放在最下面，点了先确认，避免误触 -->
+        <template v-if="auth.loggedIn">
+          <div class="me-list">
+            <!--
+              管理后台是独立页面（admin.html，桌面布局），新窗口打开，不打断手机端的浏览状态。
+              桌面上标明「新标签页打开」，箭头换成外链图标（和顶栏头像菜单里的一样）
+            -->
+            <a v-if="auth.isAdmin" class="m-hold me-cell" href="./admin.html" target="_blank" rel="noopener">
+              <Icon name="gear" />
+              <span>管理后台</span>
+              <em v-if="isDesktop" class="me-sub">桌面版 · 新标签页打开</em>
+              <Icon :name="isDesktop ? 'external' : 'chevR'" class="go" />
+            </a>
+            <button v-if="auth.isAdmin" class="m-hold me-cell" @click="router.push('/admin/users')">
+              <Icon name="iHelp" />
+              <span>账号管理</span>
+              <Icon name="chevR" class="go" />
+            </button>
+            <button class="m-hold me-cell" @click="openPwd">
+              <Icon name="lock" />
+              <span>修改密码</span>
+              <Icon name="chevR" class="go" />
+            </button>
+          </div>
+          <div class="me-list">
+            <button class="m-hold me-cell me-out" @click="askLogout = true">退出登录</button>
+          </div>
+        </template>
+      </div>
       <div class="pad-b" />
     </div>
 
@@ -332,7 +350,7 @@ onActivated(() => {
         <div v-if="pwdOpen" class="mask" @click="pwdOpen = false" />
       </Transition>
       <Transition name="sheet">
-        <div v-if="pwdOpen" class="sheet pwd" role="dialog" aria-modal="true" aria-labelledby="pwd-title" @keydown.esc="pwdOpen = false">
+        <div v-if="pwdOpen" ref="pwdSheet" class="sheet pwd" role="dialog" aria-modal="true" aria-labelledby="pwd-title" @keydown.esc="pwdOpen = false" @keydown="onPwdKey">
           <div class="grab" />
           <h4 id="pwd-title">修改密码</h4>
           <form class="pwd-form" novalidate @submit.prevent="submitPwd">
@@ -374,6 +392,8 @@ onActivated(() => {
             <button class="pwd-btn m-press" type="submit" :disabled="changing">{{ changing ? '提交中…' : '确认修改' }}</button>
             <p class="pwd-hint">修改成功后，其他设备需要重新登录。</p>
           </form>
+          <!-- 桌面对话框右上角的关闭按钮（放在最后：Tab 先到输入框；样式在 BottomSheet.vue） -->
+          <button v-if="isDesktop" type="button" class="sheet-x" aria-label="关闭" title="关闭" @click="pwdOpen = false"><Icon name="close" /></button>
         </div>
       </Transition>
     </Teleport>
@@ -433,4 +453,50 @@ onActivated(() => {
 .pwd-btn { height: 44px; margin-top: 4px; border-radius: 10px; background: var(--accent); color: var(--on-accent); font-size: 15px; font-weight: 700; transition: opacity var(--dur-2) var(--ease-out); }
 .pwd-btn:disabled { opacity: .55; }
 .pwd-hint { color: var(--t2); font-size: 12px; line-height: 18px; text-align: center; }
+
+/*
+ * ---- 桌面布局（≥ 1024px）----
+ * 居中的一栏（.desk-col，内容 720px）：上面是账号卡片（头像、名字、角色 + 三格统计，一张卡片），下面是菜单分组。
+ * 能点的格子鼠标移上去底色亮一点；字号按桌面的字阶（名字 20px、正文 14px、说明 13px）。
+ */
+@media (min-width: 1024px) {
+  .me-col { padding-top: 32px; padding-bottom: 32px; }
+  .me-top { gap: 20px; padding: 28px 28px 24px; border-radius: 16px 16px 0 0; background: var(--panel); }
+  .me-av { width: 72px; height: 72px; }
+  .me-av.guest svg { width: 32px; height: 32px; }
+  .me-av.ini { display: grid; place-items: center; background: #2a2a2a; box-shadow: none; color: var(--t1); font-size: 28px; font-weight: 600; }
+  .me-nm { font-size: 20px; font-weight: 600; line-height: 28px; }
+  .me-id { margin-top: 2px; font-size: 13px; line-height: 20px; }
+  .me-id em { height: 20px; padding: 0 8px; border-radius: 10px; font-size: 12px; line-height: 20px; }
+  .me-login { height: 36px; padding: 0 24px; border-radius: 18px; font-size: 14px; }
+
+  /* 统计三格接在账号卡片下面（同一张卡片，中间一道细线） */
+  .me-stat { column-gap: 8px; margin: 0; padding: 12px; border-top: 1px solid var(--line); border-radius: 0 0 16px 16px; }
+  .me-stat > * { padding: 12px 0; border-radius: 12px; }
+  .me-stat b { font-size: 22px; font-weight: 600; line-height: 30px; }
+  .me-stat span { font-size: 13px; line-height: 20px; }
+
+  .me-list { margin: 16px 0 0; border-radius: 16px; }
+  .me-cell { gap: 14px; height: 52px; padding: 0 20px; }
+  .me-cell .go { width: 16px; height: 16px; }
+  .me-sub { font-size: 13px; }
+
+  /* 改密码对话框：底边距和其他对话框一致（手机上要让出底部安全区） */
+  .pwd { padding-bottom: 24px; }
+  .pf-lb { font-size: 13px; }
+  .pf-err { font-size: 13px; }
+  .pwd-hint { font-size: 13px; line-height: 20px; }
+}
+@media (min-width: 1024px) and (hover: hover) {
+  .me-stat > *:hover { background: #171717; }
+  .me-stat > * { transition: opacity var(--dur-2) var(--ease-out), background-color var(--dur-2) var(--ease-out); }
+  .me-cell:hover { background: #161616; }
+  .me-cell:hover .go { color: var(--t2); transform: translateX(2px); }
+  .me-out:hover { color: var(--t1); }
+  .me-login { transition: opacity var(--dur-2) var(--ease-out); }
+  .me-login:hover { opacity: .88; }
+  .pf-eye { transition: color var(--dur-2) var(--ease-out); }
+  .pf-eye:hover { color: var(--t1); }
+  .pwd-btn:not(:disabled):hover { opacity: .88; }
+}
 </style>

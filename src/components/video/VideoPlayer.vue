@@ -9,15 +9,26 @@ let carryFullscreenAt = 0
  * 第一次挂上时读一次令牌就记住（读 CSS 变量要算样式，不在转场开始的那一刻读）；减少动态效果时没有转场，不用等。
  */
 let releaseAfter = 0
+/*
+ * 桌面上调的音量（0–1，记在本机，换视频、下次打开都接着用）。只有桌面布局有音量条 / ↑↓ 调音量，
+ * 手机上不读也不写（音量交给系统按键），这里读不到就是 1。
+ */
+const VOL_KEY = 'reel:volume'
+let deskVolume = 1
+try {
+  const v = parseFloat(localStorage.getItem(VOL_KEY))
+  if (Number.isFinite(v)) deskVolume = Math.max(0, Math.min(1, v))
+} catch { /* 读不到就是 1 */ }
 </script>
 
 <script setup>
-import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useAppStore } from '@/stores/app'
 import { toast } from '@/composables/useToast'
 import { useBackDismiss } from '@/composables/useBackDismiss'
 import { formatClock } from '@/utils/format'
 import { cssDuration, reducedMotion } from '@/utils/motion'
+import { isDesktop } from '@/composables/useDesktop'
 import Icon from '@/components/Icon.vue'
 import Cover from '@/components/Cover.vue'
 import BottomSheet from '@/components/BottomSheet.vue'
@@ -33,6 +44,14 @@ import { spinPhase } from './spin'
  * - 手机横过来、正在播放时自动全屏，竖回去退出；浏览器不支持元素全屏时用页面内的「伪全屏」铺满屏幕。
  * 倍速、循环、自动连播是全局播放偏好（stores/app.js 的 playback，记在本机），与短视频页共用；
  * 倍速不是 1.0x 时控制栏上直接显示。started / progress 事件都带上自己的视频 id，父组件换视频时不会记错。
+ *
+ * 桌面布局（窗口 ≥ 1024px，用鼠标、键盘）另外有（手机上的触屏操作一点不变）：
+ * - 鼠标移上去显示控制栏，不动 3 秒收起（鼠标停在控制栏上、开着设置时不收），收起时画面上不显示鼠标指针；移出画面就收起。
+ * - 单击画面播放 / 暂停（暂停时中间的大播放键就是反馈），双击全屏（真全屏）。
+ * - 键盘（焦点不在输入框、没开弹层）：空格 / K 播放暂停，← → 后退 / 前进 5 秒，J / L 10 秒，↑ ↓ 音量，M 静音，F 全屏；
+ *   跳进度、调音量时画面中间偏上弹一个小标签。
+ * - 喇叭左边的音量条（鼠标移到喇叭上出现），进度条上指到哪显示那一刻的时间。
+ * - 「播放设置」是控制栏上方的小面板（全屏时也能用），不是底部弹层。
  */
 const props = defineProps({
   /** VideoDetail：{ id, src, cover, len, quality } */
@@ -51,7 +70,9 @@ const props = defineProps({
    * 挂上时播放页的加载占位已经在转圈（接口慢）：开播还在等数据的话，转圈原地接上（不再等 0.25 秒、不淡入），
    * 不会消失一下又出现
    */
-  spin: { type: Boolean, default: false }
+  spin: { type: Boolean, default: false },
+  /** 桌面上的键盘快捷键生效（播放页换视频、旧播放器留着等新内容时关掉） */
+  keys: { type: Boolean, default: true }
 })
 const emit = defineEmits({
   back: null,
@@ -122,6 +143,14 @@ const pseudoFs = ref(false)
 const isFs = computed(() => fullscreen.value || pseudoFs.value)
 const uiVisible = ref(true)
 const sheetOpen = ref(false)
+/** 桌面：控制栏上方的「播放设置」小面板（代替底部弹层） */
+const popOpen = ref(false)
+/** 手机真全屏时底部弹层看不到，设置按钮改成直接轮换倍速；桌面的小面板在全屏里照样能开 */
+const cycleSpeed = computed(() => fullscreen.value && !isDesktop.value)
+/** 桌面音量（0–1）；静音（muted）另算，取消静音回到这个音量 */
+const volume = ref(deskVolume)
+/** 喇叭图标：静音或者音量拉到 0 */
+const silent = computed(() => muted.value || (isDesktop.value && volume.value === 0))
 /** 播完了：显示「重播 / 下一个」 */
 const ended = ref(false)
 /** 自动播下一个的倒计时（秒），0 = 没在倒计时 */
@@ -239,6 +268,10 @@ function onEnded() {
   uiVisible.value = true
   ended.value = true
   cdCancelled = false
+  // 桌面上按 → 跳到了结尾：跳进度的小标签马上收起，不压在结束画面的标题上
+  clearTimeout(flashTimer)
+  kflash.value = null
+  seekSum = 0
   maybeCountdown()
 }
 function maybeCountdown() {
@@ -246,7 +279,7 @@ function maybeCountdown() {
   countdown.value = AUTO_NEXT_SEC
   cdTimer = setInterval(() => {
     // 切到后台、开着设置面板时先停住，回来接着数
-    if (document.hidden || sheetOpen.value) return
+    if (document.hidden || sheetOpen.value || popOpen.value) return
     // 数到「1 秒」那一格走满就播（不先变成 0：结束画面停在这一刻等新视频换上来，见 goNext）
     if (countdown.value <= 1) goNext(true)
     else countdown.value--
@@ -415,15 +448,19 @@ let hideTimer = 0
  */
 const isFocusVisible = el => { try { return !!el?.matches(':focus-visible') } catch { return false } }
 const keyboardInside = () => { try { return !!box.value?.querySelector(':focus-visible') } catch { return false } }
+/* 桌面：鼠标停在控制栏上（overBar）、开着设置面板、正在拖音量条时也不收（手机上这几个一直是 false） */
+let overBar = false
+const holdUi = () => overBar || popOpen.value || volDrag.value
 function showUi() {
   uiVisible.value = true
   clearTimeout(hideTimer)
-  if (playing.value) hideTimer = setTimeout(() => { if (!keyboardInside()) uiVisible.value = false }, 3000)
+  if (playing.value) hideTimer = setTimeout(() => { if (!keyboardInside() && !holdUi()) uiVisible.value = false }, 3000)
 }
 watch(playing, showUi)
-/* 点画面：控制栏显示时收起，隐藏时唤出（播放 / 暂停用中间和左下角的按钮） */
+/* 点画面：控制栏显示时收起，隐藏时唤出（播放 / 暂停用中间和左下角的按钮）；桌面上用鼠标点是播放 / 暂停（见 onDeskClick） */
 function onSurfaceTap() {
   if (!hasSource.value) return
+  if (mouseNow()) return onDeskClick()
   if (uiVisible.value && playing.value) {
     clearTimeout(hideTimer)
     uiVisible.value = false
@@ -448,6 +485,7 @@ function startSeek(e) {
 }
 function moveSeek(e) {
   if (seeking.value) current.value = ratioAt(e) * duration.value
+  hoverSeek(e)
 }
 function endSeek(e) {
   if (!seeking.value) return
@@ -467,11 +505,260 @@ function onSeekKey(e) {
   showUi()
 }
 
+/* ---------- 桌面：鼠标（只认真的鼠标：平板横屏也是桌面布局，手指点画面照旧是收起 / 唤出控制栏） ---------- */
+
+/** 最近一次按下的是不是鼠标（pointerdown 记下；click 事件本身在老 Safari 上不带 pointerType） */
+let pointerKind = ''
+const mouseNow = () => isDesktop.value && pointerKind === 'mouse'
+function onPointerDown(e) {
+  pointerKind = e.pointerType || ''
+  popEatClick = false
+  // 设置面板开着时点了它外面（画面、控制栏的其他按钮）：先收起面板；点的是画面的话这一下不再算播放 / 暂停
+  if (popOpen.value && !popEl.value?.contains(e.target) && !setBtn.value?.contains(e.target)) {
+    closePop(false)
+    if (!e.target.closest?.('.bar, .top')) popEatClick = true
+  }
+}
+let popEatClick = false
+/* 单击画面：播放 / 暂停（暂停时中间的大播放键出现、开播时它散开，就是这一下的反馈） */
+function onDeskClick() {
+  if (popEatClick) {
+    popEatClick = false
+    return
+  }
+  if (ended.value) return
+  toggle()
+  showUi()
+}
+/*
+ * 双击画面：全屏 / 退出全屏（两下单击已经把播放状态切回原样了）。
+ * 暂停时正中的大播放键也算画面：第一下开播、它开始散开，第二下还落在它身上（播放不变），照样进全屏
+ */
+function onDblClick(e) {
+  if (!mouseNow() || !hasSource.value || e.target.closest?.('.bar, .top, .end, .resume, .pop, button:not(.big-play)')) return
+  toggleFullscreen()
+}
+/* 鼠标在画面上动：显示控制栏（不动 3 秒收起）；移出画面：在播就马上收起 */
+function onPointerMove(e) {
+  if (e.pointerType === 'mouse' && isDesktop.value) showUi()
+}
+function onPointerLeave(e) {
+  if (e.pointerType !== 'mouse' || !isDesktop.value) return
+  overBar = false
+  if (!playing.value || keyboardInside() || holdUi() || seeking.value) return
+  clearTimeout(hideTimer)
+  uiVisible.value = false
+}
+function onBarEnter(e) {
+  if (e.pointerType === 'mouse') overBar = true
+}
+function onBarLeave(e) {
+  if (e.pointerType !== 'mouse') return
+  overBar = false
+  showUi()
+}
+
+/* 进度条：鼠标指到哪，上面显示那一刻的时间（拖动时就是拖到的位置），线上浅一点的一截标出指到的位置 */
+const hoverT = ref(-1)
+const tipX = ref(0)
+const TIP_HALF = 26
+function hoverSeek(e) {
+  if (e.pointerType !== 'mouse' || !isDesktop.value || !duration.value || !seekEl.value) return
+  const r = seekEl.value.getBoundingClientRect()
+  const p = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width))
+  hoverT.value = p * duration.value
+  // 标签不出进度条两头
+  tipX.value = Math.max(TIP_HALF - 8, Math.min(r.width - TIP_HALF + 8, p * r.width))
+}
+const hoverPct = computed(() => (duration.value && hoverT.value >= 0 ? Math.min(100, (hoverT.value / duration.value) * 100) : 0))
+
+/* ---------- 桌面：音量（喇叭左边的音量条；↑ ↓ 键） ---------- */
+
+const volEl = ref(null)
+const volDrag = ref(false)
+/** 音量条上显示的（静音时是 0） */
+const volPct = computed(() => (muted.value ? 0 : Math.round(volume.value * 100)))
+let volSave = 0
+function setVolume(v) {
+  v = Math.round(Math.max(0, Math.min(1, v)) * 100) / 100
+  volume.value = v
+  if (el.value) el.value.volume = v
+  // 往上调就是要声音：静音着的顺便打开
+  if (v > 0 && muted.value) {
+    muted.value = false
+    if (el.value) el.value.muted = false
+  }
+  deskVolume = v
+  clearTimeout(volSave)
+  volSave = setTimeout(() => {
+    try { localStorage.setItem(VOL_KEY, String(v)) } catch { /* 存不了就只在这次打开里有效 */ }
+  }, 300)
+}
+function volAt(e) {
+  const r = volEl.value.getBoundingClientRect()
+  // 两头各留 8px 的内边距（圆点的位置），见 .vol
+  return (e.clientX - r.left - 8) / Math.max(1, r.width - 16)
+}
+function startVol(e) {
+  volDrag.value = true
+  volEl.value.setPointerCapture(e.pointerId)
+  setVolume(volAt(e))
+}
+function moveVol(e) {
+  if (volDrag.value) setVolume(volAt(e))
+}
+function endVol() {
+  if (!volDrag.value) return
+  volDrag.value = false
+  showUi()
+}
+function onVolKey(e) {
+  const step = { ArrowRight: 0.05, ArrowUp: 0.05, ArrowLeft: -0.05, ArrowDown: -0.05, PageUp: 0.2, PageDown: -0.2 }[e.key]
+  let v
+  if (step != null) v = (muted.value ? 0 : volume.value) + step
+  else if (e.key === 'Home') v = 0
+  else if (e.key === 'End') v = 1
+  else return
+  e.preventDefault()
+  setVolume(v)
+  showUi()
+}
+
+/* ---------- 桌面：键盘快捷键（焦点不在输入框、没开弹层、不在导航的下拉菜单里） ---------- */
+
+const isTyping = t => !!t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))
+/* 键盘聚焦（Tab 过来）的按钮：空格照常按下它；鼠标点过、焦点还留着的按钮（比如刚点了赞），空格还是播放 / 暂停 */
+function keyboardButton(t) {
+  if (!t?.closest?.('button, a[href], [role="button"], [role="switch"], [role="tab"], [role="menuitem"]')) return false
+  try { return t.matches(':focus-visible') } catch { return true }
+}
+const SEEK_KEYS = { ArrowLeft: -5, ArrowRight: 5, j: -10, J: -10, l: 10, L: 10 }
+function onKey(e) {
+  if (!isDesktop.value || !props.keys || e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey || e.isComposing) return
+  const t = e.target instanceof Element ? e.target : null
+  if (isTyping(t) || document.querySelector('[aria-modal="true"]') || t?.closest('[role="menu"], [role="listbox"]')) return
+  const k = e.key
+  if (k === 'Escape') {
+    if (popOpen.value) {
+      closePop(true)
+      e.preventDefault()
+      return
+    }
+    // 伪全屏（浏览器不给真全屏时）：Esc 退出；真全屏由浏览器自己的 Esc 退出
+    if (pseudoFs.value) {
+      exitFullscreen()
+      e.preventDefault()
+    }
+    return
+  }
+  if (!hasSource.value) return
+  if (k === ' ' || k === 'Spacebar' || k === 'k' || k === 'K') {
+    if (k !== 'k' && k !== 'K' && keyboardButton(t)) return
+    if (!e.repeat) toggle()
+  } else if (k in SEEK_KEYS) {
+    // 焦点在进度条 / 音量条上：方向键归它们自己
+    if (k.startsWith('Arrow') && t?.closest('[role="slider"]')) return
+    seekBy(SEEK_KEYS[k])
+  } else if (k === 'ArrowUp' || k === 'ArrowDown') {
+    if (t?.closest('[role="slider"]')) return
+    setVolume((muted.value ? 0 : volume.value) + (k === 'ArrowUp' ? 0.05 : -0.05))
+    flashVolume()
+  } else if (k === 'm' || k === 'M') {
+    if (e.repeat) return
+    toggleMute()
+    flashVolume()
+  } else if (k === 'f' || k === 'F') {
+    if (!e.repeat) toggleFullscreen()
+  } else return
+  e.preventDefault()
+  showUi()
+}
+function seekBy(d) {
+  if (!duration.value || (ended.value && d > 0)) return
+  // 播完以后往回跳：收起结束画面（停在那儿，按空格接着播）
+  if (ended.value) clearEnd()
+  seekTo(current.value + d)
+  flashSeek(d)
+}
+
+/* 跳进度、调音量时的小标签：画面中间偏上（不压住暂停时的大播放键），连着按就接着显示、跳的秒数累加 */
+const FLASH_MS = 700
+const kflash = ref(null)
+let flashTimer = 0
+let seekSum = 0
+let seekAt = 0
+function flashKey(icon, text, back = false) {
+  kflash.value = { icon, text, back }
+  clearTimeout(flashTimer)
+  flashTimer = setTimeout(() => { kflash.value = null }, FLASH_MS)
+}
+function flashSeek(d) {
+  const now = performance.now()
+  seekSum = kflash.value && now - seekAt < FLASH_MS && Math.sign(seekSum) === Math.sign(d) ? seekSum + d : d
+  seekAt = now
+  flashKey('ffwd', `${Math.abs(seekSum)} 秒`, seekSum < 0)
+}
+function flashVolume() {
+  seekSum = 0
+  flashKey(silent.value ? 'mute' : 'vol', silent.value ? '静音' : `${volPct.value}%`)
+}
+
+/* ---------- 桌面：「播放设置」小面板（控制栏上方；点外面、Esc、再点设置键收起） ---------- */
+
+const popEl = ref(null)
+const setBtn = ref(null)
+/** byKey：用键盘（回车 / 空格）按的设置键 */
+function togglePop(byKey = false) {
+  if (popOpen.value) closePop(true)
+  else {
+    popOpen.value = true
+    showUi()
+    document.addEventListener('pointerdown', onDocDown, true)
+    // 用键盘打开的：焦点进面板（选中的倍速），不用先 Tab 过控制栏上的其他按钮；用鼠标打开的焦点不动
+    if (byKey) {
+      nextTick(() => {
+        const p = popEl.value
+        ;(p?.querySelector('.opt.on') || p?.querySelector('button'))?.focus({ preventScroll: true })
+      })
+    }
+  }
+}
+/** refocus：键盘 / 设置键收起时焦点回到设置键（点了别处收起时不抢焦点） */
+function closePop(refocus) {
+  if (!popOpen.value) return
+  popOpen.value = false
+  document.removeEventListener('pointerdown', onDocDown, true)
+  if (refocus && popEl.value?.contains(document.activeElement)) setBtn.value?.focus({ preventScroll: true })
+  showUi()
+}
+/* 点在播放器外面：收起（播放器里面的由 onPointerDown 管） */
+function onDocDown(e) {
+  if (!box.value?.contains(e.target)) closePop(false)
+}
+/*
+ * 窗口拉窄到手机布局（< 1024px）：桌面才有的面板、小标签、进度条上的悬停位置、拖音量都收掉
+ * （它们的样式只在桌面布局里，留着会在手机布局上露出没有样式的残片）
+ */
+watch(isDesktop, d => {
+  if (d) return
+  closePop(false)
+  clearTimeout(flashTimer)
+  kflash.value = null
+  seekSum = 0
+  hoverT.value = -1
+  volDrag.value = false
+})
+
 /* ---------- 设置 / 循环 / 静音 ---------- */
 
-function openSettings() {
+function openSettings(e) {
+  // 桌面：控制栏上方的小面板，再点一下收起。键盘按下按钮产生的 click 没有点击次数（detail 为 0），鼠标点的至少是 1
+  if (isDesktop.value) {
+    togglePop(e?.detail === 0)
+    return
+  }
   // 真全屏时底部弹层不在全屏元素里看不到，直接轮换倍速（按钮上显示当前倍速）
-  if (fullscreen.value) {
+  if (cycleSpeed.value) {
     const next = SPEEDS[(SPEEDS.indexOf(store.playback.speed) + 1) % SPEEDS.length]
     setSpeed(next)
     return
@@ -480,12 +767,16 @@ function openSettings() {
 }
 function setSpeed(s) {
   store.playback.speed = s
+  // 桌面的小面板开着、选中的那一格就是反馈：不再弹提示，面板也不收（接着能改循环、连播）
+  if (popOpen.value) return
   toast(`已切换为 ${s} 倍速`)
   flashChip(`${s} 倍速`)
   sheetOpen.value = false
 }
 function toggleLoop() {
   store.playback.loop = !store.playback.loop
+  // 桌面的设置面板开着：开关本身就是反馈
+  if (popOpen.value) return
   toast(store.playback.loop ? '已开启循环播放' : '已关闭循环播放')
   flashChip(store.playback.loop ? '循环播放 开' : '循环播放 关')
 }
@@ -510,6 +801,8 @@ function toggleAutoNext() {
 function toggleMute() {
   muted.value = !muted.value
   if (el.value) el.value.muted = muted.value
+  // 桌面：音量拉到 0 以后取消静音，回到一半音量（不然点了喇叭还是没声音）
+  if (!muted.value && volume.value === 0) setVolume(0.5)
 }
 
 /* ---------- 小窗 ---------- */
@@ -609,6 +902,9 @@ onMounted(() => {
   window.addEventListener('pagehide', onPageHide)
   if (orientationTarget) orientationTarget.addEventListener('change', onOrientation)
   else window.addEventListener('orientationchange', onOrientation)
+  document.addEventListener('keydown', onKey)
+  // 桌面上调过的音量（手机上不动，音量交给系统按键）
+  if (isDesktop.value && el.value && volume.value !== 1) el.value.volume = volume.value
   if (!releaseAfter && !reducedMotion()) releaseAfter = Math.max(cssDuration('--dur-push', 440), cssDuration('--dur-pop', 380)) + 60
   const carry = Date.now() - carryFullscreenAt < 10000
   carryFullscreenAt = 0
@@ -648,6 +944,14 @@ onBeforeUnmount(() => {
   clearTimeout(chipTimer)
   clearTimeout(posterTimer)
   clearTimeout(spinTimer)
+  clearTimeout(flashTimer)
+  document.removeEventListener('keydown', onKey)
+  document.removeEventListener('pointerdown', onDocDown, true)
+  // 音量还没来得及记下（拖完马上换了页面）：现在记
+  if (volSave) {
+    clearTimeout(volSave)
+    try { localStorage.setItem(VOL_KEY, String(volume.value)) } catch { /* 存不了就算了 */ }
+  }
   document.removeEventListener('fullscreenchange', onFullscreenChange)
   document.removeEventListener('webkitfullscreenchange', onFullscreenChange)
   document.removeEventListener('visibilitychange', onVisibility)
@@ -678,6 +982,10 @@ onBeforeUnmount(() => {
     class="player"
     :class="{ 'ui-on': uiVisible || !playing, fs: isFs, pseudo: pseudoFs, nosrc: !hasSource, ended, seeking }"
     @click="onSurfaceTap"
+    @dblclick="onDblClick"
+    @pointerdown="onPointerDown"
+    @pointermove="onPointerMove"
+    @pointerleave="onPointerLeave"
     @focusin="onFocusIn"
     @touchstart.passive="noop"
   >
@@ -737,6 +1045,10 @@ onBeforeUnmount(() => {
         <span v-if="chip" :key="chip.key" class="chip-tip" role="status">{{ chip.text }}</span>
       </Transition>
       <div v-if="spinning" class="spinner" :style="spinStyle" aria-hidden="true" />
+      <!-- 桌面：键盘跳进度、调音量时的小标签 -->
+      <Transition name="kf">
+        <div v-if="kflash" class="kflash" role="status"><Icon :name="kflash.icon" :class="{ back: kflash.back }" />{{ kflash.text }}</div>
+      </Transition>
 
       <!-- 续播提示：从上次的位置接着播，可以一键从头 -->
       <div v-if="resumeTip && !ended" class="resume" role="status" @click.stop>
@@ -774,7 +1086,7 @@ onBeforeUnmount(() => {
       <!-- 控制栏隐藏时，底部留一条细进度线 -->
       <div class="mini" aria-hidden="true"><i :style="{ transform: `translateX(${pct - 100}%)` }" /></div>
 
-      <div class="bar" @click.stop>
+      <div class="bar" @click.stop @pointerenter="onBarEnter" @pointerleave="onBarLeave">
         <div
           ref="seekEl"
           class="seek"
@@ -790,32 +1102,98 @@ onBeforeUnmount(() => {
           @pointermove="moveSeek"
           @pointerup="endSeek"
           @pointercancel="endSeek"
+          @pointerleave="hoverT = -1"
           @keydown="onSeekKey"
         >
-          <div class="track"><i :style="{ transform: `translateX(${pct - 100}%)` }" /></div>
+          <div class="track">
+            <!-- 桌面：鼠标指着的位置（浅色的一截） -->
+            <b v-if="isDesktop && hoverT >= 0" :style="{ transform: `translateX(${hoverPct - 100}%)` }" />
+            <i :style="{ transform: `translateX(${pct - 100}%)` }" />
+          </div>
           <span class="knob-w" :style="{ transform: `translateX(${pct}%)` }"><b class="knob" /></span>
+          <span v-if="isDesktop && hoverT >= 0" class="seek-tip" :style="{ transform: `translateX(${tipX}px) translateX(-50%)` }" aria-hidden="true">{{ formatClock(hoverT) }}</span>
         </div>
         <div class="ctl">
           <button type="button" :aria-label="playing ? '暂停' : '播放'" @click="toggle"><Icon :name="playing ? 'pause' : 'play'" /></button>
           <span class="time">{{ formatClock(current) }} / {{ formatClock(duration) }}</span>
           <span class="sp" />
           <button
+            ref="setBtn"
             type="button"
             class="set"
-            :aria-label="fullscreen ? `倍速 ${store.playback.speed}，点击切换` : rateLabel ? `播放设置，当前 ${rateLabel} 倍速` : '播放设置'"
+            :aria-label="cycleSpeed ? `倍速 ${store.playback.speed}，点击切换` : rateLabel ? `播放设置，当前 ${rateLabel} 倍速` : '播放设置'"
+            :aria-expanded="isDesktop ? popOpen : undefined"
             @click="openSettings"
           >
-            <Icon v-if="!fullscreen" name="cog" />
+            <Icon v-if="!cycleSpeed" name="cog" />
             <!-- 倍速一换，数字翻过去 -->
-            <span v-if="fullscreen || rateLabel" class="rate"><RollNum :value="fullscreen ? store.playback.speed : rateLabel" :n="rate" /></span>
+            <span v-if="cycleSpeed || rateLabel" class="rate"><RollNum :value="cycleSpeed ? store.playback.speed : rateLabel" :n="rate" /></span>
           </button>
-          <!-- 竖屏时循环在「播放设置」里；全屏时设置面板打不开，放到控制栏上 -->
-          <button v-if="isFs" type="button" class="loop" :class="{ on: loop }" :aria-pressed="loop" aria-label="循环播放" @click="toggleLoop"><Icon :key="loop ? 1 : 0" name="loop" /></button>
-          <button type="button" :aria-label="muted ? '打开声音' : '静音'" @click="toggleMute"><Icon :name="muted ? 'mute' : 'vol'" /></button>
-          <button v-if="canPip" type="button" aria-label="小窗播放" @click="togglePip"><Icon name="pip" /></button>
-          <button type="button" :aria-label="isFs ? '退出全屏' : '全屏'" @click="toggleFullscreen"><Icon :name="isFs ? 'fullscreenExit' : 'fullscreen'" /></button>
+          <!-- 竖屏时循环在「播放设置」里；手机全屏时设置面板打不开，放到控制栏上（桌面的设置面板全屏也能开） -->
+          <button v-if="isFs && !isDesktop" type="button" class="loop" :class="{ on: loop }" :aria-pressed="loop" aria-label="循环播放" @click="toggleLoop"><Icon :key="loop ? 1 : 0" name="loop" /></button>
+          <button type="button" class="mute" :aria-label="muted ? '打开声音' : '静音'" @click="toggleMute"><Icon :name="silent ? 'mute' : 'vol'" /></button>
+          <!-- 桌面：音量条（排在喇叭左边，鼠标移到喇叭上出现，见样式） -->
+          <div
+            v-if="isDesktop"
+            ref="volEl"
+            class="vol"
+            :class="{ on: volDrag }"
+            role="slider"
+            tabindex="0"
+            aria-label="音量"
+            aria-valuemin="0"
+            aria-valuemax="100"
+            :aria-valuenow="volPct"
+            :aria-valuetext="muted ? '静音' : `${volPct}%`"
+            @pointerdown="startVol"
+            @pointermove="moveVol"
+            @pointerup="endVol"
+            @pointercancel="endVol"
+            @keydown="onVolKey"
+          >
+            <div class="vol-track"><i :style="{ transform: `translateX(${volPct - 100}%)` }" /></div>
+            <span class="vol-kw" :style="{ transform: `translateX(${volPct}%)` }"><b /></span>
+          </div>
+          <button v-if="canPip" type="button" class="pip" aria-label="小窗播放" @click="togglePip"><Icon name="pip" /></button>
+          <button type="button" class="fsb" :aria-label="isFs ? '退出全屏' : '全屏'" @click="toggleFullscreen"><Icon :name="isFs ? 'fullscreenExit' : 'fullscreen'" /></button>
         </div>
       </div>
+
+      <!-- 桌面：「播放设置」小面板（控制栏上方；全屏时也在全屏元素里，照样能用） -->
+      <Transition name="pop">
+        <div v-if="popOpen" ref="popEl" class="pop" role="dialog" aria-label="播放设置" @click.stop @keydown.esc.stop.prevent="closePop(true)">
+          <div class="pop-hd">播放速度</div>
+          <div class="opts pop-speeds">
+            <button
+              v-for="s in SPEEDS"
+              :key="s"
+              type="button"
+              class="opt"
+              :class="{ on: store.playback.speed === s }"
+              :aria-pressed="store.playback.speed === s"
+              @click="setSpeed(s)"
+            >
+              {{ s }}
+            </button>
+          </div>
+          <div class="row2">
+            <span>循环播放</span>
+            <button type="button" class="sw" :class="{ on: loop }" role="switch" :aria-checked="loop" aria-label="循环播放" @click="toggleLoop" />
+          </div>
+          <div class="row2">
+            <span>自动连播<small>播完 5 秒后播放下一个</small></span>
+            <button
+              type="button"
+              class="sw"
+              :class="{ on: store.playback.autoNext }"
+              role="switch"
+              :aria-checked="store.playback.autoNext"
+              aria-label="自动连播"
+              @click="toggleAutoNext"
+            />
+          </div>
+        </div>
+      </Transition>
     </template>
 
     <BottomSheet v-model:open="sheetOpen" title="播放设置">
@@ -1194,5 +1572,191 @@ onBeforeUnmount(() => {
 @supports not (aspect-ratio: 1 / 1) {
   .player::before { content: ''; display: block; padding-top: 56.25%; }
   .end-cv::before { content: ''; display: block; padding-top: 56.25%; }
+}
+
+/*
+ * ---------- 桌面布局（窗口 ≥ 1024px）----------
+ * 播放器在播放页的网格里（圆角 12px，全屏时没有）；控制栏、按钮、文字按鼠标的尺寸放大一号。
+ * 控制栏右边的顺序：音量条、喇叭、设置、小窗、全屏（用 order 排，手机上的 DOM 顺序不动）；
+ * 音量条平时透明、占着位置（在中间的空白里，看不出来），鼠标移到喇叭或它上面、键盘聚焦、正在拖时出现，
+ * 移开后稍等一下再收起（从喇叭挪到音量条的路上不会闪没）。
+ * 控制栏收起（在播、鼠标不动）时画面上不显示鼠标指针。
+ */
+@media (min-width: 1024px) {
+  .player { border-radius: 12px; }
+  .player.fs { border-radius: 0; }
+  .player:not(.ui-on) { cursor: none; }
+
+  .top { padding: 12px 14px 0 12px; }
+  .back { border-radius: 50%; }
+  .badge { height: 26px; padding: 0 12px; border-radius: 13px; font-size: 13px; line-height: 24px; }
+
+  .bar { padding: 0 12px 6px; }
+  .seek { height: 22px; margin: 0 8px; }
+  .seek::before { left: -8px; right: -8px; top: -8px; bottom: -2px; }
+  .track { height: 4px; }
+  .track b { position: absolute; inset: 0; border-radius: 2px; background: rgba(255, 255, 255, .4); }
+  .knob { width: 13px; height: 13px; margin: -6.5px 0 0 -6.5px; }
+  .seeking .knob { transform: scale(1.15); }
+  .seeking .track { transform: scaleY(1.5); }
+  .seek-tip {
+    position: absolute;
+    left: 0;
+    bottom: 26px;
+    padding: 3px 8px;
+    border-radius: 6px;
+    background: rgba(18, 18, 18, .88);
+    color: #fff;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 18px;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+    pointer-events: none;
+  }
+
+  .ctl { height: 48px; gap: 2px; }
+  .ctl button { width: 40px; height: 40px; border-radius: 8px; }
+  .ctl svg { width: 22px; height: 22px; }
+  .ctl .set { min-width: 40px; padding: 0 9px; gap: 4px; }
+  .rate { font-size: 13px; }
+  .time { margin-left: 8px; font-size: 14px; }
+  .ctl .mute { order: 1; }
+  .ctl .set, .ctl .pip, .ctl .fsb { order: 2; }
+
+  /* 音量条：两头各留 8px（圆点的位置），点在哪就是哪 */
+  .vol {
+    position: relative;
+    display: flex;
+    flex: none;
+    align-items: center;
+    width: 84px;
+    height: 40px;
+    padding: 0 8px;
+    cursor: pointer;
+    touch-action: none;
+    opacity: 0;
+    transform: translate3d(8px, 0, 0);
+    transition: opacity var(--dur-2) var(--ease-in) var(--dur-3), transform var(--dur-2) var(--ease-in) var(--dur-3);
+  }
+  .mute:hover + .vol, .vol:hover, .vol.on {
+    opacity: 1;
+    transform: none;
+    transition: opacity var(--dur-2) var(--ease-out), transform var(--dur-2) var(--ease-out);
+  }
+  .vol-track { position: relative; flex: 1; height: 4px; overflow: hidden; border-radius: 2px; background: rgba(255, 255, 255, .3); }
+  .vol-track i { position: absolute; inset: 0; border-radius: 2px; background: #fff; }
+  .vol-kw { position: absolute; left: 8px; right: 8px; top: 0; bottom: 0; pointer-events: none; }
+  .vol-kw b { position: absolute; left: 0; top: 50%; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%; background: #fff; box-shadow: 0 0 4px rgba(0, 0, 0, .4); }
+
+  .big-play { width: 64px; height: 64px; margin: -32px 0 0 -32px; }
+  .big-play svg { width: 28px; height: 28px; margin-left: 4px; }
+  .spinner { width: 44px; height: 44px; margin: -22px 0 0 -22px; }
+  .fail-tip { top: calc(50% + 44px); font-size: 13px; }
+  .chip-tip { height: 32px; padding: 0 15px; border-radius: 16px; font-size: 14px; line-height: 32px; }
+
+  .resume { left: 16px; bottom: 16px; height: 34px; padding: 0 4px 0 14px; border-radius: 17px; font-size: 13px; }
+  .resume button { height: 26px; padding: 0 12px; border-radius: 13px; }
+  .ui-on .resume { transform: translateY(-70px); }
+
+  .nosrc-msg { gap: 8px; }
+  .nosrc-msg b { font-size: 18px; line-height: 26px; }
+  .nosrc-msg span { font-size: 14px; line-height: 20px; }
+  .ns-btn { height: 36px; margin-top: 8px; padding: 0 20px; border-radius: 18px; font-size: 14px; }
+
+  /* 播完：桌面的播放器够大，按全屏的尺寸排 */
+  .end { gap: 12px; }
+  .end-hd { font-size: 15px; }
+  .end-next { width: min(100%, 440px); padding: 6px; border-radius: 12px; gap: 14px; }
+  .end-cv { width: 144px; border-radius: 8px; }
+  .end-tt { font-size: 15px; line-height: 21px; }
+  .end-btns button { height: 36px; padding: 0 16px; border-radius: 18px; font-size: 14px; }
+  .cd { width: 36px; height: 36px; margin: -18px 0 0 -18px; }
+
+  /* 跳进度、调音量的小标签 */
+  .kflash {
+    position: absolute;
+    left: 50%;
+    top: calc(50% - 92px);
+    z-index: 3;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    height: 40px;
+    padding: 0 16px 0 13px;
+    border-radius: 20px;
+    background: rgba(18, 18, 18, .74);
+    color: #fff;
+    font-size: 15px;
+    font-weight: 600;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+    transform: translateX(-50%);
+    pointer-events: none;
+  }
+  .kflash svg { width: 20px; height: 20px; stroke-width: 2.4; }
+  .kflash svg.back { transform: scaleX(-1); }
+  .kf-enter-active { transition: opacity var(--dur-2) var(--ease-out), transform var(--dur-spring-snappy) var(--spring-snappy); }
+  .kf-leave-active { transition: opacity var(--dur-2) var(--ease-in); }
+  .kf-enter-from { opacity: 0; transform: translateX(-50%) scale(.9); }
+  .kf-leave-to { opacity: 0; }
+  /* 跳到了结尾：结束画面出来的那一刻小标签直接不见（不和「N 秒后播放下一个」叠着淡出） */
+  .ended .kflash { visibility: hidden; }
+
+  /* 「播放设置」小面板：从设置键那一角弹出来 */
+  .pop {
+    position: absolute;
+    right: 12px;
+    bottom: 72px;
+    z-index: 4;
+    width: 280px;
+    max-height: calc(100% - 88px);
+    overflow-y: auto;
+    padding: 14px 16px 4px;
+    border-radius: 12px;
+    background: rgba(24, 24, 24, .95);
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, .08), 0 12px 32px rgba(0, 0, 0, .5);
+    color: #fff;
+    cursor: auto;
+    transform-origin: 100% 100%;
+    scrollbar-width: none;
+  }
+  .pop::-webkit-scrollbar { display: none; }
+  .pop-hd { margin-bottom: 10px; color: var(--t2); font-size: 13px; line-height: 18px; }
+  .pop-speeds { grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 8px; }
+  .pop .opt { height: 34px; background: rgba(255, 255, 255, .08); color: var(--t3); font-size: 14px; }
+  .pop .opt.on { background: var(--accent); color: var(--on-accent); }
+  .pop .row2 { height: 52px; border-color: rgba(255, 255, 255, .08); }
+  .pop-enter-active { transition: opacity var(--dur-2) var(--ease-out), transform var(--dur-spring-snappy) var(--spring-snappy); }
+  .pop-leave-active { transition: opacity var(--dur-1) var(--ease-in), transform var(--dur-1) var(--ease-in); }
+  .pop-enter-from { opacity: 0; transform: translate3d(0, 6px, 0) scale(.96); }
+  .pop-leave-to { opacity: 0; transform: scale(.98); }
+}
+/* 只有触屏的大屏（平板横过来）：没有悬停，音量条出不来，整个不要（免得点到喇叭左边的空白改了音量），音量用系统按键 */
+@media (min-width: 1024px) and (hover: none) {
+  .vol { display: none; }
+}
+@media (min-width: 1024px) and (hover: hover) {
+  /* 用鼠标时进度条上的圆点平时不显示，指着进度条、拖动、键盘聚焦时才出来；线也跟着变粗 */
+  .knob { transform: scale(0); }
+  .seek:hover .knob { transform: scale(1); }
+  .seek:hover .track { transform: scaleY(1.5); }
+  .seeking .knob { transform: scale(1.15); }
+  .ctl button, .back { transition: background-color var(--dur-2) var(--ease-out); }
+  .ctl button:hover, .back:hover { background: rgba(255, 255, 255, .12); }
+  /* 不另写 transition：会盖掉出现 / 散开（.bp-*）的过渡 */
+  .big-play:hover { background: rgba(40, 40, 40, .7); }
+  .ns-btn, .end-next, .end-btns button, .resume button { transition: transform var(--dur-2) var(--ease-spring), background-color var(--dur-2) var(--ease-out); }
+  .ns-btn:hover { background: #fff; }
+  .end-next:hover { background: rgba(255, 255, 255, .16); }
+  .end-btns button:hover { background: rgba(255, 255, 255, .22); }
+  .end-btns button.pri:hover { background: #e0e0e0; }
+  .resume button:hover { background: rgba(255, 255, 255, .26); }
+  .pop .opt:not(.on):hover { background: rgba(255, 255, 255, .14); color: #fff; }
+}
+/* :focus-visible 单独写（老 Safari 不认，会让同一条规则里的其他选择器一起失效）；放在最后，盖过上面悬停时藏起圆点的规则 */
+@media (min-width: 1024px) {
+  .seek:focus-visible .knob { transform: scale(1); }
+  .vol:focus-visible { opacity: 1; transform: none; outline: 2px solid var(--accent); outline-offset: -4px; border-radius: 8px; transition: none; }
 }
 </style>

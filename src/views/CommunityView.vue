@@ -14,6 +14,8 @@ import ListFoot from '@/components/home/ListFoot.vue'
 import PostCard from '@/components/community/PostCard.vue'
 import PostSkeleton from '@/components/community/PostSkeleton.vue'
 import { useSlider, under, vRise, scrollBehavior } from '@/components/home/motion'
+import { useScrollEdge } from '@/components/motion/scrollEdge'
+import { isDesktop } from '@/composables/useDesktop'
 
 /*
  * 社区（常驻页）：最新 / 热门 / 关注 / 收藏四个标签，每个标签各自一份分页列表（滚到底自动加载）和滚动位置。
@@ -158,6 +160,23 @@ function selectTab(i) {
   if (!fresh) silentRefresh(i)
 }
 
+/*
+ * 键盘：标签行只有选中的那个能 Tab 进来，←/→ 换到左右的标签（到头绕回另一头），Home / End 到第一个 / 最后一个，
+ * 焦点跟着走（和收藏、创作者主页的标签一样）
+ */
+function onTabKey(e) {
+  const n = tabs.value.length
+  let next
+  if (e.key === 'ArrowLeft') next = (active.value + n - 1) % n
+  else if (e.key === 'ArrowRight') next = (active.value + 1) % n
+  else if (e.key === 'Home') next = 0
+  else if (e.key === 'End') next = n - 1
+  else return
+  e.preventDefault()
+  if (next !== active.value) selectTab(next)
+  nextTick(() => document.getElementById(`cm-tab-${next}`)?.focus())
+}
+
 /* ---------- 刷新 ---------- */
 
 /*
@@ -207,6 +226,21 @@ function toTopOrRefresh() {
   else refresh()
 }
 useTabRetap('community', toTopOrRefresh)
+
+/* 桌面布局：标签行右边的「刷新」按钮（手机上靠再点一次标签刷新，鼠标用户不容易发现）：直接回到顶部并刷新 */
+function reload() {
+  const el = scroller.value
+  if (el && el.scrollTop > 0) el.scrollTop = 0
+  refresh()
+}
+
+/*
+ * 桌面布局：标签行平时没有底线，内容从它下面滚过去时才出现细线和淡阴影（和 BackHeader 一样，components/motion/scrollEdge.js）。
+ * 手机布局不看（底线一直都在，也不往滚动区里放哨兵）；窗口跨过 1024px 时重新取一次。
+ */
+const hd = ref(null)
+const edge = useScrollEdge(hd, () => (isDesktop.value ? [scroller.value] : []))
+watch(isDesktop, () => nextTick(edge.refresh))
 
 /* 回到社区（从帖子详情返回、从别的 Tab 切回来）：数据旧了就在后台刷新当前标签 */
 onActivated(() => {
@@ -289,23 +323,38 @@ ensure(active.value)
 
 <template>
   <div class="page community">
-    <header class="bar-hd">
+    <header ref="hd" class="bar-hd" :class="{ 'm-edge': isDesktop }">
       <div ref="tabRow" class="ct-tabs cm-tabs" role="tablist">
         <span ref="tabBar" class="m-bar cm-bar" aria-hidden="true" />
         <button
           v-for="(name, i) in tabs"
+          :id="`cm-tab-${i}`"
           :key="name"
           type="button"
           class="ct-tab"
           :class="{ on: i === active }"
           role="tab"
           :aria-selected="i === active"
+          :tabindex="i === active ? 0 : -1"
           @click="selectTab(i)"
+          @keydown="onTabKey"
         >
           {{ name }}
         </button>
       </div>
       <button type="button" class="ct-search" aria-label="搜索帖子" @click="openSearch"><Icon name="search" /><span>搜索帖子</span></button>
+      <button
+        v-if="isDesktop"
+        type="button"
+        class="cm-reload m-press-sm"
+        :class="{ spin: refreshingTab === active }"
+        aria-label="刷新"
+        title="刷新"
+        :disabled="needLogin"
+        @click="reload"
+      >
+        <Icon name="refresh" />
+      </button>
     </header>
 
     <Transition name="cm-pill">
@@ -388,4 +437,56 @@ ensure(active.value)
 .cm-pill-enter-active { transition: opacity var(--dur-2) var(--ease-out), transform var(--dur-2) var(--ease-out); }
 .cm-pill-leave-active { pointer-events: none; transition: opacity var(--dur-2) var(--ease-in), transform var(--dur-2) var(--ease-in); }
 .cm-pill-enter-from, .cm-pill-leave-to { opacity: 0; transform: translate(-50%, -8px); }
+
+/*
+ * 桌面布局（≥ 1024px）：信息流是居中的一栏（--cm-col，680px），标签行和它左右对齐：
+ *   标签行 64px 高，平时没有底线（内容滚过去时 m-edge 的细线和淡阴影出现）；右边是「搜索帖子」和「刷新」。
+ *   帖子卡片在这一栏里是一张张圆角卡片（样式在 PostCard.vue），骨架同样。
+ *   标签行的左右留白按「这一栏居中」算；滚动区左右各留出滚动条的位置（scrollbar-gutter both-edges），
+ *   Windows 的常驻滚动条不会把下面这一栏挤得和标签行错开半个滚动条宽。
+ */
+@media (min-width: 1024px) {
+  .community { --cm-col: 680px; }
+  .community .bar-hd {
+    position: relative;
+    z-index: 1;
+    gap: 10px;
+    height: 64px;
+    padding: 0 max(var(--desk-pad), calc((100% - var(--cm-col)) / 2));
+    border-bottom-color: transparent;
+  }
+  .cm-tabs { gap: 28px; }
+  .ct-search { flex: 0 1 220px; height: 36px; border-radius: 18px; }
+  .cm-reload {
+    position: relative;
+    display: grid;
+    flex: none;
+    place-items: center;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: var(--chip);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .07);
+    color: var(--t2);
+    transition: background-color var(--dur-2) var(--ease-out), color var(--dur-2) var(--ease-out), opacity var(--dur-2) var(--ease-out);
+  }
+  .cm-reload svg { width: 16px; height: 16px; stroke-width: 2.2; }
+  .cm-reload:disabled { opacity: .4; cursor: default; }
+
+  .community .scroll { padding: 4px var(--desk-pad) 0; scrollbar-gutter: stable both-edges; }
+  .community .m-swap { max-width: var(--cm-col); margin: 0 auto; }
+
+  .cm-empty { padding: 120px 0 40px; }
+  .cm-empty .t { font-size: 18px; line-height: 26px; }
+  .cm-empty .s { margin-top: 10px; font-size: 14px; line-height: 22px; }
+  .cm-btn { height: 40px; margin-top: 24px; padding: 0 28px; border-radius: 20px; transition: opacity var(--dur-2) var(--ease-out); }
+
+  /* 「正在刷新」压在标签行下沿 */
+  .cm-refresh { top: 74px; }
+  .community .pad-b { height: 40px; }
+}
+@media (min-width: 1024px) and (hover: hover) {
+  .cm-reload:not(:disabled):hover { background: #1f1f1f; color: var(--t3); }
+  .cm-btn:hover { opacity: .88; }
+}
 </style>

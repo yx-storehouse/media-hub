@@ -31,4 +31,20 @@ defineProps({
 @supports not (aspect-ratio: 1 / 1) {
   .md::before { content: ''; display: block; padding-top: 56.25%; }
 }
+
+/* 桌面布局（≥ 1024px）：和帖子卡片（PostCard.vue）一样是一张张圆角卡片，位置、大小对得上，换成内容时不跳 */
+@media (min-width: 1024px) {
+  .sk-post {
+    gap: 12px;
+    padding: 18px 20px 20px;
+    border-bottom: 0;
+    border-radius: 16px;
+    background: var(--panel);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .06);
+  }
+  .sk-post + .sk-post { margin-top: 12px; }
+  .l1 { width: 32%; margin-top: 4px; }
+  .l2 { width: 78%; margin-top: 14px; }
+  .md { margin-top: 18px; border-radius: 12px; }
+}
 </style>

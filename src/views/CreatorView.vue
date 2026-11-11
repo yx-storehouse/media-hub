@@ -28,19 +28,25 @@ import ContentSwap from '@/components/home/ContentSwap'
 import { createFeed, PAGE } from '@/components/creator/feed'
 import { haptic } from '@/utils/motion'
 import { cameBack, useSlider, cover, vRise, fadeIn, scrollBehavior } from '@/components/home/motion'
+import { isDesktop } from '@/composables/useDesktop'
 
 /*
  * 创作者主页（#/creator/:id?tab=videos|posts|media）：头图 + 头像 + 关注 + 数据行，下面是吸顶的「视频 / 帖子 / 媒体」标签。
  * 视频：最新 / 最热 + 两列卡片；帖子：社区卡片列表；媒体：他发过的所有图（视频封面 + 帖子的图）拼成的三列照片墙，
  * 点图片全屏看大图（左右滑看这一墙已加载的所有图片），点视频进播放页。三个列表都是滚到底自动加载下一页。
  * 标签记在地址栏（replace，不多一条历史），刷新 / 返回还是同一个标签；没指定时按「视频 → 帖子 → 媒体」取第一个有内容的。
+ *
+ * 桌面布局（≥ 1024px）：没有压在头图上的顶栏（返回键在 CreatorHeader 的横幅里），标签栏直接吸在页面顶上；
+ * 视频是公共的自动列数网格，帖子是靠左对齐的一栏（和标签同一条左边线），媒体是更密的正方形照片墙（MediaGrid）。
+ * 只在加载失败时显示顶栏（给个返回键）。
  */
 defineOptions({ name: 'CreatorView' })
 
 const TABS = [{ key: 'videos', label: '视频' }, { key: 'posts', label: '帖子' }, { key: 'media', label: '媒体' }]
 const SORTS = ['最新', '最热']
-/* 顶栏（返回键那一行）高度；标签栏吸顶在它下面。和样式里的 48px 保持一致 */
+/* 顶栏（返回键那一行）高度；标签栏吸顶在它下面。和样式里的 48px 保持一致；桌面布局没有这一栏，标签栏吸在最顶上 */
 const TOP_BAR = 48
+const topBar = () => (isDesktop.value ? 0 : TOP_BAR)
 /* 头图高度，滚过它（减去顶栏）顶栏变成实底并显示名字。和 CreatorHeader 的 150px 一致 */
 const BANNER = 150
 /* 离底部还有这么多像素就取下一页 */
@@ -166,6 +172,8 @@ function applyParallax() {
   header.value?.parallax?.(scroller.value?.scrollTop ?? 0)
 }
 onBeforeUnmount(() => cancelAnimationFrame(parallaxRaf))
+/* 窗口跨过桌面布局的宽度（1024px）：头图按新布局重新放一次（桌面没有视差，留下的位移、透明度要清掉） */
+watch(isDesktop, () => nextTick(applyParallax))
 
 function checkMore() {
   const el = scroller.value
@@ -178,7 +186,7 @@ function checkMore() {
 watch(() => feed.value.loading, busy => { if (!busy) nextTick(checkMore) })
 
 /* 标签栏吸顶时的滚动位置 */
-const stickTop = () => Math.max(0, (header.value?.$el?.offsetHeight ?? 0) - TOP_BAR)
+const stickTop = () => Math.max(0, (header.value?.$el?.offsetHeight ?? 0) - topBar())
 
 /* 标签下的指示条（跟着文字宽度）、排序胶囊的白底：选中项变了滑过去 */
 const tabRow = ref(null)
@@ -402,7 +410,7 @@ onBeforeRouteUpdate(to => {
 </script>
 
 <template>
-  <div class="page creator">
+  <div class="page creator" :class="{ 'cr-failed': failed }">
     <!-- 顶栏：返回键压在头图上；滚过头图后变成实底并显示名字 -->
     <!-- data-iv-cover：变成实底时，看大图缩回被它盖住一截的格子只缩回露出来的那块（标签栏同理） -->
     <div class="cr-top" :class="{ solid: collapsed || failed }" :data-iv-cover="collapsed || failed ? '' : null">
@@ -463,10 +471,14 @@ onBeforeRouteUpdate(to => {
               <span class="lb">{{ s }}</span>
             </button>
           </div>
+          <!-- 桌面布局：主页还在加载时给排序胶囊那一行也占好位置（两颗胶囊骨架，就是字透明的 .chip，尺寸跟着公共的胶囊走），数据回来时网格不往下跳 -->
+          <div v-else-if="!creator && isDesktop" class="chips cr-sk-chips" aria-hidden="true">
+            <span v-for="s in SORTS" :key="s" class="chip sk">{{ s }}</span>
+          </div>
           <!-- 骨架原地淡出，新列表错峰浮现；换排序时旧列表留着等新的，快的直接换成新列表，慢了（250ms）才淡入骨架 -->
           <ContentSwap :pending="videos.total === null && !videos.error" :hold="!!creator">
             <div v-if="videos.total === null && !videos.error" class="grid g11 cr-sk" :class="{ pt: !creator }" aria-hidden="true">
-              <div v-for="i in 6" :key="i" class="vc"><div class="cv sk" /><div class="sk sk-tt" /></div>
+              <div v-for="i in (isDesktop ? 12 : 6)" :key="i" class="vc"><div class="cv sk" /><div class="sk sk-tt" /></div>
             </div>
             <div v-else-if="videos.total === null" class="empty">
               加载失败，请检查网络
@@ -475,7 +487,7 @@ onBeforeRouteUpdate(to => {
             <div v-else-if="!videos.list.length" v-rise.self class="empty">还没有发布视频</div>
             <div v-else :key="`list${sortKey}`">
               <div v-rise class="grid g11">
-                <VideoCard v-for="v in videos.list" :key="v.id" :video="v" />
+                <VideoCard v-for="v in videos.list" :key="v.id" :video="v" :by="false" />
               </div>
               <div class="cr-foot">
                 <span v-if="videos.loading">加载中…</span>
@@ -496,13 +508,14 @@ onBeforeRouteUpdate(to => {
           aria-labelledby="cr-tab-posts"
         >
           <ContentSwap :pending="posts.total === null && !posts.error" :hold="!!creator">
-            <PostSkeleton v-if="posts.total === null && !posts.error" :count="2" />
+            <PostSkeleton v-if="posts.total === null && !posts.error" class="cr-posts" :count="2" />
             <div v-else-if="posts.total === null" class="empty">
               加载失败，请检查网络
               <button type="button" class="retry" @click="posts.more()">重试</button>
             </div>
             <div v-else-if="!posts.list.length" v-rise.self class="empty">还没有发布帖子</div>
-            <div v-else>
+            <!-- cr-posts：桌面布局里帖子是一栏（最宽 --desk-col），左边和标签、网格对齐；手机上没有样式 -->
+            <div v-else class="cr-posts">
               <PostCard v-for="p in posts.list" :key="p.id" :post="p" :author-link="false" />
               <div class="cr-foot">
                 <span v-if="posts.loading">加载中…</span>
@@ -641,5 +654,82 @@ onBeforeRouteUpdate(to => {
 @keyframes sk { 50% { opacity: .5; } }
 @media (prefers-reduced-motion: reduce) {
   .sk { animation: none; }
+}
+
+/*
+ * ---- 桌面布局（≥ 1024px）----
+ * 页面顶栏不显示（返回键在头图横幅里），只有加载失败时显示一行返回键；标签栏吸在页面最顶上、靠左排，
+ * 和头部、网格的内容左边缘对齐（同 BackHeader 的算法：至少 --desk-pad，宽屏时跟着居中的 --desk-max 内容走）。
+ */
+@media (min-width: 1024px) {
+  .cr-top { display: none; }
+  .cr-failed .cr-top {
+    display: flex;
+    top: 0;
+    height: 64px;
+    padding: 0 max(var(--desk-pad), calc((100% - var(--desk-max)) / 2 + var(--desk-pad)));
+    box-shadow: none;
+  }
+  .cr-failed .cr-back { width: 36px; height: 36px; margin-left: -8px; background: transparent; }
+  .cr-failed .cr-back svg { width: 22px; height: 22px; }
+  .cr-fail { padding-top: 160px; }
+
+  /*
+   * 底边细线只画在内容宽度里（和头部、网格一样宽）：通栏的线在宽屏上会伸出内容很远。
+   * 用内容区里的一条 1px 背景图画（背景色照常铺满整行，吸顶时盖住滚过去的卡片）。
+   * 48px 高、文字间距 32px、选中 600：和搜索结果、收藏的标签栏同一个规格
+   */
+  .cr-tabs {
+    top: 0;
+    gap: 32px;
+    height: 48px;
+    padding: 0 max(var(--desk-pad), calc((100% - var(--desk-max)) / 2 + var(--desk-pad)));
+    border-bottom: 0;
+    background: linear-gradient(var(--line), var(--line)) 0 100% / 100% 1px no-repeat content-box, var(--bg);
+  }
+  /* 左右 8px 内边距再用负外边距收回：文字位置不变，键盘焦点框不贴着字 */
+  .cr-tab { flex: none; margin: 0 -8px; padding: 0 8px; }
+  .cr-tab.on { font-weight: 600; }
+  .cr-tab .lb { gap: 6px; }
+  .cr-tab .n { font-size: 13px; }
+  .cr-tab:focus-visible { outline-offset: -4px; }
+
+  /* 排序胶囊：和网格同宽、左边对齐；白底滑块的 top 跟着上边距走 */
+  .cr-pane .chips { max-width: var(--desk-max); margin: 0 auto; padding: 20px var(--desk-pad) 20px; gap: 10px; }
+  .cr-sort-bar { top: 20px; }
+  /* 胶囊骨架：字透明的真胶囊，宽高和「最新 / 最热」一样，这一行和真的排序行一样高；不接鼠标（没有悬停变色） */
+  .cr-sk-chips > .chip { border-radius: 999px; box-shadow: none; color: transparent; pointer-events: none; }
+  .cr-pane { min-height: calc(100% - 48px); }
+  .cr-pane > .m-swap:first-child .grid { padding-top: 24px; }
+  /* 首次加载的网格骨架上面已经有胶囊骨架那一行（同真的排序行），不再空 24px */
+  .cr-sk.pt { padding-top: 0; }
+  /* 骨架卡片的标题条：占的高度和真卡片的两行标题 + 信息行一样（10 + 40 + 22px） */
+  .sk-tt { height: 14px; margin: 13px 0 45px; }
+  /* 帖子一栏（最宽 --desk-col，卡片样式在 PostCard 里）：和上面的标签、头像同一条左边线（整页都是靠左排的，居中的一栏在这里反而对不齐） */
+  .cr-posts {
+    max-width: var(--desk-col);
+    margin-left: max(var(--desk-pad), calc((100% - var(--desk-max)) / 2 + var(--desk-pad)));
+    padding-top: 24px;
+  }
+
+  .cr-media { padding-top: 24px; }
+  .cr-mg-sk {
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 6px;
+    max-width: var(--desk-max);
+    margin: 0 auto;
+    padding: 0 var(--desk-pad);
+  }
+  .cr-mg-sk > .sk { border-radius: 8px; }
+
+  .cr-foot { height: 72px; font-size: 14px; }
+  .cr-more { font-size: 14px; }
+}
+@media (min-width: 1024px) and (hover: hover) {
+  .cr-tab:not(.on):hover { color: var(--t3); }
+  .cr-more { border-radius: 16px; transition: background-color var(--dur-2) var(--ease-out); }
+  .cr-more:hover { background: var(--chip); }
+  .cr-failed .cr-back { transition: background-color var(--dur-2) var(--ease-out); }
+  .cr-failed .cr-back:hover { background: var(--chip); }
 }
 </style>

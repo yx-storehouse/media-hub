@@ -1,7 +1,8 @@
 <script setup>
-import { computed, ref, watch, onActivated } from 'vue'
+import { computed, ref, watch, onActivated, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { HOME_TABS } from '@/config/nav'
+import { isDesktop } from '@/composables/useDesktop'
 import AppLogo from '@/components/AppLogo.vue'
 import Icon from '@/components/Icon.vue'
 import BottomSheet from '@/components/BottomSheet.vue'
@@ -38,9 +39,11 @@ function centerActiveTab(behavior) {
 watch(tab, () => requestAnimationFrame(() => centerActiveTab(scrollBehavior())), { flush: 'post' })
 onActivated(() => centerActiveTab('auto'))
 
-/* 选中分类下面的指示条：换分类时滑过去（先拉长再收拢），跟着标签一起横向滚动 */
+/* 选中分类下面的指示条：换分类时滑过去（先拉长再收拢），跟着标签一起横向滚动（桌面上字小一号，指示条也短一点，同社区的标签） */
 const tabBar = ref(null)
-useSlider(tabRow, tabBar, under('.tab.on', 27), { key: () => tab.value, dur: '--dur-3' })
+const underMobile = under('.tab.on', 27)
+const underDesk = under('.tab.on', 21)
+useSlider(tabRow, tabBar, box => (isDesktop.value ? underDesk : underMobile)(box), { key: () => tab.value, deps: () => isDesktop.value, dur: '--dur-3' })
 
 /* 当前该渲染哪个分类页：推荐 / 最新各有独立组件，其余共用一个组件、靠 tab 参数区分 */
 const CATEGORY_VIEWS = { recommend: RecommendTab, latest: LatestTab }
@@ -62,12 +65,43 @@ const edge = useScrollEdge(tabsEl, () => {
 })
 watch(tab, () => edge.refresh(), { flush: 'post' })
 
-/* 换分类时新的分类页从切换的方向淡入一点（切回首页、KeepAlive 切回来时不动） */
+/* 换分类时新的分类页从切换的方向淡入一点（切回首页、KeepAlive 切回来时不动）；桌面上只淡入，不横移 */
 const tabIndex = id => HOME_TABS.findIndex(t => t.id === id)
 watch(tab, (now, before) => {
   const el = body.value?.$el
-  if (el instanceof Element) fadeIn(el, { x: tabIndex(now) > tabIndex(before) ? 12 : -12 })
+  if (el instanceof Element) fadeIn(el, { x: isDesktop.value ? 0 : tabIndex(now) > tabIndex(before) ? 12 : -12 })
 }, { flush: 'post' })
+
+/*
+ * 桌面布局：标签行、「最新」的日期行在滚动区外面，网格在滚动区里面。Windows 上滚动区右边有一条滚动条（约 10px），
+ * 网格居中时是在「滚动区宽 - 滚动条」里居中的，外面的行要按同样的宽度算才对得齐（超宽窗口才会居中，平时都贴 --desk-pad）。
+ * 所以量出当前分类页滚动区的滚动条宽度，写到页面上的 --home-sb（样式里的 --home-x 用它）。手机上不写。
+ */
+const pageEl = ref(null)
+let sbEl = null
+const sbRo = typeof ResizeObserver === 'function' ? new ResizeObserver(() => syncSb()) : null
+function syncSb() {
+  const page = pageEl.value
+  if (!page) return
+  if (!isDesktop.value) {
+    if (page.style.getPropertyValue('--home-sb')) page.style.removeProperty('--home-sb')
+    return
+  }
+  const el = body.value?.$el
+  const sc = el instanceof Element ? el.querySelector(':scope > .scroll') : null
+  if (sc !== sbEl) {
+    if (sbEl) sbRo?.unobserve(sbEl)
+    sbEl = sc
+    if (sc) sbRo?.observe(sc)
+  }
+  if (!sc || !sc.isConnected || !sc.clientWidth) return
+  const w = `${sc.offsetWidth - sc.clientWidth}px`
+  if (page.style.getPropertyValue('--home-sb') !== w) page.style.setProperty('--home-sb', w)
+}
+watch([tab, isDesktop], () => syncSb(), { flush: 'post' })
+onMounted(syncSb)
+onActivated(syncSb)
+onBeforeUnmount(() => sbRo?.disconnect())
 
 const sheetOpen = ref(false)
 function chooseTab(id) {
@@ -77,8 +111,9 @@ function chooseTab(id) {
 </script>
 
 <template>
-  <div class="page home">
-    <header class="hd">
+  <div ref="pageEl" class="page home">
+    <!-- 桌面布局里 Logo、搜索、历史、片库都在顶栏和左侧导航上：这一行不显示（m-only） -->
+    <header class="hd m-only">
       <AppLogo />
       <RouterLink to="/search" class="sbox m-hold"><Icon name="search" />搜您想搜,看您所想</RouterLink>
       <button class="hi m-hold" @click="router.push('/history')"><Icon name="history" />历史</button>
@@ -99,7 +134,7 @@ function chooseTab(id) {
           :aria-current="t.id === tab ? 'page' : undefined"
         >{{ t.name }}<Icon v-if="t.hot" name="flame" class="flame" /></RouterLink>
       </div>
-      <button class="more m-hold" aria-label="全部分类" @click="sheetOpen = true"><Icon name="list" /></button>
+      <button class="more m-hold" aria-label="全部分类" @click="sheetOpen = true"><Icon name="list" /><span class="d-only">全部分类</span></button>
     </nav>
 
     <!--
@@ -207,4 +242,46 @@ function chooseTab(id) {
 
 /* ---- tab bodies: fill the rest of the page, each owns its .scroll ---- */
 .tab-body { display: flex; flex: 1; flex-direction: column; min-height: 0; }
+
+/*
+ * ---- 桌面布局（≥ 1024px）----
+ * 自己的顶栏（Logo / 搜索 / 历史 / 片库）不显示（在桌面顶栏和左侧导航上），分类标签行就是页面最上面一行：
+ * 64px 高、16px 字（同社区的标签行、BackHeader），8 个分类一行全部摆下，不用横着滚；点一下就切换。
+ * --home-x：内容左边缘（和 .grid / .desk-wrap 同一个算法：至少 --desk-pad，超宽窗口跟着居中的 --desk-max 走；
+ * 减去滚动区的滚动条宽度 --home-sb，见上面 syncSb）。标签行、「最新」的日期行都用它，左边和下面的网格对齐。
+ * 「全部分类」是右端的小按钮，右边和网格右边缘对齐，打开居中的对话框（BottomSheet 在桌面上就是对话框）。
+ * 平时没有底线，内容滚到标签行下面时才出现细线和淡阴影（m-edge）。
+ */
+@media (min-width: 1024px) {
+  .home { --home-x: max(var(--desk-pad), calc((100% - var(--home-sb, 0px) - var(--desk-max)) / 2 + var(--desk-pad))); }
+  .tabs { height: 64px; border-bottom-color: transparent; }
+  .tabs .row { gap: 28px; padding: 0 calc(var(--home-x) + 120px) 0 var(--home-x); }
+  .tab { font-size: 16px; line-height: 30px; }
+  /* 键盘焦点框画在字外面（公共的 .hs 规则往里收 2px，标签和字一样宽，框会压在字上）；64px 高的行里上下都放得下 */
+  .tab:focus-visible { border-radius: 4px; outline-offset: 4px; }
+  .tab .flame { width: 13px; height: 15px; }
+  /* 指示条压在字下面 6px（同社区的 .ct-tab） */
+  .tab-bar { bottom: 11px; }
+  .tabs .more {
+    top: 16px;
+    right: calc(var(--home-sb, 0px) + var(--home-x));
+    bottom: auto;
+    gap: 6px;
+    width: auto;
+    height: 32px;
+    margin-right: -12px;
+    padding: 0 12px 0 10px;
+    border-radius: 16px;
+    background: none;
+    color: var(--t2);
+    font-size: 13px;
+    font-weight: 500;
+  }
+  .tabs .more svg { width: 16px; height: 16px; }
+}
+@media (min-width: 1024px) and (hover: hover) {
+  .tabs .more { transition: background-color var(--dur-2) var(--ease-out), color var(--dur-2) var(--ease-out); }
+  .tabs .more:hover { background: #1f1f1f; color: var(--t3); }
+  .tab:not(.on):hover { color: var(--t3); }
+}
 </style>

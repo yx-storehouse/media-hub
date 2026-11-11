@@ -205,6 +205,14 @@
 }
 .page.pg-hero-back-leave-to { opacity: 0; }
 .page.pg-hero-back-enter-active { transition: none; }
+/*
+ * 桌面布局（≥ 1024px）：旧页不再原样垫着，和 pgd 一样很快淡掉（--dur-1）——宽屏上两整页半透明地叠在一起是一整屏的重影；
+ * 封面在 --z-hero 的浮层里飞，不受影响。手机上照旧（旧页原地垫着）。
+ */
+@media (min-width: 1024px) {
+  .page.pg-hero-leave-active { transition: opacity var(--dur-1) var(--ease-in); }
+  .page.pg-hero-leave-to { opacity: 0; }
+}
 
 .tabbar.pg-hero-back-leave-active {
   transition: transform var(--dur-3) var(--ease-in), opacity var(--dur-2) var(--ease-in);
@@ -225,6 +233,25 @@
   transition: transform var(--dur-spring-snappy) var(--spring-snappy), opacity var(--dur-2) var(--ease-out);
 }
 .tabbar.pg-hero-enter-from, .tabbar.pg-hero-back-enter-from { transform: translate3d(0, 100%, 0); opacity: 0; }
+
+/*
+ * ---- 桌面布局的页面切换（窗口 ≥ 1024px）----
+ * pageTransition.js 在桌面上把 pg-fwd / pg-back / pg-tab 都换成 pgd（pageMotion.name 仍是原来的名字，
+ * 列表入场、hero 照常按它判断）；共享元素过渡 pg-hero / pg-hero-back 名字不变，样式就是上面那几条（本来就是淡入淡出）。
+ * 顶栏和左侧导航不在路由出口里，换页时一动不动；只有内容区换页，不做任何横向滑动。
+ * 「淡出 → 淡入」（fade through）：旧页先很快淡掉（--dur-1），新页晚半拍（--dur-1 的一半）开始淡入、
+ * 从下面 8px 浮上来（--dur-3，和 pg-hero 同一手感）。两页大面积的内容不会半透明地叠在一起（交叉淡化在宽屏上
+ * 是一整屏的重影），中间那一下只是内容区的底色，顶栏、导航一直都在。
+ * 层级、离开中不接手指的规则同 pg-tab：新页（z-index 2）整页盖住旧页，旧页自成层叠上下文。
+ */
+.page.pgd-enter-active {
+  z-index: 2;
+  transition: opacity var(--dur-3) var(--ease-out) calc(var(--dur-1) / 2), transform var(--dur-3) var(--ease-out) calc(var(--dur-1) / 2);
+  will-change: opacity, transform;
+}
+.page.pgd-enter-from { opacity: 0; transform: translate3d(0, 8px, 0); }
+.page.pgd-leave-active { isolation: isolate; transition: opacity var(--dur-1) var(--ease-in); }
+.page.pgd-leave-to { opacity: 0; }
 
 /*
  * ---- 骨架屏闪光：<div class="m-shimmer" /> ----

@@ -1,6 +1,8 @@
 import { isNavigationFailure, NavigationFailureType } from 'vue-router'
 import { reducedMotion, SPRINGS, springAt, springLinear, cssDuration, cssEasing, Z } from '@/utils/motion'
-import { overrideNextTransition, pageMotion } from './pageTransition'
+import { isDesktop } from '@/composables/useDesktop'
+import { deskPlayerBox } from '@/components/video/deskLayout'
+import { overrideNextTransition, pageMotion, allowDeskHero } from './pageTransition'
 
 /*
  * 共享元素过渡（hero）：点视频卡片，封面从卡片「飞」进播放页的播放器；返回时再从播放器缩回原来那张卡片。
@@ -30,6 +32,13 @@ import { overrideNextTransition, pageMotion } from './pageTransition'
  *    落地露出来的那一刻才开播（VideoPlayer 的 hold），不会先听到声音、开头那一段也不会在看不见的时候播掉。
  *  - 这些情况不飞，走普通的页面切换：减少动态效果、全屏 / 小窗播放中、卡片几乎被挡住、浏览器自己做了滑动（iOS 边缘右滑）、
  *    返回时已经不是同一个视频（「下一个」换过）、屏幕转过 / 窗口大小变了、看不到原来那张卡片。
+ *
+ * 桌面布局（窗口 ≥ 1024px）也飞，几处不同：
+ *  - 页面不贴着 #app 左上角（让出了顶栏和左侧导航），落点要加上页面本来的位置（whenPlaced）；
+ *  - 播放页的播放器在两栏网格里、有 12px 圆角：起飞时先按 components/video/deskLayout.js 的规则估计它的位置，
+ *    落地、起飞（返回）时圆角按播放器实际的算；
+ *  - 播放页是整页滚动的：播放器滚出去大半了，返回时不缩回卡片；页面往下滚过时点相似推荐也不飞（换视频会回到顶部）；
+ *  - 播放页的 .scroll 是 display: contents（没有盒子），量裁切、亮度时跳过它。
  */
 
 const SPRING = SPRINGS.smooth          // 大面积的面：几乎不过冲，停稳约 358ms
@@ -42,6 +51,9 @@ const DOUBLE_MS = 350                  // 点卡片以后这么久之内、在�
 const DOUBLE_PX = 24
 
 const lerp = (a, b, p) => a + (b - a) * p
+
+/* 桌面布局的落点已经按页面的位置算（见上面），桌面上也接受 pg-hero / pg-hero-back */
+allowDeskHero()
 
 /*
  * 动效令牌只读一次：读 CSS 变量要算样式，页面刚换上（返回起飞、落地）的那一刻读会逼浏览器当场把样式算一遍。
@@ -67,7 +79,7 @@ function settleMs(v0) {
   return ms
 }
 
-/* ---------- 位置：全部用 #app 里的坐标（桌面上 #app 是居中的 480 宽一栏） ---------- */
+/* ---------- 位置：全部用 #app 里的坐标（480–1023px 宽的窗口里 #app 是居中的 480 宽一栏，桌面布局上铺满窗口） ---------- */
 
 const appEl = () => document.getElementById('app') || document.body
 function appBox() {
@@ -88,7 +100,8 @@ function clipOf(el, rect) {
   const app = appEl()
   for (let p = el.parentElement, n = 0; p && n < 16; p = p.parentElement, n++) {
     const cs = getComputedStyle(p)
-    if (cs.overflowX !== 'visible' || cs.overflowY !== 'visible' || p === app) {
+    // display: contents 的元素没有盒子（桌面播放页的 .scroll）：它的 overflow 不裁切，位置也量不到（是 0×0）
+    if (cs.display !== 'contents' && (cs.overflowX !== 'visible' || cs.overflowY !== 'visible' || p === app)) {
       const r = p.getBoundingClientRect()
       top = Math.max(top, r.top)
       right = Math.min(right, r.right)
@@ -503,8 +516,15 @@ function install(router) {
 
 /* ---------- 进：卡片 → 播放器 ---------- */
 
-/* 播放页的播放器大概在哪：页面顶部（让出安全区）、整栏宽、16:9 */
+/** 播放器的圆角：只有桌面布局有（手机上是直角，不读样式） */
+const radiusOf = el => (isDesktop.value && el ? parseFloat(getComputedStyle(el).borderTopLeftRadius) || 0 : 0)
+
+/* 播放页的播放器大概在哪：页面顶部（让出安全区）、整栏宽、16:9；桌面上按播放页的网格规则估计（挂上后再核对） */
 function playerGuess(coverEl, app) {
+  if (isDesktop.value) {
+    const b = deskPlayerBox()
+    return { x: b.x - app.x, y: b.y - app.y, w: b.w, h: b.h, r: b.r, c: [0, 0, 0, 0] }
+  }
   const page = coverEl.closest('.page')
   const top = page ? parseFloat(getComputedStyle(page).paddingTop) || 0 : 0
   return { x: 0, y: top, w: app.w, h: app.w * 9 / 16, r: 0, c: [0, 0, 0, 0] }
@@ -589,7 +609,9 @@ function launch(p, coverEl, reuse) {
     // 看到的亮度是一路往上到 #app 的不透明度相乘（每层读一次样式、不排版，点一下只读这一次）
     let o = 1
     for (let n = coverEl.closest('a') || coverEl; n && n.id !== 'app'; n = n.parentElement) {
-      const v = parseFloat(getComputedStyle(n).opacity)
+      const cs = getComputedStyle(n)
+      // display: contents 的元素（桌面播放页的 .scroll）没有盒子，它的不透明度画不出来
+      const v = cs.display === 'contents' ? 1 : parseFloat(cs.opacity)
       if (Number.isFinite(v)) o *= v
     }
     if (o < 0.99) f.layers[0].el.animate([{ opacity: o }, { opacity: 1 }], { duration: tok().d2, easing: tok().out })
@@ -663,14 +685,16 @@ export function heroTap(e, coverEl, video, router, to) {
 /*
  * 播放器停稳后的位置：页面刚挂上就读会逼浏览器当场排版，所以等这一帧画完、由 IntersectionObserver 带回来。
  * 页面正在 pg-hero 入场（往上浮几像素）：播放器和所在页面在同一帧量，两者之差就是去掉上浮位移后的位置
- * （页面本身 inset: 0 贴着 #app）。不能一个用观察那一帧的、一个回调里再读：CPU 忙时两者差一两帧，
+ * （手机上页面 inset: 0 贴着 #app；桌面上页面让出了顶栏和左侧导航，再加上页面本来的位置，见 pageRest）。
+ * 不能一个用观察那一帧的、一个回调里再读：CPU 忙时两者差一两帧，
  * 上浮已经走了一截，算出来的终点偏下一两像素，浮层会多改飞一次、落地时留一道细边。
  */
 function whenPlaced(playerEl, cb) {
   const page = playerEl.closest('.page')
   const done = (r, pr) => {
     const o = pr ? { x: pr.left, y: pr.top } : appBox()
-    cb({ x: r.left - o.x, y: r.top - o.y, w: r.width, h: r.height, r: 0, c: [0, 0, 0, 0] })
+    const rest = pr ? pageRest(page) : { x: 0, y: 0 }
+    cb({ x: r.left - o.x + rest.x, y: r.top - o.y + rest.y, w: r.width, h: r.height, r: radiusOf(playerEl), c: [0, 0, 0, 0] })
   }
   if (typeof IntersectionObserver === 'function') {
     const io = new IntersectionObserver(entries => {
@@ -687,6 +711,18 @@ function whenPlaced(playerEl, cb) {
     io.observe(playerEl)
     if (page) io.observe(page)
   } else requestAnimationFrame(() => done(playerEl.getBoundingClientRect(), page && page.getBoundingClientRect()))
+}
+
+/*
+ * 页面不算转场位移时在 #app 里的位置（offsetLeft / offsetTop 不受 transform 影响）：手机上一直是 (0, 0)，不用读；
+ * 桌面上是 (左侧导航宽, 顶栏高)。.page 的定位祖先是铺满 #app 的 .shell。
+ */
+function pageRest(page) {
+  if (!isDesktop.value || !page) return { x: 0, y: 0 }
+  const app = appBox()
+  const sh = page.offsetParent
+  const sr = sh && sh !== document.body ? sh.getBoundingClientRect() : { left: app.x, top: app.y }
+  return { x: sr.left - app.x + page.offsetLeft, y: sr.top - app.y + page.offsetTop }
 }
 
 /**
@@ -740,8 +776,11 @@ export function claimHero(id) {
 export function heroRelated(e, coverEl, video, router, to) {
   const cur = router.currentRoute.value
   if (cur.name !== 'video' || String(cur.params.id) === String(video?.id)) return false
-  const playerEl = coverEl?.closest('.page')?.firstElementChild
+  const page = coverEl?.closest('.page')
+  const playerEl = page?.firstElementChild
   if (!playerEl || document.querySelector('.player.pseudo')) return false
+  // 桌面上整页滚动：往下滚过了（播放器不在原位，换成新视频时页面会回到顶部），不飞；手机上页面本身不滚，一直是 0
+  if (page.scrollTop > 1) return false
   const c = precheck(e, coverEl, video, router, to)
   if (!c) return false
   const { vid, dest, app, s } = c
@@ -750,7 +789,7 @@ export function heroRelated(e, coverEl, video, router, to) {
   setTimeout(() => guardDoubleTap(e))
   if (pendingRel) dropLaunch(pendingRel, false)
   const p = {
-    vid, from: s, target: { ...toApp(pr, app), r: 0, c: [0, 0, 0, 0] }, arrived: false, claim: null, flight: null, dead: false,
+    vid, from: s, target: { ...toApp(pr, app), r: radiusOf(playerEl), c: [0, 0, 0, 0] }, arrived: false, claim: null, flight: null, dead: false,
     navTo: dest.fullPath,
     // 缩略图自己藏起来（列表换成新视频的相似推荐以后它本来也就没了），落地 / 作废时恢复
     hide: () => {
@@ -806,6 +845,12 @@ export function armHeroBack(router, to, origin, source, vid) {
   // 转过屏、窗口变了（只读 window 的尺寸，不读排版：离开的这一刻页面可能还有没排完的改动）
   if (Math.abs(window.innerWidth - origin.winW) > 1 || Math.abs(window.innerHeight - origin.winH) > 120) return false
   if (document.querySelector('.player.pseudo')) return false
+  // 桌面上播放页整页滚动：播放器滚出去大半（或者看不见了）就不缩回卡片，走普通换页
+  if (isDesktop.value) {
+    const el = source?.()?.el
+    const st = el && stateOf(el)
+    if (!st || (st.w - st.c[1] - st.c[3]) * (st.h - st.c[0] - st.c[2]) < 0.5 * st.w * st.h) return false
+  }
   install(router)
   if (!overrideNextTransition('pg-hero-back')) return false
   pendingBack = { vid: origin.vid, origin, source }
@@ -857,8 +902,9 @@ function launchBack(b) {
     const el = src?.el
     const rect = el?.getBoundingClientRect()
     if (!rect || !rect.width) return
-    // 播放器本身没有圆角（伪全屏之类的情况根本不飞），不用再读样式
-    const from = { ...toApp(rect, app), r: 0, c: [0, 0, 0, 0] }
+    // 手机上播放器没有圆角、一直在页面顶上（伪全屏之类的情况根本不飞），不用再读样式；
+    // 桌面上播放器有圆角、可能被滚动裁掉一截（顶栏下面），按它此刻真正看得见的样子起飞
+    const from = (isDesktop.value && stateOf(el, app)) || { ...toApp(rect, app), r: 0, c: [0, 0, 0, 0] }
     const cover = src.cover || {}
     // 播放器上显示着的封面图（加载好了才用，否则用占位图，和卡片一致）
     const want = cover.src ? new URL(cover.src, location.href).href : null

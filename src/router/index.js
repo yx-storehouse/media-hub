@@ -9,6 +9,7 @@ import HomeView from '@/views/home/HomeView.vue'
 /*
  * meta.tabbar  -> show the bottom tab bar
  * meta.tab     -> which bottom tab is highlighted
+ * meta.deskRail -> 桌面布局（≥ 1024px）下左侧导航默认收成图标栏（播放页、短视频：内容要宽），见 composables/useDeskSide.js
  * Pages with meta.tabbar are kept alive (see App.vue), so switching tabs keeps their scroll position and state.
  */
 const routes = [
@@ -22,14 +23,14 @@ const routes = [
     component: HomeView,
     meta: { tabbar: true, tab: 'home' }
   },
-  { path: '/short', name: 'short', component: () => import('@/views/ShortView.vue'), meta: { tabbar: true, tab: 'short' } },
+  { path: '/short', name: 'short', component: () => import('@/views/ShortView.vue'), meta: { tabbar: true, tab: 'short', deskRail: true } },
   { path: '/live', name: 'live', component: () => import('@/views/LiveView.vue'), meta: { tabbar: true, tab: 'live' } },
   { path: '/community', name: 'community', component: () => import('@/views/CommunityView.vue'), meta: { tabbar: true, tab: 'community' } },
   { path: '/nearby', name: 'nearby', component: () => import('@/views/NearbyView.vue'), meta: { tabbar: true, tab: 'nearby' } },
   { path: '/me', name: 'me', component: () => import('@/views/MeView.vue'), meta: { tabbar: true, tab: 'me' } },
   { path: '/search', name: 'search', component: () => import('@/views/SearchView.vue') },
   // 播放页；id 来自接口（数字）或演示数据（如 rec0:3），链接里统一 encodeURIComponent
-  { path: '/video/:id', name: 'video', component: () => import('@/views/VideoView.vue') },
+  { path: '/video/:id', name: 'video', component: () => import('@/views/VideoView.vue'), meta: { deskRail: true } },
   // 帖子详情（社区卡片点进来）；id 同样可能来自接口或演示数据，链接里 encodeURIComponent
   { path: '/post/:id', name: 'post', component: () => import('@/views/PostView.vue') },
   // 创作者主页（?tab=videos|posts）；id 来自接口（数字）或演示数据（如 aijc、c1），链接里 encodeURIComponent

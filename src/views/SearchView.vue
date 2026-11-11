@@ -16,6 +16,7 @@ import Icon from '@/components/Icon.vue'
 import Cover from '@/components/Cover.vue'
 import VideoCard from '@/components/VideoCard.vue'
 import PostCard from '@/components/community/PostCard.vue'
+import PostSkeleton from '@/components/community/PostSkeleton.vue'
 import SkeletonGrid from '@/components/home/SkeletonGrid.vue'
 import ListFoot from '@/components/home/ListFoot.vue'
 import ContentSwap from '@/components/home/ContentSwap'
@@ -24,7 +25,8 @@ import { useRecentSearches } from '@/components/search/recent'
 import { useBack } from '@/composables/useBack'
 import { toast } from '@/composables/useToast'
 import { getHotWords, getCreators, searchVideos, searchPosts } from '@/api'
-import { cameBack, useSlider, under, vRise, fadeIn, pin, scrollBehavior } from '@/components/home/motion'
+import { cameBack, useSlider, under, cover, vRise, fadeIn, pin, scrollBehavior } from '@/components/home/motion'
+import { isDesktop } from '@/composables/useDesktop'
 
 /*
  * 搜索页（#/search?q=关键词&type=post）。
@@ -33,6 +35,9 @@ import { cameBack, useSlider, under, vRise, fadeIn, pin, scrollBehavior } from '
  * 关键词和标签记在地址栏，刷新 / 返回还是同样的结果；type 省略 = 视频。
  * 从建议页搜索多一条历史（返回回到建议页），结果页里再换词、切标签不多。
  * 帖子里的话题、社区的搜索框带 type=post 进来，默认显示「帖子」。
+ *
+ * 桌面布局（≥ 1024px）：搜索框在全局顶栏里（components/desk/DeskSearch.vue，它也只改地址栏 ?q=），这一页自己的搜索栏不显示；
+ * 结果页是靠左对齐的「视频 / 帖子」标签 + 公共视频网格 / 帖子一栏，建议页是居中的一栏。地址栏变了这一页照常跟着搜（见文末的 watch）。
  */
 defineOptions({ name: 'SearchView' })
 
@@ -256,10 +261,12 @@ function selectType(key) {
   })
 }
 
-/* 结果标签下的指示条：切标签时滑过去 */
+/* 结果标签下的指示条：切标签时滑过去（桌面布局里和标签文字一样宽，同创作者主页的标签） */
 const tabRow = ref(null)
 const tabBar = ref(null)
-useSlider(tabRow, tabBar, under('.sr-tab.on', 20), { key: () => type.value, deps: () => [query.value, tabCounts.video, tabCounts.post] })
+const barUnder = under('.sr-tab.on', 20)
+const barCover = cover('.sr-tab.on', -6)   // 桌面上标签左右各有 8px 内边距（见样式）：指示条比文字左右各多 2px（同创作者主页、收藏的标签）
+useSlider(tabRow, tabBar, box => (isDesktop.value ? barCover : barUnder)(box), { key: () => type.value, deps: () => [query.value, tabCounts.video, tabCounts.post, isDesktop.value] })
 
 /* 方向键在两个标签之间切换（只有选中的标签能 Tab 进入） */
 function onTabKey(e) {
@@ -281,7 +288,9 @@ let snapKey = window.history.state?.position ?? ''
 function saveSnapshot() {
   if (!query.value) return
   const el = scroller.value
-  if (el && el.isConnected && el.clientHeight) savedTop[type.value] = el.scrollTop
+  // 桌面布局不在这里重新读：进播放页时左侧导航先换了宽度（收成图标栏）、这一页还没钉住，这一刻读排版会让浏览器的
+  // 滚动锚定把 scrollTop 改掉（网格列数变了）；滚动时 onScroll 已经记下了准确的位置
+  if (!isDesktop.value && el && el.isConnected && el.clientHeight) savedTop[type.value] = el.scrollTop
   snapshots.delete(snapKey)
   snapshots.set(snapKey, {
     at: Date.now(),
@@ -324,8 +333,8 @@ onMounted(() => {
     scrollToSaved()
     return
   }
-  // 只在有鼠标的设备上自动聚焦：触屏上会弹出键盘挡住建议
-  if (!query.value && window.matchMedia('(hover: hover)').matches) inputEl.value?.focus()
+  // 只在有鼠标的设备上自动聚焦：触屏上会弹出键盘挡住建议。桌面布局里这一页的搜索栏不显示（用顶栏的搜索框，按「/」聚焦）
+  if (!query.value && !isDesktop.value && window.matchMedia('(hover: hover)').matches) inputEl.value?.focus()
 })
 onBeforeUnmount(saveSnapshot)
 
@@ -351,7 +360,8 @@ watch(() => route.fullPath, () => {
 
 <template>
   <div class="page search" :class="{ 'has-res': query }">
-    <div class="sh-hd">
+    <!-- m-only：桌面布局里用顶栏的搜索框，这一栏不显示 -->
+    <div class="sh-hd m-only">
       <button type="button" class="sh-back" aria-label="返回" @click="back"><Icon name="chevL" /></button>
       <div class="sh-field">
         <Icon name="search" />
@@ -413,13 +423,10 @@ watch(() => route.fullPath, () => {
               加载失败，请检查网络
               <button type="button" class="retry" @click="feeds[t.key].more()">重试</button>
             </div>
-            <SkeletonGrid v-else-if="feeds[t.key].total === null && t.key === 'video'" :count="6" gap="g16" />
-            <div v-else-if="feeds[t.key].total === null" aria-hidden="true">
-              <div v-for="i in 3" :key="i" class="sk-post">
-                <div class="sk av" />
-                <div class="bd"><div class="sk l1" /><div class="sk l2" /><div class="sk md" /></div>
-              </div>
-            </div>
+            <!-- 桌面布局一行 4–6 张：12 张骨架铺满一屏，不会只剩半行 -->
+            <SkeletonGrid v-else-if="feeds[t.key].total === null && t.key === 'video'" :count="isDesktop ? 12 : 6" gap="g16" />
+            <!-- 帖子骨架：和社区、创作者主页同一个（桌面布局里也是一张张圆角卡片） -->
+            <PostSkeleton v-else-if="feeds[t.key].total === null" class="sr-posts" :count="3" />
 
             <div v-else-if="!feeds[t.key].list.length" :key="`none${resultKey}`" v-rise.self class="sr-none">
               <!-- 没有结果：换个词，或者看看另一个标签 -->
@@ -445,10 +452,11 @@ watch(() => route.fullPath, () => {
               <div v-if="t.key === 'video'" v-rise class="grid g16 sr-grid">
                 <VideoCard v-for="v in feeds.video.list" :key="v.id" :video="v" />
               </div>
-              <div v-else>
+              <!-- sr-posts：桌面布局里帖子是一栏（最宽 --desk-col），左边和标签对齐；手机上没有样式 -->
+              <div v-else class="sr-posts">
                 <PostCard v-for="p in feeds.post.list" :key="p.id" :post="p" />
               </div>
-              <ListFoot :feed="feeds[t.key]" />
+              <ListFoot :feed="feeds[t.key]" :class="{ 'sr-pfoot': t.key === 'post' }" />
             </div>
           </ContentSwap>
         </section>
@@ -458,7 +466,8 @@ watch(() => route.fullPath, () => {
         建议页：三块各自出现时错峰浮现；「全部清除」时近期搜索的词依次淡出，下面的两块平滑往上补位；
         编辑时删掉一个词，后面的词平滑挪过来
       -->
-      <TransitionGroup v-else tag="div" name="sh-blk" class="sh-sug" :class="{ clearing: clearingRecent }" @before-leave="pin">
+      <!-- desk-col：桌面布局里建议页是居中的一栏（手机上这个类什么都不做） -->
+      <TransitionGroup v-else tag="div" name="sh-blk" class="sh-sug desk-col" :class="{ clearing: clearingRecent }" @before-leave="pin">
         <section v-if="recentList.length" key="recent" class="sh-blk">
           <div class="sh-st">
             <div class="t">近期搜索</div>
@@ -635,21 +644,79 @@ watch(() => route.fullPath, () => {
 .sr-hot-t { margin: 40px 0 12px; color: var(--t2); font-size: 12px; }
 .sr-none .kws { justify-content: center; }
 
-/* 帖子骨架（和社区卡片一样的位置） */
-.sk { border-radius: 6px; background: #161616; animation: sk 1.2s ease-in-out infinite; }
-.sk-post { display: flex; gap: 11px; padding: 14px; border-bottom: 1px solid var(--line); }
-.sk-post .av { flex: none; width: 44px; height: 44px; border-radius: 50%; }
-.sk-post .bd { flex: 1; min-width: 0; }
-.sk-post .l1 { width: 40%; height: 14px; margin-top: 4px; }
-.sk-post .l2 { width: 86%; height: 14px; margin-top: 12px; }
-.sk-post .md { margin-top: 12px; aspect-ratio: 16 / 9; border-radius: 7px; }
-@keyframes sk { 50% { opacity: .5; } }
-@media (prefers-reduced-motion: reduce) {
-  .sk { animation: none; }
-}
+/*
+ * ---- 桌面布局（≥ 1024px）----
+ * 搜索栏（.sh-hd）由 .m-only 藏起来，搜索框在全局顶栏里。
+ * 结果页：标签栏靠左、和网格内容的左边缘对齐（至少 --desk-pad，宽屏时跟着居中的 --desk-max 内容走，同 BackHeader）；
+ * 帖子是一栏（最宽 --desk-col，卡片样式在 PostCard 里），也靠左和标签对齐。
+ * 建议页：居中的一栏（.desk-col），分区标题 16px，关键词、热门词、创作者都放大到鼠标好点的尺寸。
+ */
+@media (min-width: 1024px) {
+  /* 底边细线只画在内容宽度里；48px 高、文字间距 32px、选中 600（和创作者主页、收藏的标签栏同一个规格） */
+  .sr-tabs {
+    gap: 32px;
+    height: 48px;
+    padding: 0 max(var(--desk-pad), calc((100% - var(--desk-max)) / 2 + var(--desk-pad)));
+    border-bottom: 0;
+    background: linear-gradient(var(--line), var(--line)) 0 100% / 100% 1px no-repeat content-box;
+  }
+  /* 左右 8px 内边距再用负外边距收回：文字位置不变，键盘焦点框不贴着字 */
+  .sr-tab { gap: 6px; margin: 0 -8px; padding: 0 8px; font-size: 16px; }
+  .sr-tab .n { font-size: 13px; font-weight: 500; }
+  .sr-tab:focus-visible { outline-offset: -4px; }
+  .sr-grid, .sr-pane .sk-grid { padding-top: 24px; }
+  .sr-posts, .sr-pfoot {
+    max-width: var(--desk-col);
+    margin-left: max(var(--desk-pad), calc((100% - var(--desk-max)) / 2 + var(--desk-pad)));
+  }
+  .sr-posts { padding-top: 24px; }
+  .sr-none { padding: 96px 0 8px; }
+  .sr-none .t1 { font-size: 16px; }
+  .sr-none .t2 { margin-top: 8px; font-size: 14px; }
+  .sr-alt { height: 36px; margin-top: 20px; padding: 0 14px 0 18px; border-radius: 18px; font-size: 14px; }
+  .sr-hot-t { margin: 48px 0 14px; font-size: 13px; }
 
-/* iOS 14 / 安卓 WebView 87 不认 aspect-ratio（Safari 15、Chrome 88 才有）：里面全是绝对定位的东西，高度会是 0，用 ::before 的 padding 撑出同样的比例 */
-@supports not (aspect-ratio: 1 / 1) {
-  .sk-post .md::before { content: ''; display: block; padding-top: 56.25%; }
+  .sh-sug { padding-top: 16px; padding-bottom: 24px; }
+  .sh-st { height: 56px; padding: 0; }
+  .sh-st .t { gap: 8px; color: var(--t1); font-size: 16px; font-weight: 600; line-height: 24px; }
+  .sh-st .t::before { height: 16px; }
+  /*
+   * 分区标题右边的「清除」「换一批」「查看全部 ›」：和首页分区标题行一样是文字按钮（平时没有底色，鼠标移上去才有），
+   * 最右边那个往右挪出内边距，文字和这一栏的右边缘对齐（同下面热门搜索整行往两边伸出 12px）
+   */
+  .sh-ops { gap: 4px; }
+  .sh-st .pill { height: 32px; padding: 0 12px; border-radius: 16px; background: transparent; box-shadow: none; font-size: 13px; font-weight: 500; }
+  .sh-st > .pill, .sh-ops > .pill:last-child { margin-right: -12px; }
+  .sh-st .pill.r { gap: 2px; margin-right: -8px; padding: 0 8px 0 12px; }
+  .sh-st .pill svg { width: 14px; height: 14px; }
+  .sh-st .pill::after { inset: -4px 0; }
+
+  .kws { gap: 10px; padding: 0; }
+  .kws.recent { margin-bottom: 28px; }
+  .kw { height: 34px; padding: 0 16px; border-radius: 17px; font-size: 14px; }
+  .editing .kw { padding-right: 13px; }
+  .kw .x { width: 12px; height: 12px; }
+
+  /* 热门搜索：两列，每一项一整行可点（鼠标移上去整行变亮）；整块往左右各伸出 12px，字和标题对齐 */
+  .hot { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 24px; margin: 0 -12px 28px; padding-left: 0; }
+  .hot button { gap: 8px; min-width: 0; height: 40px; padding: 0 12px; border-radius: 8px; font-size: 14px; }
+  .hot .fl { width: 12px; height: 14px; }
+
+  .stars { margin: 4px -8px 16px; padding: 0; }
+  .stars .st { padding: 12px 0 10px; border-radius: 12px; }
+  .stars .av { width: 72px; height: 72px; }
+  .stars .nm { margin-top: 10px; overflow: hidden; color: var(--t3); font-size: 14px; line-height: 20px; text-overflow: ellipsis; white-space: nowrap; }
+}
+@media (min-width: 1024px) and (hover: hover) {
+  .sr-tab:not(.on):hover { color: var(--t3); }
+  .sh-st .pill:hover { background: #1f1f1f; color: var(--t3); }
+  .kw:hover { background: #1f1f1f; }
+  .hot button { transition: background-color var(--dur-2) var(--ease-out), opacity var(--dur-1) var(--ease-out); }
+  .hot button:hover { background: var(--chip); }
+  .stars .st { transition: background-color var(--dur-2) var(--ease-out); }
+  .stars .st:hover { background: var(--chip); }
+  .stars .st:hover .nm { color: var(--t1); }
+  .sr-alt { transition: background-color var(--dur-2) var(--ease-out); }
+  .sr-alt:hover { background: #1f1f1f; }
 }
 </style>

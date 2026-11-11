@@ -14,6 +14,7 @@ import Cover from '@/components/Cover.vue'
 import Icon from '@/components/Icon.vue'
 import VideoCard from '@/components/VideoCard.vue'
 import PostCard from '@/components/community/PostCard.vue'
+import PostSkeleton from '@/components/community/PostSkeleton.vue'
 import ListFoot from '@/components/home/ListFoot.vue'
 import SkeletonGrid from '@/components/home/SkeletonGrid.vue'
 import { haptic } from '@/utils/motion'
@@ -271,12 +272,8 @@ onBeforeUnmount(() => {
             <div v-else-if="(session === null || (feeds[t.key].total === null && !feeds[t.key].error)) && t.key === 'topic'" class="tp-grid" aria-hidden="true">
               <div v-for="i in 4" :key="i" class="tp sk" />
             </div>
-            <div v-else-if="session === null || (feeds[t.key].total === null && !feeds[t.key].error)" aria-hidden="true">
-              <div v-for="i in 2" :key="i" class="sk-post">
-                <div class="sk av" />
-                <div class="bd"><div class="sk l1" /><div class="sk l2" /><div class="sk md" /></div>
-              </div>
-            </div>
+            <!-- 帖子的骨架和社区共用（桌面上同样是一张张圆角卡片，和 PostCard 对得上） -->
+            <PostSkeleton v-else-if="session === null || (feeds[t.key].total === null && !feeds[t.key].error)" class="fv-posts" />
 
             <div v-else-if="feeds[t.key].total === null" class="empty">
               加载失败，请检查网络
@@ -308,7 +305,7 @@ onBeforeUnmount(() => {
               </div>
 
               <!-- 帖子：和社区同一个卡片，卡片底部的收藏按钮就能取消 -->
-              <div v-else-if="t.key === 'post'">
+              <div v-else-if="t.key === 'post'" class="fv-posts">
                 <PostCard v-for="p in feeds.post.list" :key="p.id" :post="p" :class="{ 'fv-off': !postStore.stats(p).faved }" />
               </div>
 
@@ -411,12 +408,6 @@ onBeforeUnmount(() => {
 /* ---- 骨架 ---- */
 .sk { border-radius: 6px; background: #161616; animation: sk 1.2s ease-in-out infinite; }
 .tp.sk { border-radius: 10px; }
-.sk-post { display: flex; gap: 11px; padding: 14px; border-bottom: 1px solid var(--line); }
-.sk-post .av { flex: none; width: 44px; height: 44px; border-radius: 50%; }
-.sk-post .bd { flex: 1; min-width: 0; }
-.sk-post .l1 { width: 40%; height: 14px; margin-top: 4px; }
-.sk-post .l2 { width: 86%; height: 14px; margin-top: 12px; }
-.sk-post .md { margin-top: 12px; aspect-ratio: 16 / 9; border-radius: 7px; }
 @keyframes sk { 50% { opacity: .5; } }
 @media (prefers-reduced-motion: reduce) {
   .sk { animation: none; }
@@ -425,6 +416,67 @@ onBeforeUnmount(() => {
 /* iOS 14 / 安卓 WebView 87 不认 aspect-ratio（Safari 15、Chrome 88 才有）：里面全是绝对定位的东西，高度会是 0，用 ::before 的 padding 撑出同样的比例；卡片 16:8 是 flex 容器（::before 已经是阴影），用 ::after 当 0 宽的一项撑高：它的 padding 按内容宽（总宽 - 24px）算，calc(50% - 8px) 正好是总宽 / 2 再减上下 20px */
 @supports not (aspect-ratio: 1 / 1) {
   .tp::after { content: ''; flex: none; width: 0; padding-top: calc(50% - 8px); }
-  .sk-post .md::before { content: ''; display: block; padding-top: 56.25%; }
+}
+
+/*
+ * ---- 桌面布局（≥ 1024px）----
+ * 标签栏靠左、和标题行、下面的网格对齐（内容最宽 --desk-max，两边 --desk-pad），底下的细线也只画在内容宽度里。
+ * 视频：公共的 .grid（按 --desk-card 自动排列数）；帖子：靠左的一栏（最宽 720px，卡片和社区是同一种，样式在 PostCard.vue）；
+ * 专题：和片库的桌面版同一种瓷砖（16:9，按 260px 自动排列数）。鼠标移上去封面在圆角里放大一点。
+ */
+@media (min-width: 1024px) {
+  .fv-tabs {
+    gap: 32px;
+    width: 100%;
+    max-width: var(--desk-max);
+    height: 48px;
+    margin: 0 auto;
+    padding: 0 var(--desk-pad);
+    border-bottom: 0;
+    background: linear-gradient(var(--line), var(--line)) no-repeat center bottom / calc(100% - 2 * var(--desk-pad)) 1px;
+  }
+  /* 48px 高、文字间距 32px、选中 600：和搜索结果、创作者主页的标签栏同一个规格；
+     左右 8px 内边距再用负外边距收回：文字位置不变，键盘焦点框画在字外面 */
+  .fv-tab { flex: none; margin: 0 -8px; padding: 0 8px; font-size: 16px; }
+  .fv-tab.on { font-weight: 600; }
+  .fv-tab .lb { gap: 6px; }
+  .fv-tab .n { font-size: 13px; }
+
+  .fv-pt { padding-top: 24px; }
+
+  .fv-heart { top: 8px; right: 8px; width: 32px; height: 32px; }
+  .fv-heart svg { width: 17px; height: 17px; }
+
+  .fv-posts { max-width: var(--desk-max); margin: 0 auto; padding: 8px var(--desk-pad) 0; }
+  .fv-posts > * { max-width: var(--desk-col); }
+
+  .tp-grid {
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 20px 16px;
+    max-width: var(--desk-max);
+    margin: 0 auto;
+    padding: 24px var(--desk-pad) 0;
+  }
+  .tp { aspect-ratio: 16 / 9; padding: 14px 16px; border-radius: 12px; }
+  /* 专题骨架是普通的块（不是 Cover）：手机上没有定位，.tp::before 的渐变会铺满外面的 .m-swap；桌面上让它只盖在自己身上、也不要渐变 */
+  .tp.sk { position: relative; border-radius: 12px; }
+  .tp.sk::before { content: none; }
+  .tp b { font-size: 16px; line-height: 22px; }
+  .tp span { font-size: 13px; line-height: 22px; }
+  /* 老引擎的比例兜底跟着比例、内边距改：总高 = 宽 × 9 / 16（padding 按内容宽 = 总宽 - 32px 算） */
+  @supports not (aspect-ratio: 1 / 1) {
+    .tp::after { padding-top: calc(56.25% - 10px); }
+  }
+
+  .em-ic { width: 40px; height: 40px; margin-bottom: 16px; }
+  .em-sub { margin-top: 8px; font-size: 13px; line-height: 20px; }
+}
+@media (min-width: 1024px) and (hover: hover) {
+  .fv-tab:not(.on):hover { color: var(--t3); }
+  .fv-heart { transition: background-color var(--dur-2) var(--ease-out); }
+  .fv-heart:hover { background: rgba(0, 0, 0, .66); }
+  .tp > :deep(img) { transition: opacity var(--dur-3) var(--ease-out), filter var(--dur-3) var(--ease-out), transform var(--dur-4) var(--ease-out); }
+  .tp > :deep(img.now) { transition: transform var(--dur-4) var(--ease-out); }
+  .tp-it > a:hover .tp > :deep(img) { transform: scale(1.03); }
 }
 </style>

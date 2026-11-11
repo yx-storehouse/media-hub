@@ -85,3 +85,27 @@ img { display: block; }
 @keyframes rot { to { transform: rotate(360deg); } }
 @keyframes pop { 40% { transform: scale(1.28); } }
 @keyframes blink { 50% { opacity: .25; } }
+
+/*
+ * ---- 桌面布局（窗口 ≥ 1024px，见 composables/useDesktop.js）----
+ * 顶栏（--desk-top）横跨整个窗口，左侧导航（--desk-side）在它下面，每一页（.page）占满剩下的那一块，
+ * 各页自己的 .scroll 照常滚动：KeepAlive、滚动位置保持、滚到底加载都不用改。
+ * 手机布局的规则一条都不改，桌面只在这里加覆盖；只给新元素用的 .d-only 在窄屏下藏起来。
+ */
+@media (min-width: 1024px) {
+  /* 整个窗口都是 App：不再是居中的手机宽度一栏，也没有两边的细线 */
+  #app { max-width: none; box-shadow: none; }
+  .page { top: var(--desk-top); left: var(--desk-side); }
+  /* 竖向滚动容器显示细的深色滚动条（鼠标拖得到，平时不抢眼） */
+  .scroll { scrollbar-width: thin; scrollbar-color: #2e2e2e transparent; }
+  .scroll::-webkit-scrollbar { display: block; width: 10px; height: 10px; }
+  .scroll::-webkit-scrollbar-track, .scroll::-webkit-scrollbar-corner { background: transparent; }
+  .scroll::-webkit-scrollbar-thumb { border: 3px solid transparent; border-radius: 5px; background: #2e2e2e padding-box; }
+  .scroll::-webkit-scrollbar-thumb:hover { background-color: #474747; }
+  /* 手机才有的东西（页面自己的顶栏、手机专用按钮）：桌面上整个藏起来 */
+  .m-only { display: none !important; }
+}
+/* 桌面才有的新元素：窄屏下藏起来（和上面正好互补，缩放出来的 1023.5px 这种宽度也不会两边都显示） */
+@media not all and (min-width: 1024px) {
+  .d-only { display: none !important; }
+}

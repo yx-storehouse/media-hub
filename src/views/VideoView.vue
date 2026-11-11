@@ -28,7 +28,9 @@ import { pickResume, setResume } from '@/components/video/resume'
 import { peekVideo, rememberVideo } from '@/components/video/preview'
 import { parseList, nextInList } from '@/components/video/playlist'
 import { spinPhase } from '@/components/video/spin'
+import { twoCol } from '@/components/video/deskLayout'
 import { claimHero, claimRelatedHero, armHeroBack } from '@/components/motion/hero'
+import { isDesktop } from '@/composables/useDesktop'
 
 /*
  * 播放页：播放器 → 标题、数据、作者（关注）、简介、热门榜 / 所属专题、标签 → 相似推荐，底部赞 / 不喜欢 / 收藏 / 分享。
@@ -40,6 +42,9 @@ import { claimHero, claimRelatedHero, armHeroBack } from '@/components/motion/he
  *   回来时一次换成新内容，不会先闪一下骨架屏、底部操作栏也不会消失又出现（见 load 的 keepMs）。
  *   接口慢：播放器那一块先换成新视频的封面（飞过来的缩略图落地时、或者 0.25 秒后），旧的信息区等满 0.25 秒才变暗，
  *   新内容回来时就地亮起来；等了 1 秒还没回来才换成骨架屏（STALE_MS）。
+ * - 桌面布局（窗口 ≥ 1024px）：整页自己滚动（播放器跟着内容滚走），够宽时分两栏——左边播放器和信息、
+ *   操作按钮是作者那一行右边的一排，右边相似推荐（右栏自己滚，整页一般不滚，见 onPageWheel）；窄一点是单栏。
+ *   排版全在下面的桌面样式里，尺寸规则见 components/video/deskLayout.js；播放器的鼠标、键盘操作见 VideoPlayer.vue。
  */
 defineOptions({ name: 'VideoView' })
 
@@ -56,6 +61,10 @@ const preview = shallowRef(peekVideo(route.params.id))
 const failed = ref(null)
 const scroller = ref(null)
 const relatedEl = ref(null)
+/* 滚动的是哪一层：手机上是播放器下面的 .scroll，桌面布局上是整页（.scroll 不再是盒子，见桌面样式） */
+const scrollEl = () => (isDesktop.value ? root.value : scroller.value)
+/* 相似推荐一批几条：桌面上右栏（或单栏的两列）更长，一批 12 条；手机照旧 6 条 */
+const relatedLimit = () => (isDesktop.value ? 12 : 6)
 /* 换一批：batch 递增；relatedKey 让新的一批重新挂上，riseRelated 决定这一批要不要依次升上来 */
 const batch = ref(0)
 const relatedKey = ref(0)
@@ -66,6 +75,8 @@ function showRelated(id, b) {
   riseRelated.value = !shownRelated.has(key)
   shownRelated.add(key)
   relatedKey.value++
+  // 桌面两栏：右栏自己滚，新的一批（换了视频、换一批）从头看起
+  if (twoCol.value) nextTick(() => { if (relatedEl.value) relatedEl.value.scrollTop = 0 })
 }
 const spinning = ref(false)
 const tagsOpen = ref(false)
@@ -201,7 +212,7 @@ async function load(id, query = route.query, { keepMs = 0 } = {}) {
   }
   try {
     // 相似推荐取不到不影响看视频
-    const [v, list] = await Promise.all([getVideo(id), getRelatedVideos(id, { batch: 0 }).catch(() => [])])
+    const [v, list] = await Promise.all([getVideo(id), getRelatedVideos(id, { batch: 0, limit: relatedLimit() }).catch(() => [])])
     if (token !== loadSeq) return
     // 还是同一个视频（重新取了一次）：不回到顶部
     const same = String(video.value?.id) === String(v.id)
@@ -211,7 +222,8 @@ async function load(id, query = route.query, { keepMs = 0 } = {}) {
     video.value = v
     related.value = list
     showRelated(v.id, 0)
-    if (scroller.value && !same) scroller.value.scrollTop = 0
+    const s = scrollEl()
+    if (s && !same) s.scrollTop = 0
     loadCreator(v)
     loadListNext(parseList(query), v.id)
     await nextTick()
@@ -255,13 +267,27 @@ async function shuffle() {
   const b = ++batch.value
   spinning.value = true
   try {
-    const list = await getRelatedVideos(id, { batch: b })
-    if (b !== batch.value || id !== video.value?.id) return
+    const list = await getRelatedVideos(id, { batch: b, limit: relatedLimit() })
+    if (b !== batch.value || id !== video.value?.id) return false
     related.value = list
     showRelated(id, b)
+    return true
   } catch {
     toast('加载失败，请稍后重试')
+    return false
   }
+}
+/*
+ * 桌面：列表最后的「换一批」（右栏滚到底不用再回到顶上去点）。两栏时新的一批在右栏从头显示（showRelated）；
+ * 单栏时从页面底下换的，滚回这一块的开头看新的一批
+ */
+async function moreRelated() {
+  if (!(await shuffle()) || twoCol.value) return
+  const s = scrollEl()
+  const r = relatedEl.value
+  if (!s || !r) return
+  const top = r.getBoundingClientRect().top - s.getBoundingClientRect().top + s.scrollTop - 24
+  if (top < s.scrollTop) s.scrollTo({ top: Math.max(0, top), behavior: scrollBehavior() })
 }
 
 load(route.params.id)
@@ -325,13 +351,56 @@ function playNext() {
 }
 
 /* 没有片源时「看相似推荐」：滚到相似推荐 */
+/*
+ * 桌面上：两栏时相似推荐本来就在右边（滚回顶上就是），单栏时滚到它上面留出页面顶部的留白；
+ * 两种都让这一块轻轻亮一下（pingRelated），点了按钮总能看到落在哪儿
+ */
+const pingRelated = ref(false)
 function scrollToRelated() {
-  const s = scroller.value
+  const s = scrollEl()
   const r = relatedEl.value
   if (!s || !r) return
   if (!related.value.length) toast('暂时没有相似推荐')
-  const top = r.getBoundingClientRect().top - s.getBoundingClientRect().top + s.scrollTop
+  let top = r.getBoundingClientRect().top - s.getBoundingClientRect().top + s.scrollTop
+  if (isDesktop.value) {
+    top = twoCol.value ? 0 : Math.max(0, top - 24)
+    // 两栏：右栏自己也滚回顶上
+    if (twoCol.value) r.scrollTo({ top: 0, behavior: scrollBehavior() })
+    pingRelated.value = false
+    requestAnimationFrame(() => { pingRelated.value = true })
+  }
   s.scrollTo({ top, behavior: scrollBehavior() })
+}
+
+/*
+ * 桌面两栏：相似推荐在右栏自己滚，整页一般不滚（见桌面样式）。
+ * 滚轮停在播放器、信息区上而整页滚不动时，转给右栏——在页面哪儿滚都能往下翻相似推荐。
+ * 整页自己还能滚（左栏比一屏高）、指着的东西自己能滚（播放设置面板）、播放器全屏时照常。
+ * 鼠标滚轮一格一大步：接着上一步还没滚到的位置往后算、平滑过去；触控板的连续小步直接跟手。
+ */
+const canScroll = (el, dy) => (dy < 0 ? el.scrollTop > 0 : el.scrollTop + el.clientHeight < el.scrollHeight - 1)
+let wheelTo = -1
+let wheelAt = 0
+function onPageWheel(e) {
+  const r = relatedEl.value
+  const s = root.value
+  if (!twoCol.value || !r || !s || e.ctrlKey || e.defaultPrevented) return
+  const t = e.target instanceof Element ? e.target : null
+  if (!t || r.contains(t) || t.closest('.fs')) return
+  let dy = e.deltaY
+  if (e.deltaMode === 1) dy *= 40
+  else if (e.deltaMode === 2) dy *= r.clientHeight
+  if (!dy || Math.abs(dy) < Math.abs(e.deltaX) || canScroll(s, dy)) return
+  for (let el = t; el && el !== s; el = el.parentElement) {
+    if (canScroll(el, dy) && /auto|scroll/.test(getComputedStyle(el).overflowY)) return
+  }
+  const max = r.scrollHeight - r.clientHeight
+  if (max <= 0) return
+  const now = performance.now()
+  const from = wheelTo >= 0 && now - wheelAt < 400 ? wheelTo : r.scrollTop
+  wheelTo = Math.max(0, Math.min(max, from + dy))
+  wheelAt = now
+  r.scrollTo({ top: wheelTo, behavior: Math.abs(dy) >= 50 ? scrollBehavior() : 'auto' })
 }
 
 /* ---------- 观看记录 / 续播进度（服务端只记登录用户；本机都记） ---------- */
@@ -534,15 +603,36 @@ function measure() {
   const t = tagList.value
   if (t && !tagsOpen.value) canExpand.value = t.scrollWidth > t.clientWidth + 1
   const d = descEl.value
-  if (d && !descOpen.value) canExpandDesc.value = d.scrollHeight > d.clientHeight + 1
+  // 桌面上栏宽，分了段的简介收起时并成一段常常也放得下三行：照样给「展开」，展开看分段的原样
+  if (d && !descOpen.value) canExpandDesc.value = d.scrollHeight > d.clientHeight + 1 || (isDesktop.value && /\n/.test(description.value))
+  fitRelated()
+}
+/*
+ * 桌面两栏：右栏自己滚，经典滚动条（Windows）会占掉右栏的宽度。量出滚动条有多宽（--r-sb），盒子往右边的留白里
+ * 多伸出这么多，列表本身还是正好占满右栏、和左边对称（最多 12px：两边留白至少 24px，盒子本来就多伸出了 12px）
+ */
+function fitRelated() {
+  const r = relatedEl.value
+  if (!r) return
+  const sb = twoCol.value ? Math.min(12, Math.round(r.offsetWidth - r.clientWidth)) : 0
+  const v = sb >= 3 ? `${sb}px` : ''
+  if (r.style.getPropertyValue('--r-sb') !== v) r.style.setProperty('--r-sb', v)
 }
 let ro = null
 onMounted(() => {
   if ('ResizeObserver' in window) {
     ro = new ResizeObserver(() => measure())
     if (scroller.value) ro.observe(scroller.value)
+    // 桌面布局上 .scroll 没有盒子（量不到大小）：整页的大小变了也重新量
+    if (root.value) ro.observe(root.value)
+    // 右栏出现 / 收起滚动条（内容区变窄 / 变宽）、高度变了：重新量滚动条
+    if (relatedEl.value) ro.observe(relatedEl.value)
   }
 })
+watch(relatedEl, (el, old) => {
+  if (old) ro?.unobserve(old)
+  if (el) ro?.observe(el)
+}, { flush: 'post' })
 onBeforeUnmount(() => {
   ro?.disconnect()
   clearTimeout(keepTimer)
@@ -585,7 +675,7 @@ const noop = () => {}
 </script>
 
 <template>
-  <div ref="root" class="page video" :class="{ 'hero-hold': heroHold, switching, dim }" @touchstart.passive="noop">
+  <div ref="root" class="page video" :class="{ 'hero-hold': heroHold, switching, dim, v2: twoCol }" @touchstart.passive="noop" @wheel.passive="onPageWheel">
     <VideoPlayer
       v-if="video && !playerPh"
       ref="playerRef"
@@ -595,6 +685,7 @@ const noop = () => {}
       :next="nextItem"
       :hold="heroHold"
       :spin="phSpin"
+      :keys="!switching"
       @back="back"
       @started="onStarted"
       @progress="onProgress"
@@ -678,7 +769,7 @@ const noop = () => {}
           </div>
         </section>
 
-        <section ref="relatedEl" class="related">
+        <section ref="relatedEl" class="related" :class="{ ping: pingRelated }" @animationend.self="pingRelated = false">
           <div class="r-hd">
             <h2 class="r-t">相似推荐</h2>
             <button type="button" class="r-more" :class="{ spin: spinning }" @click="shuffle" @animationend="spinning = false">
@@ -690,31 +781,53 @@ const noop = () => {}
             <RelatedVideo v-for="(v, i) in related" :key="v.id" :video="v" :away="flownId === String(v.id)" :style="{ '--i': Math.min(i, 7) }" />
             <div v-if="!related.length" class="r-empty">暂时没有相似推荐</div>
           </div>
+          <!-- 桌面：列表到底了，就地换一批（不用回到顶上去点） -->
+          <button v-if="isDesktop && related.length" type="button" class="r-foot" :class="{ spin: spinning }" @click="moreRelated" @animationend="spinning = false">
+            <Icon name="refresh" />换一批
+          </button>
         </section>
         <div class="pad-b" />
       </template>
 
       <!-- 加载中：信息区骨架（有列表带过来的标题就先显示标题） -->
-      <div v-else class="info" aria-hidden="true">
-        <h1 v-if="preview?.title" class="v-title">{{ preview.title }}</h1>
-        <div v-else class="sk sk-t" />
-        <div class="sk sk-m" />
-        <div class="au">
-          <div class="au-av sk" />
-          <div class="au-who">
-            <div class="sk sk-l" style="width: 96px" />
-            <div class="sk sk-s" style="width: 64px" />
+      <template v-else>
+        <div class="info" aria-hidden="true">
+          <h1 v-if="preview?.title" class="v-title">{{ preview.title }}</h1>
+          <div v-else class="sk sk-t" />
+          <div class="sk sk-m" />
+          <div class="au">
+            <div class="au-av sk" />
+            <div class="au-who">
+              <div class="sk sk-l" style="width: 96px" />
+              <div class="sk sk-s" style="width: 64px" />
+            </div>
+            <!-- 桌面：作者右边那一排操作按钮的位置 -->
+            <div v-if="isDesktop" class="sk-acts"><div class="sk" /><div class="sk" /><div class="sk" /></div>
+          </div>
+          <div class="sk sk-m" style="width: 70%" />
+          <div v-for="i in 3" :key="i" class="sk-row">
+            <div class="sk sk-cv" />
+            <div class="sk-col">
+              <div class="sk sk-l" />
+              <div class="sk sk-s" style="width: 50%" />
+            </div>
           </div>
         </div>
-        <div class="sk sk-m" style="width: 70%" />
-        <div v-for="i in 3" :key="i" class="sk-row">
-          <div class="sk sk-cv" />
-          <div class="sk-col">
-            <div class="sk sk-l" />
-            <div class="sk sk-s" style="width: 50%" />
+        <!-- 桌面：相似推荐的骨架（两栏时在右栏，单栏时在信息下面；上面那三行手机的骨架桌面上不显示） -->
+        <div v-if="isDesktop" class="sk-side" aria-hidden="true">
+          <div class="sk sk-h" />
+          <div class="sk-list">
+            <div v-for="i in 8" :key="i" class="sk-row">
+              <div class="sk sk-cv" />
+              <div class="sk-col">
+                <div class="sk sk-l" />
+                <div class="sk sk-l" style="width: 70%" />
+                <div class="sk sk-s" style="width: 40%" />
+              </div>
+            </div>
           </div>
         </div>
-      </div>
+      </template>
     </div>
 
     <!--
@@ -953,5 +1066,230 @@ const noop = () => {}
 @supports not (aspect-ratio: 1 / 1) {
   .player-ph::before { content: ''; display: block; padding-top: 56.25%; }
   .sk-cv::before { content: ''; display: block; padding-top: 62.5%; }
+}
+
+/*
+ * ---------- 桌面布局（窗口 ≥ 1024px）----------
+ * 整页（.page.video）是一个网格、自己滚动：播放器跟着内容一起滚走（和视频网站一样）。.scroll、.info 不再是盒子
+ * （display: contents），标题、数据、作者、简介……直接排进网格的各行；手机上的底部操作栏变成作者那一行右边的一排按钮。
+ *   单栏：播放器 → 标题 → 数据 → 作者 + 操作 → 简介 → 热门榜 / 专题 → 标签 → 相似推荐（紧凑的两列）
+ *   两栏（.v2，页面够宽，见 components/video/deskLayout.js）：右栏是相似推荐，绝对定位在右栏里、从播放器顶上到窗口底，
+ *   不撑高左栏的任何一行；列表比这一栏长时在栏里自己滚（播放器和信息不跟着滚走）。
+ * 列宽：左栏（播放器）宽 --v-main = min(能给的宽, (窗口高 − 顶栏 − 170px) × 16/9)，至少 480px——整个播放器连同标题都在
+ * 一屏里；左右两边的留白 --v-gut 把两栏（连同中间 24px）一起居中，内容最宽 --desk-max。左栏里再分出一列 auto 给操作按钮
+ * （按钮多宽就多宽），作者占剩下的。百分比都按页面去掉滚动条的宽度算。数改了要同步 deskLayout.js（hero 估计落点用）。
+ */
+@media (min-width: 1024px) {
+  .page.video {
+    --v-in: calc(min(100%, var(--desk-max)) - 2 * var(--desk-pad));
+    --v-aside: 0px;
+    --v-main: min(calc(var(--v-in) - var(--v-aside)), max(480px, calc((100vh - var(--desk-top) - 170px) * 16 / 9)));
+    --v-gut: max(var(--desk-pad), calc((100% - var(--v-main) - var(--v-aside)) / 2));
+    display: grid;
+    grid-template-columns: [full-start] var(--v-gut) [main-start] minmax(0, 1fr) [acts-start] auto [acts-end main-end] var(--v-gut) [full-end];
+    /*
+     * 每一行按内容的高度（max-content）：页面本身高度是定的，auto 行在内容比页面高时会被压扁——
+     * 播放器 overflow: hidden，最小高度算 0，会被压到比自己矮、标题跑到播放器后面去
+     */
+    grid-auto-rows: max-content;
+    align-content: start;
+    padding: 24px 0 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    /* 细的深色滚动条（和 styles/base.css 里桌面的 .scroll 一样） */
+    scrollbar-width: thin;
+    scrollbar-color: #2e2e2e transparent;
+  }
+  .page.video::-webkit-scrollbar { width: 10px; height: 10px; }
+  .page.video::-webkit-scrollbar-track, .page.video::-webkit-scrollbar-corner { background: transparent; }
+  .page.video::-webkit-scrollbar-thumb { border: 3px solid transparent; border-radius: 5px; background: #2e2e2e padding-box; }
+  .page.video::-webkit-scrollbar-thumb:hover { background-color: #474747; }
+  .page.video.v2 {
+    --v-side: clamp(360px, 28%, 400px);
+    --v-aside: calc(24px + var(--v-side));
+    grid-template-columns:
+      [full-start] var(--v-gut) [main-start] minmax(0, 1fr) [acts-start] auto [acts-end main-end]
+      24px [side-start] var(--v-side) [side-end] var(--v-gut) [full-end];
+  }
+
+  /* 拆开的两层：子元素直接排进网格（变暗改在各行上做，见下面） */
+  .video > .scroll, .video .info:not([aria-hidden]) { display: contents; }
+  .video.dim > .scroll { opacity: 1; }
+  .video > .player, .video > .player-ph { grid-column: main; grid-row: 1; min-width: 0; }
+  .player-ph { border-radius: 12px; }
+  .ph-back { left: 12px; top: 12px; border-radius: 50%; }
+  /* 和播放器的缓冲转圈（桌面上 44px）一样大 */
+  .ph-spin { width: 44px; height: 44px; margin: -22px 0 0 -22px; }
+
+  .v-title { grid-column: main; grid-row: 2; min-width: 0; margin-top: 16px; font-size: 20px; font-weight: 600; line-height: 28px; word-break: normal; overflow-wrap: break-word; }
+  .v-meta { grid-column: main; grid-row: 3; display: flex; flex-wrap: wrap; gap: 0 20px; margin-top: 4px; }
+  .info:not([aria-hidden]) > .au { grid-column: main-start / acts-start; grid-row: 4; align-self: center; min-width: 0; margin: 16px 24px 0 0; }
+  .desc { grid-column: main; grid-row: 5; min-width: 0; margin-top: 16px; padding: 12px 16px; border-radius: 12px; background: var(--chip); }
+  .v-chips { grid-column: main; grid-row: 6; min-width: 0; margin-top: 16px; }
+  .v-tags { grid-column: main; grid-row: 7; min-width: 0; margin-top: 14px; }
+  .related { grid-column: main; grid-row: 8; min-width: 0; margin-top: 36px; padding: 0; border-radius: 0; background: none; }
+  .pad-b { grid-column: main; grid-row: 9; height: 48px; }
+  /* 加载失败 / 视频不存在：说明和「重试」放在黑色的播放器占位正中（和播放器里的提示一个位置），不在下面空着一大块 */
+  .video .empty { position: relative; z-index: 1; grid-column: main; grid-row: 1; align-self: center; padding: 0 24px; color: rgba(255, 255, 255, .78); }
+  .video .empty .retry { height: 34px; margin-top: 16px; padding: 0 20px; border-radius: 17px; background: rgba(255, 255, 255, .14); color: #fff; font-size: 14px; }
+
+  /* ---- 作者 ---- */
+  .au { gap: 12px; }
+  .au-link { flex: 0 1 auto; gap: 12px; }
+  .au-av { width: 40px; height: 40px; }
+  .au-who { gap: 2px; }
+  .au-nm span { font-size: 16px; line-height: 22px; }
+  .au-nm .vf { width: 15px; height: 15px; }
+  .au-sub { font-size: 13px; line-height: 18px; }
+  .au-follow { height: 36px; margin-left: 12px; padding: 0 18px 0 14px; border-radius: 18px; font-size: 14px; }
+  .au-follow.on { padding: 0 18px; }
+  .au-follow svg { width: 14px; height: 14px; }
+  .au-follow::after { display: none; }
+
+  /* ---- 操作：作者那一行右边的一排胶囊按钮（赞 | 不喜欢 连成一个） ---- */
+  .video > .acts {
+    grid-column: acts;
+    grid-row: 4;
+    align-self: center;
+    display: flex;
+    gap: 8px;
+    height: auto;
+    margin-top: 16px;
+    padding: 0;
+    border-top: 0;
+    background: none;
+  }
+  .acts button { flex-direction: row; gap: 6px; height: 36px; padding: 0 16px 0 12px; border-radius: 18px; background: var(--field); color: var(--t1); font-size: 14px; font-weight: 500; white-space: nowrap; }
+  .acts .ico, .acts svg { width: 20px; height: 20px; }
+  .acts button:first-child { padding-right: 14px; border-radius: 18px 0 0 18px; }
+  .acts button:nth-child(2) { position: relative; margin-left: -8px; padding: 0 14px 0 13px; border-radius: 0 18px 18px 0; }
+  .acts button:nth-child(2)::before { content: ''; position: absolute; left: 0; top: 9px; bottom: 9px; width: 1px; background: rgba(255, 255, 255, .14); }
+  /* 「不喜欢」只留图标（字给读屏，按钮的名字不变） */
+  .acts button:nth-child(2) > span:last-child { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+  /* ---- 简介 / 榜单 / 标签 ---- */
+  .desc-t { color: var(--t3); font-size: 14px; line-height: 22px; }
+  .desc .more { margin-top: 6px; }
+  .rank, .topic { height: 32px; padding: 0 13px; border-radius: 16px; font-size: 14px; }
+  .topic::after { display: none; }
+  .v-tags .lb { font-size: 14px; }
+  .v-tags.open .lb { line-height: 28px; }
+  .v-tags .list { gap: 8px; }
+  .tag { height: 28px; padding: 0 12px; border-radius: 14px; font-size: 13px; }
+  .more { height: 28px; font-size: 14px; }
+
+  /* ---- 相似推荐：单栏时在信息下面排成两列；两栏时在右栏 ---- */
+  .r-hd { height: 40px; margin-bottom: 8px; padding: 0; }
+  .r-t { font-size: 16px; line-height: 24px; }
+  .r-more { height: 32px; margin-right: -12px; padding: 0 12px; border-radius: 16px; font-size: 14px; }
+  .r-more svg { width: 14px; height: 14px; }
+  .r-more::after { display: none; }
+  .r-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 4px 24px; }
+  .r-empty { grid-column: 1 / -1; padding: 40px 0; font-size: 14px; }
+  /*
+   * 两栏：右栏从播放器顶上一直到窗口底（左栏比一屏高时和左栏一样高），相似推荐在里面自己滚——往下翻的时候播放器和信息
+   * 一直留在原处，整页一般不滚，不会只剩右边一列、左边空着一大块（在左边滚滚轮也是翻右栏，见 onPageWheel）。
+   * 盒子往上、往左右各多伸出 12px，「换一批」、悬停的浅底、「看相似推荐」的亮底不会被滚动区裁掉；右边再让出滚动条的宽度
+   * （--r-sb，见 fitRelated），列表还是正好占满右栏。标题那一行收矮成 24px：字的顶边、竖条的顶边和播放器的顶边对齐。
+   * 骨架照同样的位置排、超出一屏的裁掉（加载中整页也不出滚动条）。
+   */
+  .v2 .related, .v2 .sk-side {
+    position: absolute;
+    top: -12px;
+    bottom: 0;
+    left: -12px;
+    right: calc(-12px - var(--r-sb, 0px));
+    grid-column: side;
+    grid-row: 1 / 10;
+    min-height: calc(100vh - var(--desk-top) - 12px);
+    margin: 0;
+    padding: 8px 12px 24px;
+  }
+  .v2 .related { overflow-x: hidden; overflow-y: auto; scrollbar-width: thin; scrollbar-color: #2e2e2e transparent; }
+  .v2 .related::-webkit-scrollbar { width: 10px; height: 10px; }
+  .v2 .related::-webkit-scrollbar-track, .v2 .related::-webkit-scrollbar-corner { background: transparent; }
+  .v2 .related::-webkit-scrollbar-thumb { border: 3px solid transparent; border-radius: 5px; background: #2e2e2e padding-box; }
+  .v2 .related::-webkit-scrollbar-thumb:hover { background-color: #474747; }
+  .v2 .sk-side { overflow: hidden; }
+  .v2 .r-hd { height: 24px; margin-bottom: 16px; }
+  .v2 .sk-side .sk-h { height: 16px; margin: 4px 0 20px; }
+  .v2 .r-list { display: flex; flex-direction: column; gap: 4px; }
+  /* 列表最后的「换一批」：安静的一条描边按钮 */
+  .r-foot {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    width: 100%;
+    max-width: 400px;
+    height: 36px;
+    margin: 12px auto 0;
+    border: 1px solid #2a2a2a;
+    border-radius: 18px;
+    color: var(--t2);
+    font-size: 14px;
+  }
+  .r-foot svg { width: 14px; height: 14px; }
+  .video.switching .r-foot { pointer-events: none; }
+  /* 「看相似推荐」：这一块的底子亮一下再暗下去（只动透明度） */
+  .related { position: relative; }
+  .v2 .related { position: absolute; }
+  .related::before { content: ''; position: absolute; inset: -8px -12px 0; border-radius: 16px; background: rgba(255, 255, 255, .06); opacity: 0; pointer-events: none; }
+  .v2 .related::before { inset: 0 0 12px; }
+  .related.ping::before { animation: r-ping 1.2s var(--ease-out); }
+  @keyframes r-ping { 18% { opacity: 1; } 100% { opacity: 0; } }
+
+  /* ---- 换视频、等新内容的那一会儿：桌面上 .scroll 没有盒子，变暗改在各行上 ---- */
+  .video .info > *, .video .related { transition: opacity var(--dur-2) var(--ease-out); }
+  .video.dim .info > *, .video.dim .related { opacity: .4; transition-duration: var(--dur-3); }
+
+  /* ---- 骨架：信息区按桌面的样子排（标题、数据、作者 + 右边的按钮、简介），相似推荐的骨架另外一块 ---- */
+  .info[aria-hidden] { grid-column: main; grid-row: 2; min-width: 0; padding: 0; }
+  .info[aria-hidden] .sk-t { height: 24px; width: 64%; margin: 18px 0 2px; }
+  .info[aria-hidden] .sk-m { height: 14px; width: 36%; margin-top: 12px; }
+  .info[aria-hidden] .au { margin-top: 18px; }
+  .info[aria-hidden] .au ~ .sk-m { height: 64px; margin-top: 18px; border-radius: 12px; }
+  .info[aria-hidden] .sk-row { display: none; }
+  .sk-acts { display: flex; flex: none; gap: 8px; }
+  .sk-acts .sk { width: 88px; height: 36px; border-radius: 18px; }
+  .sk-acts .sk:first-child { width: 124px; }
+  .sk-side { grid-column: main; grid-row: 8; min-width: 0; margin-top: 36px; }
+  .sk-side .sk-h { width: 88px; height: 20px; margin: 10px 0 18px; }
+  .sk-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 4px 24px; }
+  .v2 .sk-list { display: flex; flex-direction: column; gap: 4px; }
+  .sk-side .sk-row { gap: 12px; margin: 0; padding: 6px 0; }
+  .sk-side .sk-cv { width: 168px; aspect-ratio: 16 / 9; border-radius: 8px; }
+  .sk-side .sk-col { gap: 8px; padding-top: 2px; }
+  .sk-side .sk-l { height: 14px; }
+}
+@media (min-width: 1024px) and (hover: hover) {
+  .acts button { transition: color var(--dur-1) var(--ease-out), background-color var(--dur-2) var(--ease-out); }
+  .acts button:hover { background: #262626; }
+  .au-follow { transition: transform var(--dur-2) var(--ease-spring), background-color var(--dur-2) var(--ease-out), color var(--dur-2) var(--ease-out); }
+  .au-follow:hover { background: #d9d9d9; }
+  .au-follow.on:hover { background: #222; color: var(--t3); }
+  .au-sub { transition: color var(--dur-2) var(--ease-out); }
+  .au-link:hover .au-sub { color: var(--t3); }
+  .tag, .topic, .r-more, .r-foot, .ph-back { transition: background-color var(--dur-2) var(--ease-out), color var(--dur-2) var(--ease-out); }
+  .tag:hover { background: #222; color: var(--t3); }
+  .topic:hover, .r-more:hover { background: #1c1c1c; }
+  .r-foot:hover { background: #1c1c1c; color: var(--t1); }
+  .ph-back:hover { background: rgba(255, 255, 255, .12); }
+  .video .empty .retry:hover { background: rgba(255, 255, 255, .22); color: #fff; }
+  .more { transition: opacity var(--dur-2) var(--ease-out); }
+  .more:hover { opacity: .72; }
+}
+@media (min-width: 1024px) and (prefers-reduced-motion: reduce) {
+  .video .info > *, .video .related { transition: none; }
+}
+@media (min-width: 1024px) {
+  @supports not (aspect-ratio: 1 / 1) {
+    .sk-side .sk-cv::before { padding-top: 56.25%; }
+  }
+  /* 有工具栏会伸缩的浏览器（平板横屏）：右栏按实际看得见的高度到底，不比页面长出一截（整页不出滚动） */
+  @supports (height: 100dvh) {
+    .v2 .related, .v2 .sk-side { min-height: calc(100dvh - var(--desk-top) - 12px); }
+  }
 }
 </style>

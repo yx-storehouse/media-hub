@@ -7,6 +7,8 @@ import { useBackDismiss } from '@/composables/useBackDismiss'
 import { useSheetDrag } from '@/components/motion/sheetDrag'
 import { shake, haptic, spring, reducedMotion } from '@/utils/motion'
 import Icon from '@/components/Icon.vue'
+import { isDesktop } from '@/composables/useDesktop'
+import { trapTab } from '@/components/desk/modal'
 
 /*
  * 登录弹层：底部升起，和 App 其他弹层风格一致（动效、下拉关闭和 BottomSheet 共用）。
@@ -14,6 +16,8 @@ import Icon from '@/components/Icon.vue'
  * 返回键 / 返回手势只关登录框；换页面时自动关掉，不会留到下一个页面上。
  * 没填、登录失败时表单左右摇一下（像 iOS 输错密码），错误信息从上面落下来。
  * 再点登录时上一条错误先留着（变淡），等新的结果出来再换：弹层高度不会在请求中先缩回去、出错时再跳上来。
+ * 桌面布局（≥ 1024px）：窗口正中的对话框（样式和 BottomSheet 共用），右上角有关闭按钮，Tab 只在框里循环，
+ * 关掉后焦点回到打开它的按钮；下拉关闭只在触屏上有。
  */
 const auth = useAuthStore()
 const open = computed(() => auth.loginOpen)
@@ -65,8 +69,32 @@ function focusField(el) {
   if (app?.scrollTop) app.scrollTop = 0
 }
 
+/* 桌面：关掉后焦点回到打开它的按钮（键盘用户接着往下操作） */
+let returnFocus = null
+
+/*
+ * 登录成功时顶栏的「登录」按钮正要换成头像，这一轮渲染之后就不在了：所以等渲染完再看——打开它的元素还在就回到它；
+ * 不在了（焦点掉到 <body>，或者还留在正在收起的登录框里）就落到顶栏的头像上，不让下一次 Tab 又从页面最前面开始。
+ */
+function restoreFocus(to, box) {
+  nextTick(() => {
+    if (to && to.isConnected && to !== document.body) {
+      to.focus({ preventScroll: true })
+      return
+    }
+    const a = document.activeElement
+    if (!a || a === document.body || box?.contains(a)) document.querySelector('.da-av')?.focus({ preventScroll: true })
+  })
+}
+
 // immediate：启动时就要登录（直接打开需要登录的页面）也照样聚焦
-watch(open, isOpen => {
+watch(open, (isOpen, wasOpen) => {
+  if (isDesktop.value) {
+    if (isOpen) returnFocus = document.activeElement
+    // 只在真的关掉时（启动时 immediate 的那一次不算：不能一打开网页就把焦点放到头像上）
+    else if (wasOpen) restoreFocus(returnFocus, sheetEl.value)
+    if (!isOpen) returnFocus = null
+  }
   if (isOpen) {
     error.value = ''
     busy.value = false
@@ -88,17 +116,36 @@ async function submit() {
   const name = uid.value.trim()
   if (!name) { fail('请输入账号'); return }
   if (!password.value) { fail('请输入密码'); return }
+  /*
+   * 桌面：请求中输入框和按钮都是禁用的，浏览器会把焦点丢到 <body>，Esc、回车、Tab 循环就都不灵了。
+   * 所以先把焦点放到对话框本身（桌面上它可以聚焦，没有外框），出错回来再放回输入框（见下面）。
+   */
+  if (isDesktop.value && sheetEl.value?.contains(document.activeElement)) sheetEl.value.focus({ preventScroll: true })
   busy.value = true
+  let failed = false
   try {
     const user = await auth.login(name, password.value)
     toast(`欢迎回来，${user.name}`)
     uid.value = ''
     password.value = ''
   } catch (e) {
+    failed = true
     fail(e.message || '登录失败')
   } finally {
     // 登录成功时弹层已经在收起：按钮保持「登录中…」一起滑走，不在半路变回「登录」（下次打开时重置）
     if (auth.loginOpen) busy.value = false
+  }
+  /*
+   * 桌面：登录失败，输入框恢复可用以后焦点回到密码框并选中（直接重新输入、回车再试；账号没填就回到账号框），
+   * 和「我的」页改密码失败时一样。手机上不动（不去弹 / 收软键盘）。
+   */
+  if (failed && isDesktop.value && auth.loginOpen) {
+    nextTick(() => {
+      const el = (uid.value.trim() ? pwdInput : uidInput).value
+      if (!el?.isConnected || el.disabled) return
+      el.focus({ preventScroll: true })
+      el.select?.()
+    })
   }
 }
 
@@ -108,6 +155,8 @@ function close() {
 }
 /* 往下拉关闭：和点遮罩一样 */
 const drag = useSheetDrag(sheetEl, maskEl, close)
+/* 桌面上不挂下拉手势，换成 Tab 键循环 */
+const deskOn = { keydown: e => trapTab(e, sheetEl.value) }
 </script>
 
 <template>
@@ -123,8 +172,9 @@ const drag = useSheetDrag(sheetEl, maskEl, close)
         role="dialog"
         aria-modal="true"
         aria-labelledby="login-title"
+        :tabindex="isDesktop ? -1 : undefined"
         @keydown.esc="close"
-        v-on="drag.on"
+        v-on="isDesktop ? deskOn : drag.on"
       >
         <div class="grab" />
         <h4 id="login-title">登录</h4>
@@ -170,6 +220,7 @@ const drag = useSheetDrag(sheetEl, maskEl, close)
         </form>
 
         <p class="hint">账号由管理员分配。忘记密码请联系管理员重置。</p>
+        <button v-if="isDesktop" type="button" class="sheet-x" aria-label="关闭" title="关闭" @click="close"><Icon name="close" /></button>
       </div>
     </Transition>
   </Teleport>
@@ -219,4 +270,10 @@ const drag = useSheetDrag(sheetEl, maskEl, close)
 .submit:active:not(:disabled) { filter: brightness(.92); }
 
 .hint { margin-top: 14px; color: var(--t2); font-size: 12px; line-height: 18px; text-align: center; }
+
+/* 桌面对话框：底边不用让出手机的安全区；字段高一点、好点 */
+@media (min-width: 1024px) {
+  .login { padding-bottom: 24px; }
+  .field { height: 48px; }
+}
 </style>

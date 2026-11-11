@@ -1,5 +1,5 @@
 <script setup>
-import { ref, shallowRef, onMounted } from 'vue'
+import { ref, shallowRef, watch, nextTick, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { listUsers, createUser, resetUserPassword, setUserStatus, setUserRole, deleteUser } from '@/api'
 import { useAuthStore } from '@/stores/auth'
@@ -7,6 +7,8 @@ import { toast } from '@/composables/useToast'
 import { useBackDismiss } from '@/composables/useBackDismiss'
 import BackHeader from '@/components/BackHeader.vue'
 import Icon from '@/components/Icon.vue'
+import { isDesktop } from '@/composables/useDesktop'
+import { trapTab } from '@/components/desk/modal'
 
 defineOptions({ name: 'AdminUsersView' })
 
@@ -26,6 +28,20 @@ const createOpen = ref(false)
 useBackDismiss(createOpen) // 返回键只关「新建账号」弹层
 const form = ref({ uid: '', nickname: '', password: '', role: 'user' })
 const submitting = ref(false)
+/* 桌面上「新建账号」是居中的对话框：键盘 Tab 只在它里面循环，打开时焦点放进第一个输入框，关掉后还给「新建账号」按钮 */
+const createSheet = ref(null)
+const onCreateKey = e => { if (isDesktop.value) trapTab(e, createSheet.value) }
+let createFrom = null
+watch(createOpen, isOpen => {
+  if (!isDesktop.value) return
+  if (isOpen) {
+    createFrom = document.activeElement
+    nextTick(() => createSheet.value?.querySelector('input')?.focus({ preventScroll: true }))
+  } else {
+    if (createFrom?.isConnected) createFrom.focus({ preventScroll: true })
+    createFrom = null
+  }
+})
 
 async function load() {
   loading.value = true
@@ -124,6 +140,8 @@ onMounted(load)
 <template>
   <div class="page admin-users">
     <BackHeader title="账号管理">
+      <!-- 插槽里放了按钮，标题（title）就不显示了；桌面布局的标题行要有页面标题，这里补上 -->
+      <span v-if="isDesktop" class="hd-tt">账号管理</span>
       <button class="add-btn" @click="openCreate">新建账号</button>
     </BackHeader>
 
@@ -169,7 +187,7 @@ onMounted(load)
         <div v-if="createOpen" class="mask" @click="createOpen = false" />
       </Transition>
       <Transition name="sheet">
-        <div v-if="createOpen" class="sheet" role="dialog" aria-modal="true" aria-labelledby="create-title" @keydown.esc="createOpen = false">
+        <div v-if="createOpen" ref="createSheet" class="sheet" role="dialog" aria-modal="true" aria-labelledby="create-title" @keydown.esc="createOpen = false" @keydown="onCreateKey">
           <div class="grab" />
           <h4 id="create-title">新建账号</h4>
           <div class="form">
@@ -184,6 +202,8 @@ onMounted(load)
               {{ submitting ? '创建中…' : '创建' }}
             </button>
           </div>
+          <!-- 桌面对话框右上角的关闭按钮（样式在 BottomSheet.vue） -->
+          <button v-if="isDesktop" type="button" class="sheet-x" aria-label="关闭" title="关闭" @click="createOpen = false"><Icon name="close" /></button>
         </div>
       </Transition>
     </Teleport>
@@ -220,4 +240,40 @@ onMounted(load)
 .roles button.on { background: var(--accent); color: var(--on-accent); font-weight: 600; }
 .submit { height: 44px; margin-top: 4px; border-radius: 10px; background: var(--accent); color: var(--on-accent); font-size: 15px; font-weight: 700; }
 .submit:disabled { opacity: .55; }
+
+/*
+ * ---- 桌面布局（≥ 1024px）----
+ * 居中的一栏（内容 720px，标题行和它对齐）：每个账号一行，左边名字和账号信息，右边一排操作按钮；
+ * 按钮、新建账号都有悬停态。「新建账号」是居中的对话框（.sheet 的桌面样式在 BottomSheet.vue）。
+ */
+@media (min-width: 1024px) {
+  .admin-users { --desk-hd-w: var(--desk-col); }
+  /* 左右各留出滚动条的位置：Windows 的常驻滚动条不会让居中的一栏和标题行错开（同社区、帖子详情） */
+  .scroll { scrollbar-gutter: stable both-edges; }
+  .hd-tt { white-space: nowrap; }
+  .add-btn { height: 36px; padding: 0 18px; border-radius: 18px; font-size: 14px; }
+
+  .rows, .tip { width: 100%; max-width: calc(var(--desk-col) + 2 * var(--desk-pad)); margin-left: auto; margin-right: auto; }
+  .rows { gap: 12px; padding: 4px var(--desk-pad) 0; }
+  .row { display: flex; align-items: center; gap: 24px; padding: 16px 16px 16px 20px; border-radius: 14px; }
+  .info { flex: 1; }
+  .line1 { gap: 8px; }
+  .name { min-width: 0; overflow: hidden; font-size: 16px; line-height: 24px; text-overflow: ellipsis; white-space: nowrap; }
+  .badge { flex: none; height: 20px; padding: 0 8px; border-radius: 10px; font-size: 12px; line-height: 20px; }
+  .line2 { margin-top: 2px; font-size: 13px; line-height: 20px; }
+  .ops { flex: none; flex-wrap: nowrap; gap: 8px; margin-top: 0; }
+  .op { height: 32px; padding: 0 12px; border-radius: 16px; font-size: 13px; }
+  .tip { margin-top: 20px; padding: 0 var(--desk-pad); font-size: 13px; line-height: 20px; }
+
+  .form { gap: 12px; }
+  .form input { font-size: 14px; }
+  .roles button { height: 40px; }
+}
+@media (min-width: 1024px) and (hover: hover) {
+  .add-btn, .op, .roles button, .submit { transition: background-color var(--dur-2) var(--ease-out), color var(--dur-2) var(--ease-out), opacity var(--dur-2) var(--ease-out); }
+  .add-btn:hover, .submit:not(:disabled):hover { opacity: .88; }
+  .op:not(:disabled):hover { background: #262626; color: var(--t1); }
+  .op.danger:not(:disabled):hover { color: #ff9a9a; }
+  .roles button:not(.on):hover { background: #1f1f1f; color: var(--t3); }
+}
 </style>

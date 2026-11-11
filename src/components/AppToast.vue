@@ -45,7 +45,7 @@ const leaving = el => {
 <template>
   <Teleport :to="fsEl || 'body'" :disabled="!fsEl">
     <!-- 短视频页底部是标题和进度条：提示放到顶栏下面（和「2X 快进中」同一位置），不挡标题 -->
-    <div class="toasts" :class="{ top: route.name === 'short' || !!fsEl }" role="status" aria-live="polite">
+    <div class="toasts" :class="{ top: route.name === 'short' || !!fsEl, fs: !!fsEl }" role="status" aria-live="polite">
       <TransitionGroup name="toast" @before-leave="leaving">
         <div v-for="t in items" :key="t.id" class="toast show">{{ t.text }}</div>
       </TransitionGroup>
@@ -83,6 +83,17 @@ const leaving = el => {
   text-align: center;
 }
 .toasts.top .toast { top: 0; bottom: auto; }
+/*
+ * 桌面布局（≥ 1024px）：没有底部导航，提示在内容区（左侧导航右边）的底部正中；短视频页的顶部样式在顶栏下面。
+ * 全屏时（.fs，提示挪进了全屏元素里）照旧铺满整个全屏元素居中。
+ */
+@media (min-width: 1024px) {
+  .toasts { left: var(--desk-side); bottom: 48px; }
+  /* 短视频页：卡片上沿的「推荐 / 专题」下面一行（和「2X 快进中」、换一批的提示条同一位置），不挡标签 */
+  .toasts.top { top: calc(var(--desk-top) + var(--safe-t) + 78px); }
+  .toasts.fs { left: 0; top: 62px; }
+  .toast { max-width: min(82%, 560px); padding: 10px 18px; font-size: 14px; line-height: 20px; }
+}
 
 /*
  * 出现：从来的那一侧带着缩小弹出来（snappy 弹簧，落定时有一点点「顶」的感觉），透明度很快到位。
