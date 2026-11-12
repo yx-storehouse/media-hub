@@ -20,7 +20,7 @@ defineOptions({ name: 'ImportPage' })
 
 /*
  * 批量导入向导：① 选择数据 → ② 对应字段 → ③ 预检（dryRun）→ ④ 导入。
- * ?type=videos|posts|topics|creators|keywords 预选类型（各列表页的「导入」按钮带着它）。
+ * ?type=videos|posts|albums|topics|creators|keywords 预选类型（各列表页的「导入」按钮带着它）。
  * 状态在 import/store.js；几万行的数据只解析一次，结果表分页渲染。
  */
 const route = useRoute()

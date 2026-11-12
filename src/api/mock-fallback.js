@@ -397,21 +397,67 @@ function mockCreatorVideos(c, sort) {
 }
 
 /*
- * 「媒体」照片墙：视频封面 + 帖子的主图和配图（文档帖的文档页不算），按发布时间倒序。
- * 帖子的发布时间和详情页一样（第 i 篇是 (i + 1) 个半小时前）。
+ * 「图片」图集：演示创作者每人 0～6 个（由 id 决定，有的一个也没有，用来看空状态），每个 1～9 张、约三成是单张，
+ * 有的没有标题。图集 id 是 demo:album:<创作者键>:<序号>（getAlbum 能还原出来），发布时间在 1～40 天前。
+ * 图片是 { 封面种子, 宽, 高 }：列表 / 详情给带宽高的 Cover（和接口的 { url, width, height } 一样由 index.js 统一换算），
+ * 「媒体」里给普通的 Cover。
+ */
+const ALBUM_TITLES = ['街角的黄昏', '周末的集市', '', '海边散步', '冬日暖阳', '旅途随拍', '', '雨后的小巷', '窗边的光']
+const ALBUM_TEXTS = ['随手拍的几张，没怎么调色。', '', '那天的光线刚刚好。', '']
+/* [宽, 高]：竖图为主，也有横图、方图和长图 */
+const ALBUM_SIZES = [[720, 960], [720, 900], [960, 720], [540, 960], [800, 800], [960, 540]]
+const albumCache = new Map()
+function mockAlbums(c) {
+  if (albumCache.has(c.id)) return albumCache.get(c.id)
+  const key = rawId(c.id)
+  const r = rng('albums:' + key)
+  const now = Math.floor(Date.now() / 1000)
+  const n = Math.floor(r() * 7)
+  const list = Array.from({ length: n }, (_, k) => {
+    const count = r() < 0.3 ? 1 : 2 + Math.floor(r() * 8)
+    const images = Array.from({ length: count }, (_, j) => {
+      const [w, h] = ALBUM_SIZES[Math.floor(r() * ALBUM_SIZES.length)]
+      return { seed: `al${key}_${k}_${j}`, kind: (k + j) % 6, w, h }
+    })
+    const tags = TAG_POOL.filter(() => r() < 0.15).slice(0, 3)
+    return {
+      id: demoId(`album:${key}:${k}`),
+      title: count === 1 && r() < 0.5 ? '' : ALBUM_TITLES[Math.floor(r() * ALBUM_TITLES.length)],
+      description: ALBUM_TEXTS[Math.floor(r() * ALBUM_TEXTS.length)],
+      tags,
+      images,
+      publishedAt: now - 86400 - Math.floor(r() * 39 * 86400)
+    }
+  }).sort((a, b) => b.publishedAt - a.publishedAt)
+  albumCache.set(c.id, list)
+  return list
+}
+const albumCover = img => cover(img.seed, { kind: img.kind, w: img.w, h: img.h })
+const albumPic = img => Object.assign(albumCover(img), { width: img.w, height: img.h })
+const ago = at => {
+  const d = Math.floor((Date.now() / 1000 - at) / 86400)
+  return d < 1 ? '今天' : d + '天前'
+}
+
+/*
+ * 「媒体」照片墙：视频封面 + 帖子的主图和配图（文档帖的文档页不算）+ 图集的每一张，按发布时间倒序。
+ * 帖子的发布时间和详情页一样（第 i 篇是 (i + 1) 个半小时前）。图集的图带 albumId / albumIndex（在图集里的位置），其余为 null。
  */
 function mockCreatorMedia(c) {
   const now = Math.floor(Date.now() / 1000)
   const videos = mockCreatorVideos(c, 0).map(v => ({
-    id: 'v' + v.id, kind: 'video', cover: v.cover, title: v.title, postId: null, videoId: v.id, dur: clock(v.len), publishedAt: v.publishedAt
+    id: 'v' + v.id, kind: 'video', cover: v.cover, title: v.title, postId: null, videoId: v.id, albumId: null, albumIndex: null, dur: clock(v.len), publishedAt: v.publishedAt
   }))
   const images = c.posts.flatMap(p => {
     const at = now - (POSTS.indexOf(p) + 1) * 1800
     const pics = [p.media.main, ...(p.kind === 'doc' ? [] : p.media.thumbs)].filter(Boolean)
-    return pics.map((pic, k) => ({ id: `i${p.id}:${k}`, kind: 'image', cover: pic, title: p.text, postId: p.id, videoId: null, dur: null, publishedAt: at }))
+    return pics.map((pic, k) => ({ id: `i${p.id}:${k}`, kind: 'image', cover: pic, title: p.text, postId: p.id, videoId: null, albumId: null, albumIndex: null, dur: null, publishedAt: at }))
   })
-  // 稳定排序：同一时间保持视频在前、帖子里的图按顺序
-  return [...videos, ...images].sort((a, b) => b.publishedAt - a.publishedAt)
+  const albums = mockAlbums(c).flatMap(a => a.images.map((img, k) => ({
+    id: `a${a.id}:${k}`, kind: 'image', cover: albumCover(img), title: a.title, postId: null, videoId: null, albumId: a.id, albumIndex: k, dur: null, publishedAt: a.publishedAt
+  })))
+  // 稳定排序：同一时间保持视频在前、再是帖子里的图、最后是图集的图，各自按原来的顺序
+  return [...videos, ...images, ...albums].sort((a, b) => b.publishedAt - a.publishedAt)
 }
 
 export const getCreator = id => {
@@ -431,6 +477,7 @@ export const getCreator = id => {
     bio: c.bio,
     followers: mockFollowers(c),
     videoCount: c.videoCount,
+    albumCount: mockAlbums(c).length,
     postCount: c.posts.length,
     mediaCount: mockCreatorMedia(c).length,
     lastActiveAt,
@@ -457,6 +504,37 @@ export const getCreatorMedia = (id, opts = {}) => {
   if (!c) return noCreator()
   const all = mockCreatorMedia(c)
   return ok({ total: all.length, list: slice(all, opts) })
+}
+
+export const getCreatorAlbums = (id, opts = {}) => {
+  const c = mockCreator(id)
+  if (!c) return noCreator()
+  const all = mockAlbums(c)
+  return ok({
+    total: all.length,
+    list: slice(all, opts).map(a => ({ id: a.id, title: a.title, cover: albumPic(a.images[0]), count: a.images.length, publishedAt: a.publishedAt, time: ago(a.publishedAt) }))
+  })
+}
+
+/* 图集详情：id 是 demo:album:<创作者键>:<序号>；还原不出来就和接口一样报「图集不存在或已下架」 */
+export const getAlbum = id => {
+  const s = rawId(id)
+  const m = /^album:(.+):(\d+)$/.exec(s)
+  const c = m && mockCreator(demoId(m[1]))
+  const a = c && mockAlbums(c).find(x => x.id === demoId(s))
+  if (!a) return Promise.reject(new ApiError('图集不存在或已下架', { status: 400, code: 1 }))
+  return ok({
+    id: a.id,
+    title: a.title,
+    description: a.description,
+    tags: a.tags.slice(),
+    creator: { id: c.id, name: c.name, handle: c.handle, verified: c.verified, avatar: c.avatar },
+    following: followed.has(c.id),
+    images: a.images.map(albumPic),
+    count: a.images.length,
+    publishedAt: a.publishedAt,
+    time: ago(a.publishedAt)
+  })
 }
 export const togglePostFav = (id, on) => {
   const p = POSTS[postIndex(id)]
@@ -520,6 +598,6 @@ export default {
   getCategoryFilters, getCategoryVideos, getHotWords, getCreators, getRecentSearches, searchVideos, searchPosts,
   getTopic, getTopicVideos, getLibrary, getVideo, getRelatedVideos, getShorts, getCommunityTabs, getPosts,
   getPost, viewPost, toggleFollow, togglePostFav, toggleVideoFav, toggleVideoLike, toggleVideoDislike, toggleTopicFav,
-  getCreator, getCreatorVideos, getCreatorPosts, getCreatorMedia,
+  getCreator, getCreatorVideos, getCreatorPosts, getCreatorMedia, getCreatorAlbums, getAlbum,
   getLiveTabs, getLives, getNearbyFilters, getNearby, getProfile
 }

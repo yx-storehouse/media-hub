@@ -6,6 +6,7 @@ import AIcon from '../../components/AIcon.vue'
 import { confirmState } from '../../components/confirm'
 import { resolveUrl } from '../../api'
 import { fmtSize, fmtDate } from '../../utils/format'
+import { usageText } from './files'
 
 /*
  * 预览：图片大图 / 视频播放器，带文件信息；← → 键（或两侧按钮）切换同一文件夹里的上一个 / 下一个。
@@ -67,7 +68,7 @@ const vReleaseMedia = {
         <dl class="kv">
           <div><dt>大小</dt><dd>{{ fmtSize(entry.size) }}</dd></div>
           <div><dt>修改时间</dt><dd>{{ fmtDate(entry.mtime) }}</dd></div>
-          <div><dt>使用情况</dt><dd>{{ entry.usedBy ? `被 ${entry.usedBy} 个视频使用` : '未被视频使用' }}</dd></div>
+          <div><dt>使用情况</dt><dd>{{ usageText(entry) }}</dd></div>
           <div v-if="list.length > 1 && idx >= 0"><dt>位置</dt><dd class="num">{{ idx + 1 }} / {{ list.length }}</dd></div>
         </dl>
         <div class="url-line">

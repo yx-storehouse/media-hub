@@ -31,7 +31,7 @@ defineOptions({ name: 'CreatorsPage' })
 
 /*
  * 创作者：列表结构同 KeywordsPage。
- * 删除会连带删掉他的帖子（外键级联），视频只是变成「无创作者」—— 删除前用行里的 postCount / videoCount 提醒。
+ * 删除会连带删掉他的帖子和图集（外键级联），视频只是变成「无创作者」—— 删除前用行里的 postCount / albumCount / videoCount 提醒。
  * 改了名字 / 账号 / 状态后刷新元数据，其他页面的「创作者」下拉框跟着变。
  */
 
@@ -42,18 +42,19 @@ const verifiedOptions = [{ value: 1, label: '已认证' }, { value: 0, label: '�
 const { query, rows, total, loading, loaded, error, selected, reload, sortModel, hasFilters, resetFilters, clearSelection, params, whenLoaded } =
   useListPage(listCreators, { defaults: { q: '', status: '', verified: '', sort: 'id', order: 'desc' } })
 
-/* 见过的行（批量删除时统计跨页勾选的帖子数 / 视频数） */
+/* 见过的行（批量删除时统计跨页勾选的帖子数 / 图集数 / 视频数） */
 const seen = new Map()
 watch(rows, list => { for (const r of list) seen.set(r.id, r) }, { immediate: true })
 
-/* ② 表格列：合计要放得进 1280×800 的内容区（约 1010px）；视频数 / 帖子数可以点，跳到他的视频 / 帖子 */
+/* ② 表格列：合计要放得进 1280×800 的内容区（约 1010px）；视频数 / 帖子数 / 图集数可以点，跳到他的视频 / 帖子 / 图集 */
 const columns = [
   { key: 'id', label: 'ID', width: 64, sortable: true, class: 'dim' },
   { key: 'avatarUrl', label: '头像', width: 60 },
-  { key: 'name', label: '名称', minWidth: 200, sortable: true, firstOrder: 'asc' },
+  { key: 'name', label: '名称', minWidth: 160, sortable: true, firstOrder: 'asc' },
   { key: 'isOfficial', label: '官方', width: 60, align: 'center' },
   { key: 'videoCount', label: '视频数', width: 84, align: 'right', sortable: true },
   { key: 'postCount', label: '帖子数', width: 72, align: 'right' },
+  { key: 'albumCount', label: '图集数', width: 84, align: 'right', sortable: true },
   { key: 'followerCount', label: '粉丝', width: 76, align: 'right', sortable: true },
   { key: 'status', label: '状态', width: 88 },
   { key: 'createdAt', label: '创建时间', width: 104 }
@@ -88,13 +89,14 @@ const editor = useEditor({
   onSaved: () => { refreshMeta(); return reload() }
 })
 
-const impactLines = (posts, videos) => [
+const impactLines = (posts, albums, videos) => [
   posts ? `· ${posts} 条帖子会被一起删除` : '',
+  albums ? `· ${albums} 个图集会被一起删除（图片文件不删）` : '',
   videos ? `· ${videos} 个视频会变成「无创作者」（视频本身不删）` : ''
 ].filter(Boolean).join('\n')
 
 async function removeOne(row, { fromDrawer = false } = {}) {
-  const impact = impactLines(row.postCount, row.videoCount)
+  const impact = impactLines(row.postCount, row.albumCount, row.videoCount)
   const ok = await confirmDialog({
     title: '删除创作者',
     message: `确定删除创作者「${row.name}」？\n${impact ? impact + '\n' : ''}删除后不可恢复。`,
@@ -104,7 +106,11 @@ async function removeOne(row, { fromDrawer = false } = {}) {
   if (!ok) return
   try {
     const res = await deleteCreator(row.id)
-    const extra = [res?.deletedPosts ? `删除了 ${res.deletedPosts} 条帖子` : '', res?.detachedVideos ? `${res.detachedVideos} 个视频已变为无创作者` : ''].filter(Boolean).join('，')
+    const extra = [
+      res?.deletedPosts ? `删除了 ${res.deletedPosts} 条帖子` : '',
+      res?.deletedAlbums ? `删除了 ${res.deletedAlbums} 个图集` : '',
+      res?.detachedVideos ? `${res.detachedVideos} 个视频已变为无创作者` : ''
+    ].filter(Boolean).join('，')
     toast(extra ? `已删除（${extra}）` : '已删除', { type: 'ok' })
     selected.value = selected.value.filter(id => id !== row.id)
     if (fromDrawer) editor.close()
@@ -125,15 +131,21 @@ const batch = useBatch((ids, action, value) => batchCreators(ids, action, value)
 async function batchDelete() {
   const ids = selected.value
   let posts = 0
+  let albums = 0
   let videos = 0
-  for (const id of ids) { posts += seen.get(id)?.postCount || 0; videos += seen.get(id)?.videoCount || 0 }
-  const impact = impactLines(posts, videos)
+  for (const id of ids) {
+    posts += seen.get(id)?.postCount || 0
+    albums += seen.get(id)?.albumCount || 0
+    videos += seen.get(id)?.videoCount || 0
+  }
+  const impact = impactLines(posts, albums, videos)
   lastBatch = null
   await batch.run('delete', undefined, {
     confirm: { title: '批量删除创作者', message: `确定删除选中的 ${ids.length} 个创作者？\n${impact ? impact + '\n' : ''}删除后不可恢复。`, confirmText: '删除', danger: true },
     done: '已删除'
   })
-  if (lastBatch?.deletedPosts) toast(`同时删除了 ${lastBatch.deletedPosts} 条帖子`)
+  const also = [lastBatch?.deletedPosts ? `${lastBatch.deletedPosts} 条帖子` : '', lastBatch?.deletedAlbums ? `${lastBatch.deletedAlbums} 个图集` : ''].filter(Boolean).join('、')
+  if (also) toast(`同时删除了 ${also}`)
 }
 
 /* ⑤ 导出 */
@@ -196,6 +208,9 @@ const appLink = id => `./index.html#/creator/${id}`
         </template>
         <template #cell-postCount="{ row }">
           <RouterLink class="cnt-link" :class="{ dim: !row.postCount }" :to="{ path: '/posts', query: { creatorId: row.id } }" :aria-label="`查看「${row.name}」的帖子（${row.postCount} 条）`" title="查看他的帖子">{{ fmtNum(row.postCount) }}</RouterLink>
+        </template>
+        <template #cell-albumCount="{ row }">
+          <RouterLink class="cnt-link" :class="{ dim: !row.albumCount }" :to="{ path: '/albums', query: { creatorId: row.id } }" :aria-label="`查看「${row.name}」的图集（${row.albumCount || 0} 个）`" title="查看他的图集">{{ fmtNum(row.albumCount || 0) }}</RouterLink>
         </template>
         <template #cell-followerCount="{ value }"><span class="muted">{{ fmtCount(value) }}</span></template>
         <template #cell-status="{ value }"><StatusBadge kind="creator" :status="value" /></template>
@@ -282,12 +297,14 @@ const appLink = id => `./index.html#/creator/${id}`
           <div><dt>ID</dt><dd>{{ editor.row.id }}</dd></div>
           <div><dt>视频</dt><dd>{{ fmtNum(editor.row.videoCount) }}</dd></div>
           <div><dt>帖子</dt><dd>{{ fmtNum(editor.row.postCount) }}</dd></div>
+          <div><dt>图集</dt><dd>{{ fmtNum(editor.row.albumCount || 0) }}</dd></div>
           <div><dt>粉丝</dt><dd>{{ fmtNum(editor.row.followerCount) }}</dd></div>
           <div><dt>创建时间</dt><dd>{{ fmtDate(editor.row.createdAt) }}</dd></div>
         </dl>
         <div class="links">
           <ABtn size="sm" icon="video" :to="{ path: '/videos', query: { creatorId: editor.row.id } }">查看视频</ABtn>
           <ABtn size="sm" icon="post" :to="{ path: '/posts', query: { creatorId: editor.row.id } }">查看帖子</ABtn>
+          <ABtn size="sm" icon="image" :to="{ path: '/albums', query: { creatorId: editor.row.id } }">查看图集</ABtn>
           <ABtn
             size="sm"
             icon="external"

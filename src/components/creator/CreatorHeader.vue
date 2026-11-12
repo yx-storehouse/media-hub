@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { formatCount } from '@/utils/format'
+import { quietArt } from '@/utils/art'
 import Cover from '@/components/Cover.vue'
 import Icon from '@/components/Icon.vue'
 import RollNum from '@/components/video/RollNum.vue'
@@ -54,18 +55,17 @@ function parallax(top) {
 }
 defineExpose({ parallax })
 
-const banner = computed(() => (props.creator?.banner || []).filter(Boolean).slice(0, 3))
+/* 头图里没有生成占位图的（图集的封面、后台上传的作品）：垫一张按地址算的灰色渐变，图来不了时不是一块死黑 */
+const banner = computed(() => (props.creator?.banner || []).filter(Boolean).slice(0, 3)
+  .map(c => (c.src && !c.fallback ? { ...c, fallback: quietArt(c.src) } : c)))
 
 /* 没有作品图时的头图：同一个创作者每次都是同一张（角度、光斑位置由 id 决定） */
-const generated = computed(() => {
-  let h = 2166136261
-  for (const ch of String(props.creator?.id ?? '')) h = Math.imul(h ^ ch.charCodeAt(0), 16777619) >>> 0
-  const angle = 115 + (h % 60)
-  const x = 12 + ((h >>> 6) % 72)
-  const y = 18 + ((h >>> 13) % 46)
-  return `radial-gradient(circle at ${x}% ${y}%, rgba(255, 255, 255, .13), rgba(255, 255, 255, 0) 58%), linear-gradient(${angle}deg, #2b2b2b, #151515 72%)`
-})
+const generated = computed(() => quietArt(props.creator?.id))
 
+/*
+ * 数据行和下面的标签同一套叫法：粉丝 · 视频 · 图片（图集数）· 帖子。
+ * 「图片」只在有图集时出现：大多数创作者没有图集，多一项「0 图片」只会把手机上这一行挤成两行
+ */
 const stats = computed(() => {
   const c = props.creator
   if (!c) return []
@@ -73,6 +73,7 @@ const stats = computed(() => {
     c.handle ? { text: '@' + c.handle } : null,
     { num: formatCount(props.followers), n: props.followers, text: '粉丝' },
     { num: formatCount(c.videoCount), text: '视频' },
+    c.albumCount > 0 ? { num: formatCount(c.albumCount), text: '图片' } : null,
     { num: formatCount(c.postCount), text: '帖子' },
     c.lastActive ? { text: '最后更新 ' + c.lastActive } : null
   ].filter(Boolean)

@@ -23,6 +23,8 @@ const FALLBACK = {
   statuses: [{ value: 1, label: '已发布' }, { value: 0, label: '草稿' }, { value: 2, label: '已下架' }],
   postKinds: [{ value: 1, label: '视频' }, { value: 0, label: '图文' }, { value: 2, label: '文档' }],
   topicKinds: [{ value: 0, label: '普通' }, { value: 1, label: '首页分区' }, { value: 2, label: '片库分类' }],
+  /* 图集只有上架 / 下架（值和视频的「已发布 1 / 已下架 2」一致） */
+  albumStatuses: [{ value: 1, label: '上架' }, { value: 2, label: '下架' }],
   mediaBase: '/media/'
 }
 
@@ -63,6 +65,7 @@ const qualityOptions = computed(() => m.value.qualities.map(q => ({ value: q.key
 const statusOptions = computed(() => m.value.statuses.map(s => ({ value: s.value, label: s.label })))
 const postKindOptions = computed(() => m.value.postKinds.map(s => ({ value: s.value, label: s.label })))
 const topicKindOptions = computed(() => m.value.topicKinds.map(s => ({ value: s.value, label: s.label })))
+const albumStatusOptions = computed(() => (m.value.albumStatuses || FALLBACK.albumStatuses).map(s => ({ value: s.value, label: s.label })))
 /** 创作者 / 分区的启停状态 */
 const enableOptions = [{ value: 1, label: '正常' }, { value: 0, label: '停用' }]
 
@@ -96,6 +99,7 @@ export function useMeta() {
     statusOptions,
     postKindOptions,
     topicKindOptions,
+    albumStatusOptions,
     enableOptions,
     labelOf
   }

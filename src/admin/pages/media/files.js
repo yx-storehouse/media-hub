@@ -11,6 +11,14 @@ export const DOWNLOAD_EXTS = ['apk']
 export const ALLOWED_EXTS = [...VIDEO_EXTS, ...IMAGE_EXTS, ...EXTRA_EXTS, ...DOWNLOAD_EXTS]
 export const ACCEPT_ATTR = ALLOWED_EXTS.map(e => '.' + e).join(',')
 
+/** 被多少条记录用到（视频按播放地址 / 封面 / 字幕算，图集按里面的图片算） */
+export const usedCount = e => (e?.usedBy || 0) + (e?.usedByAlbums || 0)
+/** 使用情况：「被 2 个视频、1 个图集使用」/「未被使用」 */
+export function usageText(e) {
+  const parts = [e?.usedBy ? `${e.usedBy} 个视频` : '', e?.usedByAlbums ? `${e.usedByAlbums} 个图集` : ''].filter(Boolean)
+  return parts.length ? `被 ${parts.join('、')}使用` : '未被使用'
+}
+
 export const extOf = name => (/\.([^./]+)$/.exec(String(name || '').toLowerCase()) || [])[1] || ''
 export const baseOf = name => String(name || '').replace(/\.[^./]+$/, '')
 export const isAllowed = name => ALLOWED_EXTS.includes(extOf(name))

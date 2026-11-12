@@ -32,12 +32,12 @@ export const getSchema = () => get(`${A}/schema`)
 
 /* ---------------- 通用：导出 / 导入 ---------------- */
 
-/** type: videos | posts | topics | creators | keywords */
+/** type: videos | posts | topics | creators | keywords | albums */
 export const exportRows = (type, query) => get(`${A}/${type}/export`, withoutPaging(query), LONG)
 export const importRows = (type, rows, options = {}, dryRun = false) =>
   post(`${A}/${type}/import`, { rows, options, dryRun }, LONG)
 
-/* 五种内容的增删改查形状完全一样，用一个工厂生成，下面再逐个具名导出（方便搜索和自动补全） */
+/* 各类内容的增删改查形状完全一样，用一个工厂生成，下面再逐个具名导出（方便搜索和自动补全） */
 function resource(type) {
   return {
     list: (query, { signal } = {}) => get(`${A}/${type}`, query, { signal }),
@@ -90,7 +90,7 @@ export const exportCreators = creators.export
 export const getCreator = creators.get
 export const createCreator = creators.create
 export const updateCreator = creators.update
-/** 删除创作者会连带删掉其帖子，返回 { ok, deletedPosts, detachedVideos } */
+/** 删除创作者会连带删掉其帖子和图集，返回 { ok, deletedPosts, deletedAlbums, detachedVideos } */
 export const deleteCreator = creators.remove
 export const batchCreators = creators.batch
 
@@ -104,6 +104,21 @@ export const createKeyword = keywords.create
 export const updateKeyword = keywords.update
 export const deleteKeyword = keywords.remove
 export const batchKeywords = keywords.batch
+
+/* ---------------- 图集（创作者主页「图片」） ---------------- */
+const albums = resource('albums')
+/** → { total, page, pageSize, list: AdminAlbum[] }（每行带 images: [{ url, width, height }]，第一张是封面） */
+export const listAlbums = albums.list
+export const exportAlbums = albums.export
+export const getAlbum = albums.get
+/** body: { creatorId, images: [{ url, width, height }], title?, description?, tags?, status?, publishedAt? } */
+export const createAlbum = albums.create
+/** images 是完整的新顺序（整体替换）；不传 = 不改图片 */
+export const updateAlbum = albums.update
+/** 只删记录，素材文件不动 */
+export const deleteAlbum = albums.remove
+/** action: publish | unpublish | delete | setCreator（value = 创作者 id） | addTags | removeTags */
+export const batchAlbums = albums.batch
 
 /* ---------------- 首页推荐分区 ---------------- */
 /** → { list: AdminSection[] }（全部，按 sortOrder） */
@@ -129,10 +144,10 @@ export const setUserRole = (id, role) => post(`${A}/users/${id}/role`, { role })
 export const deleteUser = id => del(`${A}/users/${id}`)
 
 /* ---------------- 素材文件 ---------------- */
-/** → { dir, parent, entries: [{ name, path, type, size, mtime, url, usedBy }] } */
+/** → { dir, parent, entries: [{ name, path, type, size, mtime, url, usedBy, usedByAlbums }] }（usedBy 只数视频，usedByAlbums 只数图集） */
 export const listMedia = (dir = '', { signal } = {}) => get(`${A}/media`, { dir }, { signal })
 export const createFolder = path => post(`${A}/media/folder`, { path })
-/** 被视频引用的文件需要 force=true 才能删 */
+/** 被视频 / 图集引用的文件需要 force=true 才能删 */
 export const deleteMedia = (path, force = false) => del(`${A}/media`, { query: { path, force: force ? 1 : 0 } })
 /** → { files: [{ path, url, name, title, size, mtime, coverUrl, imported, videoId }] } */
 export const scanMedia = (dir = '', recursive = true) => post(`${A}/media/scan`, { dir, recursive }, { timeout: 60000 })

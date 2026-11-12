@@ -262,6 +262,42 @@ CREATE INDEX IF NOT EXISTS idx_comments_post  ON comments(post_id, created_at DE
 CREATE INDEX IF NOT EXISTS idx_comments_video ON comments(video_id, created_at DESC);
 
 -- ---------------------------------------------------------------------------
+-- 图集（创作者主页「图片」：后台单独上传的图片，不是帖子里的图）
+--   一个图集 = 标题（单张图片可以为空）+ 简介 + 标签 + 1..N 张图（按 sort 排，第一张是封面）。
+--   status: 1=上架 2=下架（没有草稿）。删创作者时连同他的图集一起删，删图集只删行、不删素材文件。
+--   老库由 db/index.mjs 启动时按这一段补建（从下一行到「图集结束」原样执行，定义只写在这里一处）。
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS albums (
+  id            INTEGER PRIMARY KEY,
+  creator_id    INTEGER NOT NULL REFERENCES creators(id) ON DELETE CASCADE,
+  title         TEXT    NOT NULL DEFAULT '',
+  description   TEXT    NOT NULL DEFAULT '',
+  tags          TEXT    NOT NULL DEFAULT '[]',   -- JSON 数组 ["旅行","街拍"]，不带 #
+  image_count   INTEGER NOT NULL DEFAULT 0,      -- 冗余计数，后台改图片时同步（后台列表按它排序）
+  view_count    INTEGER NOT NULL DEFAULT 0,
+  status        INTEGER NOT NULL DEFAULT 1,
+  published_at  INTEGER NOT NULL,
+  created_at    INTEGER NOT NULL,
+  updated_at    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_albums_creator ON albums(creator_id, status, published_at DESC);
+CREATE INDEX IF NOT EXISTS idx_albums_pub     ON albums(status, published_at DESC);
+
+CREATE TABLE IF NOT EXISTS album_images (
+  id          INTEGER PRIMARY KEY,
+  album_id    INTEGER NOT NULL REFERENCES albums(id) ON DELETE CASCADE,
+  url         TEXT    NOT NULL,                   -- http(s):// 地址或 /media/images/… 站内路径
+  width       INTEGER NOT NULL DEFAULT 0,         -- 原图像素宽高，0 = 不知道
+  height      INTEGER NOT NULL DEFAULT 0,
+  sort        INTEGER NOT NULL DEFAULT 0,         -- 图集里的顺序（0 起，0 是封面）
+  created_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_album_images_album ON album_images(album_id, sort);
+CREATE INDEX IF NOT EXISTS idx_album_images_url   ON album_images(url);   -- 素材「被引用」统计、导入按第一张图查重
+-- 图集结束
+
+-- ---------------------------------------------------------------------------
 -- 直播
 -- ---------------------------------------------------------------------------
 

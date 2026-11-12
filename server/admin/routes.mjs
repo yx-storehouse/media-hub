@@ -3,7 +3,7 @@
  *   [方法, 正则, 处理函数 (m, query, body, ctx), 'admin']
  * 全部要求管理员登录（index.mjs 统一拦 401 / 403）。
  *
- * 各类数据（videos / posts / topics / creators / keywords）的接口形状一致：
+ * 各类数据（videos / posts / topics / creators / keywords / albums）的接口形状一致：
  *   GET    /api/admin/:type             列表（?page&pageSize&sort&order + 各自的筛选）
  *   GET    /api/admin/:type/export      导出（同列表筛选）→ { fields, rows }
  *   GET    /api/admin/:type/:id         单条
@@ -44,6 +44,7 @@ export const adminRoutes = [
   ['PUT', /^\/api\/admin\/topics\/order$/, (m, q, body) => svc.reorderTopics(body), ADMIN],
   ...entityRoutes('creators'),
   ...entityRoutes('keywords'),
+  ...entityRoutes('albums'),
 
   /* 首页推荐分区 */
   ['GET', /^\/api\/admin\/sections$/, () => svc.listSections(), ADMIN],

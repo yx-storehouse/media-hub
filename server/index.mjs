@@ -33,7 +33,9 @@
  *   GET  /api/creators/:id              创作者主页头部（登录时带 following）
  *   GET  /api/creators/:id/videos       创作者的视频（?sort=0 最新 | 1 最热&limit=&offset=）→ { total, list }
  *   GET  /api/creators/:id/posts        创作者的帖子（?limit=&offset=，结构同社区列表）→ { total, list }
- *   GET  /api/creators/:id/media        创作者的照片墙：视频封面 + 帖子的图，新的在前（?limit=&offset=）→ { total, list }
+ *   GET  /api/creators/:id/media        创作者的照片墙：视频封面 + 帖子的图 + 图集的图，新的在前（?limit=&offset=）→ { total, list }
+ *   GET  /api/creators/:id/albums       创作者的图集（「图片」标签，?limit=&offset=）→ { total, list }
+ *   GET  /api/albums/:id                图集详情（标题、简介、标签、创作者、全部图片；登录时带 following）
  *   GET  /api/live/tabs                 直播 tab
  *   GET  /api/live                      直播列表（?tab=0）
  *   GET  /api/nearby/filters            同城筛选项
@@ -53,7 +55,7 @@
  *
  * 管理后台（管理员，路由表在 server/admin/routes.mjs）：
  *   GET  /api/admin/meta | stats | schema           下拉选项 / 概览统计 / 导入字段
- *   *    /api/admin/{videos|posts|topics|creators|keywords}[/:id|/batch|/import|/export]
+ *   *    /api/admin/{videos|posts|topics|creators|keywords|albums}[/:id|/batch|/import|/export]
  *   PUT  /api/admin/topics/order                    专题排序
  *   *    /api/admin/sections…                       首页推荐分区（含 items / rebuild / order）
  *   *    /api/admin/media…                          素材文件：列目录 / 上传（PUT 原始字节）/ 新建文件夹 / 删除 / 扫描
@@ -141,6 +143,9 @@ const routes = [
   ['GET', /^\/api\/creators\/([^/]+)\/videos$/, (m, q, b, c) => api.getCreatorVideos(m[1], q.sort, { limit: q.limit, offset: q.offset }, c.userId)],
   ['GET', /^\/api\/creators\/([^/]+)\/posts$/, (m, q, b, c) => api.getCreatorPosts(m[1], { limit: q.limit, offset: q.offset }, c.userId)],
   ['GET', /^\/api\/creators\/([^/]+)\/media$/, (m, q) => api.getCreatorMedia(m[1], { limit: q.limit, offset: q.offset })],
+  ['GET', /^\/api\/creators\/([^/]+)\/albums$/, (m, q) => api.getCreatorAlbums(m[1], { limit: q.limit, offset: q.offset })],
+  // 图集详情：公开；id 不是正整数也交给接口层，统一回 400「图集不存在或已下架」
+  ['GET', /^\/api\/albums\/([^/]+)$/, (m, q, b, c) => api.getAlbum(m[1], c.userId)],
 
   ['GET', /^\/api\/live\/tabs$/, () => api.getLiveTabs()],
   ['GET', /^\/api\/live$/, (m, q) => api.getLives({ tab: +(q.tab || 0), limit: +(q.limit || 20), offset: +(q.offset || 0) })],

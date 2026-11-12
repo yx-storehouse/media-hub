@@ -13,7 +13,7 @@ import { downloadCSV } from '../utils/download'
 import { fileStamp } from '../utils/format'
 import { toast, toastError } from '../components/toast'
 
-const TYPE_LABEL = { videos: '视频', posts: '帖子', topics: '专题', creators: '创作者', keywords: '搜索热词' }
+const TYPE_LABEL = { videos: '视频', posts: '帖子', topics: '专题', creators: '创作者', keywords: '搜索热词', albums: '图集' }
 
 /** 导出一次，返回导出的行数 */
 export async function exportToCSV(type, query = {}) {

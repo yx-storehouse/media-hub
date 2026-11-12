@@ -21,10 +21,14 @@
  *   Post   { id, creatorId, name, handle, verified, time, avatar, text, tags, kind: 'image'|'video'|'doc', dur, more, videoId, media: { main, thumbs } }
  *   PostDetail { id, title, content, kind, author: { id, name, handle, verified, avatar }, following, tags, images: Cover[],
  *                video: { id, title, cover, dur, len, frames: Cover[] } | null, read, fav, faved, publishedAt, time, next: { id, title, thumb } | null }
- *   MediaItem  { id, kind: 'image'|'video', cover, title, postId, videoId, dur, publishedAt }（创作者主页「媒体」的一格）
+ *   MediaItem  { id, kind: 'image'|'video', cover, title, postId, videoId, albumId, albumIndex, dur, publishedAt }（创作者主页「媒体」的一格）
+ *   AlbumPic   Cover + { width, height }（图集里的一张图；宽高是像素，0 = 不知道）
+ *   AlbumItem  { id, title, cover: AlbumPic, count, publishedAt, time }（创作者主页「图片」的一格）
+ *   Album      { id, title, description, tags, creator: { id, name, handle, verified, avatar }, following, images: AlbumPic[], count, publishedAt, time }
  * 页面里的列表都用 shallowRef 存放（整体替换，不做原地修改）。
  */
 import { request, get, post, del, ApiError } from './http'
+import { quietArt } from '@/utils/art'
 
 /* ---------------- 运行模式 ---------------- */
 
@@ -270,9 +274,10 @@ export const toggleFollow = (creatorId, { on }) =>
 /* ---------------- 创作者主页（#/creator/:id） ---------------- */
 
 /**
- * 主页头部：{ id, name, handle, avatar, verified, official, bio, followers, videoCount, postCount, mediaCount,
+ * 主页头部：{ id, name, handle, avatar, verified, official, bio, followers, videoCount, albumCount, postCount, mediaCount,
  *            lastActiveAt, lastActive, following, banner: Cover[] }
- * 视频数 / 帖子数只算已发布的；mediaCount 是「媒体」的条数（和 getCreatorMedia 的 total 一致）；
+ * 视频数 / 帖子数只算已发布的；albumCount 是「图片」的图集数（和 getCreatorAlbums 的 total 一致）；
+ * mediaCount 是「媒体」的条数（和 getCreatorMedia 的 total 一致）；
  * banner 是最近作品的图（最多 3 张，可能为空）。
  * 创作者不存在或已停用时接口回 400「创作者不存在」。
  */
@@ -298,15 +303,52 @@ export const getCreatorPosts = (id, opts = {}) =>
 /**
  * 主页「媒体」（照片墙）：他发过的所有图，新的在前 → { total, list: MediaItem[] }
  *   kind 'video'：已发布视频的封面，videoId 是点进去播放的视频，dur 是「01:15」「1:02:05」（没有时长为 null）
- *   kind 'image'：已发布帖子的主图 / 配图（文档帖的文档页不算），postId 是所属帖子
- * title：视频标题 / 帖子标题（读屏、播放页加载前先显示用）。id 是这一格的唯一键（'v12'、'i34'）。
+ *   kind 'image'：已发布帖子的主图 / 配图（文档帖的文档页不算），postId 是所属帖子；
+ *                 或者图集里的一张（albumId 是所属图集，albumIndex 是它在图集里的位置，从 0 起；同一图集的图按顺序挨着）
+ * title：视频标题 / 帖子标题 / 图集标题（可能为空；读屏、播放页加载前先显示用）。id 是这一格的唯一键（'v12'、'i34'、'a56'）。
+ * 不是图集的格子 albumId / albumIndex 为 null。
  */
 export const getCreatorMedia = (id, opts = {}) =>
   call(`/api/creators/${encodeURIComponent(id)}/media`, {
     query: { limit: opts.limit ?? 20, offset: opts.offset ?? 0 },
     ids: [id],
     mock: () => mockApi().then(m => m.getCreatorMedia(id, opts))
-  })
+  }).then(r => ({ ...r, list: (r?.list || []).map(m => (m?.albumId != null && m.cover && !m.cover.fallback ? { ...m, cover: albumPic(m.cover) } : m)) }))
+
+/*
+ * 图集里的图：接口给 { url, width, height }，这里统一换成和别处一样的 Cover（{ src, fallback }），宽高原样带着
+ * （演示数据本来就是 Cover，带着生成的占位图，原样保留）。宽高 0 表示不知道，页面按默认比例摆。
+ * 接口不给图集的图生成占位图（fallback 为 null）：按地址垫一张安静的灰色渐变（quietArt），和视频、帖子的图一样，
+ * 图还没来、或者来不了（外链在内网打不开）时格子里不是一块死黑。「媒体」墙上图集的那几格也一样换
+ */
+const albumPic = p => {
+  const src = p?.src ?? p?.url ?? null
+  return {
+    src,
+    fallback: p?.fallback || (src ? quietArt(src) : null),
+    width: Math.max(0, Number(p?.width) || 0),
+    height: Math.max(0, Number(p?.height) || 0)
+  }
+}
+
+/**
+ * 主页「图片」：管理员在后台上传的图集，新的在前 → { total, list: AlbumItem[] }
+ * cover 是第一张图，count 是图集里有几张（单张图就是只有一张的图集），title 可能为空。
+ */
+export const getCreatorAlbums = (id, opts = {}) =>
+  call(`/api/creators/${encodeURIComponent(id)}/albums`, {
+    query: { limit: opts.limit ?? 20, offset: opts.offset ?? 0 },
+    ids: [id],
+    mock: () => mockApi().then(m => m.getCreatorAlbums(id, opts))
+  }).then(r => ({ ...r, list: (r?.list || []).map(a => ({ ...a, title: a.title || '', cover: albumPic(a.cover) })) }))
+
+/**
+ * 图集详情（看大图用）：Album，images 按顺序、第一张是封面。
+ * 图集不存在、已下架、没有图、创作者停用时接口回 400「图集不存在或已下架」（和帖子一样，不退回演示数据）。
+ */
+export const getAlbum = id =>
+  call(`/api/albums/${encodeURIComponent(id)}`, { ids: [id], mock: () => mockApi().then(m => m.getAlbum(id)) })
+    .then(a => ({ ...a, title: a?.title || '', images: (a?.images || []).map(albumPic) }))
 
 /* ---------------- 直播 / 同城 ---------------- */
 

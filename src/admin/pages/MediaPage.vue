@@ -17,19 +17,20 @@ import { useLeaveGuard } from '../composables/useLeaveGuard'
 import { listMedia, deleteMedia } from '../api'
 import { fmtSize, fmtDate, fmtShortDate, fmtNum } from '../utils/format'
 import { createUploadQueue } from './media/uploadQueue'
-import { copyText, filesFromDrop, baseOf, ACCEPT_ATTR } from './media/files'
+import { copyText, filesFromDrop, baseOf, ACCEPT_ATTR, usedCount, usageText } from './media/files'
 import MediaGrid from './media/MediaGrid.vue'
 import UploadPanel from './media/UploadPanel.vue'
 import MediaPreview from './media/MediaPreview.vue'
 import NewFolderModal from './media/NewFolderModal.vue'
 import ScanImport from './media/ScanImport.vue'
+import AlbumFromFolder from './media/AlbumFromFolder.vue'
 
 defineOptions({ name: 'MediaPage' })
 
 /*
  * 素材文件：浏览服务器的 media/ 目录（当前文件夹在地址栏 ?dir=，可以后退 / 刷新 / 分享）、
  * 上传（多选 / 拖到页面任意位置，含整个文件夹；同时传 3 个）、新建文件夹、预览、复制地址、删除，
- * 以及「扫描导入视频」：把文件夹里的视频文件批量建成视频记录。
+ * 以及「扫描导入视频」：把文件夹里的视频文件批量建成视频记录；「建成图集」：把文件夹里的图片建成一个图集。
  * 文件夹里的条目一次全部取回（服务端不分页），这里在前端筛选、排序，并每页最多渲染 100 个。
  */
 const route = useRoute()
@@ -124,9 +125,11 @@ const filtered = computed(() => {
   if (kind.value) list = list.filter(e => e.type === kind.value)
   const { key, order } = sortModel.value
   const dirSign = order === 'desc' ? -1 : 1
+  // 「使用情况」按视频 + 图集的总数排
+  const val = key === 'usedBy' ? usedCount : e => e[key] || 0
   const cmp = key === 'name'
     ? (a, b) => a.name.localeCompare(b.name, 'zh')
-    : (a, b) => (a[key] || 0) - (b[key] || 0) || a.name.localeCompare(b.name, 'zh')
+    : (a, b) => val(a) - val(b) || a.name.localeCompare(b.name, 'zh')
   // 文件夹始终排在前面
   return [...list].sort((a, b) => ((a.type === 'dir') !== (b.type === 'dir') ? (a.type === 'dir' ? -1 : 1) : cmp(a, b) * dirSign))
 })
@@ -136,11 +139,13 @@ const counts = computed(() => {
   let dirs = 0
   let files = 0
   let bytes = 0
+  let images = 0
   for (const e of entries.value) {
     if (e.type === 'dir') dirs++
     else { files++; bytes += e.size }
+    if (e.type === 'image') images++
   }
-  return { dirs, files, bytes }
+  return { dirs, files, bytes, images }
 })
 /* 加载失败时不显示「0 个文件夹 · 0 个文件」这种假的统计 */
 const subtitle = computed(() => (loaded.value && !error.value ? `${counts.value.dirs} 个文件夹 · ${fmtNum(counts.value.files)} 个文件 · ${fmtSize(counts.value.bytes)}` : ''))
@@ -173,28 +178,36 @@ async function copy(e) {
 }
 
 const deleting = ref(new Set())
+/* 强制删除后会失效的东西（按被视频 / 图集用到的情况说） */
+const brokenWhat = (videos, albums) => (albums ? (videos ? '这些视频的播放地址或封面、图集里的这张图' : '图集里的这张图') : '这些视频的播放地址或封面')
+
 async function remove(e) {
   if (deleting.value.has(e.path)) return
   const isDir = e.type === 'dir'
+  // 列表里已经知道被用着：这一次确认就把后果说清楚，确认后直接强制删除（不用先被服务端拒绝一次再问第二遍）
+  const used = !isDir && usedCount(e) > 0
   const ok = await confirmDialog({
-    title: isDir ? '删除文件夹' : '删除文件',
+    title: isDir ? '删除文件夹' : used ? '文件正在使用' : '删除文件',
     message: isDir
       ? `确定删除文件夹「${e.name}」？\n只能删除空文件夹。`
-      : `确定删除「${e.name}」？\n删除后不可恢复。${e.usedBy ? `\n它正被 ${e.usedBy} 个视频使用。` : ''}`,
-    confirmText: '删除',
+      : used
+        ? `确定删除「${e.name}」？\n它正${usageText(e)}，删除后${brokenWhat(e.usedBy, e.usedByAlbums)}会失效（前台显示不出来），需要另外修改。\n删除后不可恢复。`
+        : `确定删除「${e.name}」？\n删除后不可恢复。`,
+    confirmText: used ? '仍然删除' : '删除',
     danger: true
   })
   if (!ok) return
   deleting.value = new Set(deleting.value).add(e.path)
   try {
     try {
-      await deleteMedia(e.path, false)
+      await deleteMedia(e.path, used)
     } catch (err) {
-      // 被视频引用：服务端拒绝（field = usedBy），再确认一次才强制删除
+      // 列表过时了（刚被视频 / 图集用上）：服务端拒绝（field = usedBy），再确认一次才强制删除
       if (err?.field !== 'usedBy') throw err
+      const what = brokenWhat(/视频/.test(err.message), /图集/.test(err.message))
       const force = await confirmDialog({
         title: '文件正在使用',
-        message: `${err.message}。\n强制删除后，这些视频的播放地址或封面会失效（前台显示不出来），需要另外修改。\n仍要删除吗？`,
+        message: `${err.message}。\n强制删除后，${what}会失效（前台显示不出来），需要另外修改。\n仍要删除吗？`,
         confirmText: '仍然删除',
         danger: true
       })
@@ -287,6 +300,7 @@ onBeforeUnmount(() => {
 
 const folderOpen = ref(false)
 const scanOpen = ref(false)
+const albumOpen = ref(false)
 const onFolderCreated = () => load({ quiet: true })
 
 /* ---------------- 列表视图 ---------------- */
@@ -309,6 +323,12 @@ const onRowClick = row => { if (row.type === 'dir') goDir(row.path) }
       <template #actions>
         <ABtn icon="folder-plus" @click="folderOpen = true">新建文件夹</ABtn>
         <ABtn icon="scan" @click="scanOpen = true">扫描导入视频</ABtn>
+        <ABtn
+          v-if="loaded && !error && counts.images"
+          icon="image"
+          :title="`把这个文件夹里的 ${counts.images} 张图片建成一个图集`"
+          @click="albumOpen = true"
+        >建成图集</ABtn>
         <ABtn variant="primary" icon="upload" @click="fileEl?.click()">上传文件</ABtn>
         <input ref="fileEl" type="file" multiple class="sr-only" :accept="ACCEPT_ATTR" tabindex="-1" aria-label="选择要上传的文件" @change="onPick">
       </template>
@@ -388,7 +408,7 @@ const onRowClick = row => { if (row.type === 'dir') goDir(row.path) }
           <template #cell-mtime="{ row }"><span class="muted" :title="fmtDate(row.mtime)">{{ fmtShortDate(row.mtime) }}</span></template>
           <template #cell-usedBy="{ row }">
             <span v-if="row.type === 'dir'" class="dim">—</span>
-            <span v-else :class="row.usedBy ? '' : 'dim'">{{ row.usedBy ? `被 ${row.usedBy} 个视频使用` : '未被使用' }}</span>
+            <span v-else :class="usedCount(row) ? '' : 'dim'">{{ usageText(row) }}</span>
           </template>
           <template #actions="{ row }">
             <template v-if="row.type !== 'dir'">
@@ -423,6 +443,7 @@ const onRowClick = row => { if (row.type === 'dir') goDir(row.path) }
     />
     <NewFolderModal v-model:open="folderOpen" :dir="dir" @created="onFolderCreated" />
     <ScanImport v-model:open="scanOpen" :dir="dir" @imported="load({ quiet: true })" />
+    <AlbumFromFolder v-model:open="albumOpen" :dir="dir" :entries="entries" @created="load({ quiet: true })" />
   </div>
 </template>
 

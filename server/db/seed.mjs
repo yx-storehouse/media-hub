@@ -13,6 +13,7 @@ import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { rng } from '../lib/random.mjs'
 import { cover, avatar, brandAvatar, docThumb } from '../lib/art.mjs'
+import { seedAlbums } from './seed-albums.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const DB_PATH = process.env.DB_PATH || join(here, 'reel.db')
@@ -319,6 +320,9 @@ tx(() => {
     }
   })
 
+  /* 图集（创作者主页「图片」）：picsum 的固定种子图，规则见 seed-albums.mjs */
+  seedAlbums(db, { now, seed: baseSeed })
+
   /* 直播 */
   LIVES.forEach(([handle, title, sub, viewers], i) => {
     const c = cover('live' + i, { w: 480, h: 640 })
@@ -352,7 +356,7 @@ tx(() => {
 
 /* 各表条数，方便一眼确认 */
 const counts = ['users', 'creators', 'topics', 'videos', 'home_sections', 'home_section_items', 'series', 'series_episodes',
-  'posts', 'post_media', 'live_rooms', 'places', 'place_tags', 'search_keywords', 'client_tabs']
+  'posts', 'post_media', 'albums', 'album_images', 'live_rooms', 'places', 'place_tags', 'search_keywords', 'client_tabs']
   .map(t => `${t}=${db.prepare(`SELECT COUNT(*) c FROM ${t}`).get().c}`)
 console.log('种子数据写入完成 →', DB_PATH)
 console.log(counts.join('  '))

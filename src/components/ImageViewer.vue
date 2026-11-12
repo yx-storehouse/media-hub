@@ -26,14 +26,22 @@ import RollNum from '@/components/video/RollNum.vue'
  * 往下拖时图片跟着手指走、慢慢变小，背景跟着变淡，松手不够远就弹回去。
  * 关闭的动画由一个临时的「替身」播（挂在 #app 上，不接收点击），组件本身立刻卸载：返回键、焦点、
  * 下面的页面马上就恢复正常，不用等动画。
+ *
+ * 图集（创作者主页「图片」）多用到三样，别处不传就和原来一样：
+ *   images 里的图可以带 width / height（像素）：图片还没加载就知道比例，起飞、放大拖动都按它算；
+ *   images 可以在开着的时候换：先只有封面（其余是没有 src、带 pending 的占位，卡住满 0.25 秒中间出转圈），
+ *   取回图集后换成整组，同一下标的图不重新加载；
+ *   caption：底部一行安静的说明文字（图集标题），往下拖、放大看细节时让开。
  */
 const props = defineProps({
-  /** Cover[]：{ src, fallback } */
+  /** Cover[]：{ src, fallback, width?, height?, pending? }（pending：还在取的占位，没有 src） */
   images: { type: Array, required: true },
   /** 打开时显示第几张 */
   index: { type: Number, default: 0 },
   /** (i) => 第 i 张图在页面上的缩略图元素（没有就返回 null） */
-  origin: { type: Function, default: null }
+  origin: { type: Function, default: null },
+  /** 底部的说明文字（图集标题）；空的不显示 */
+  caption: { type: String, default: '' }
 })
 const emit = defineEmits(['close'])
 
@@ -66,6 +74,28 @@ const near = i => Math.abs(i - cur.value) <= 1
 const failed = ref({})
 /* 每张图的原始宽高比（加载完读出），算放大后能拖多远 */
 const ratios = shallowRef({})
+/* 调用方给的宽高比（图集的图带 width / height）：图片还没加载完时先用它；没给（0 / 没有）返回 0 */
+function hinted(i) {
+  const m = props.images[i]
+  return m && m.width > 0 && m.height > 0 ? m.width / m.height : 0
+}
+/*
+ * 开着的时候 images 换了（图集：先只有封面，取回来再换成整组）：张数变少时当前这张不越界；
+ * 换了地址的那几张，之前记下的「加载失败」和宽高比作废（新地址重新来）
+ */
+watch(count, n => { if (cur.value > n - 1) cur.value = Math.max(0, n - 1) })
+watch(() => props.images.map(m => (m && m.src) || ''), (now, before) => {
+  const stale = now.map((s, i) => (s !== before[i] ? i : -1)).filter(i => i >= 0)
+  if (!stale.length) return
+  const drop = map => {
+    if (!stale.some(i => i in map)) return map
+    const next = { ...map }
+    for (const i of stale) delete next[i]
+    return next
+  }
+  failed.value = drop(failed.value)
+  ratios.value = drop(ratios.value)
+})
 
 const root = ref(null)
 const stage = ref(null)
@@ -73,6 +103,8 @@ const bg = ref(null)
 const top = ref(null)
 /* 桌面布局的 ‹ › 按钮（一层，打开时和顶栏一起淡入） */
 const nav = ref(null)
+/* 底部的说明文字（传了 caption 才有） */
+const cap = ref(null)
 /* 每张图的外框（按下标存，不依赖 v-for ref 数组的顺序） */
 const slides = []
 const size = { w: 0, h: 0 }
@@ -115,7 +147,7 @@ function onImgLoad(i, e) {
 
 /* 图片按 contain 摆进舞台后的显示尺寸（还没读到宽高 / 占位图按 4:3 算） */
 function fitted() {
-  const ar = ratios.value[cur.value] || 4 / 3
+  const ar = ratios.value[cur.value] || hinted(cur.value) || 4 / 3
   const w = Math.min(size.w, size.h * ar)
   return { w, h: w / ar }
 }
@@ -180,6 +212,9 @@ function visibleRect(el) {
 /* 图片宽高比：读过了用读到的；还没读到就看缩略图里的那张（同一张图，通常已经在缓存里了） */
 function ratioOf(i, thumb) {
   if (ratios.value[i]) return ratios.value[i]
+  // 调用方给了宽高（图集）：缩略图里那张不一定是这一张（图集的格子只放封面），先信它
+  const h = hinted(i)
+  if (h) return h
   const img = thumb?.querySelector('img')
   if (img && img.complete && img.naturalWidth && img.naturalHeight) return img.naturalWidth / img.naturalHeight
   return 4 / 3
@@ -300,7 +335,7 @@ async function zoomIn() {
   const duration = dur('--dur-3')
   const easing = ease('--ease-out')
   const fade = [{ opacity: 0 }, { opacity: 1 }]
-  opening = [bg.value, top.value, nav.value].filter(Boolean).map(el => el.animate(fade, { duration, easing }))
+  opening = [bg.value, top.value, nav.value, cap.value].filter(Boolean).map(el => el.animate(fade, { duration, easing }))
   const slide = slides[i]
   if (!slide) return
   const thumb = thumbOf(i)
@@ -387,14 +422,31 @@ function zoomOut() {
     anim = img.animate([{ opacity: 1 }, { opacity: 0 }], { duration, easing, fill: 'forwards' })
   }
   flying = true
-  const stopOnNav = router.afterEach(() => anim.finish())
+  // 缩略图上显示的不是这一张（图集的格子只放封面，翻到别的图再关掉）：落地后替身再很快淡掉，
+  // 格子里的封面从它下面露出来，不是一下子跳成另一张图。两边是同一张图（别处都是）时照旧落地就撤
+  const onThumb = thumb?.querySelector('img')
+  const swap = !!(t && onThumb && onThumb.src && media.src && onThumb.src !== media.src)
+  let navigated = false
+  let fadeOut = null
+  const stopOnNav = router.afterEach(() => {
+    navigated = true
+    anim.finish()
+    fadeOut?.finish()
+  })
   const done = () => {
     flying = false
     stopOnNav()
     ghost.remove()
     showThumb()
   }
-  anim.onfinish = done
+  const landed = () => {
+    if (!swap || navigated) return done()
+    showThumb()
+    fadeOut = img.animate([{ opacity: 1 }, { opacity: 0 }], { duration: dur('--dur-1'), easing: ease('--ease-out'), fill: 'forwards' })
+    fadeOut.onfinish = done
+    fadeOut.oncancel = done
+  }
+  anim.onfinish = landed
   anim.oncancel = done
 }
 
@@ -652,6 +704,7 @@ onBeforeUnmount(() => {
       role="dialog"
       aria-modal="true"
       aria-label="查看图片"
+      :aria-describedby="caption ? 'iv-cap' : undefined"
       tabindex="-1"
       @keydown="onKey"
     >
@@ -686,13 +739,15 @@ onBeforeUnmount(() => {
                 @load="onImgLoad(i, $event)"
                 @error="failed = { ...failed, [i]: true }"
               >
-              <!-- 没有图片地址 / 加载失败：显示占位图 -->
+              <!-- 没有图片地址 / 加载失败：显示占位图；还在取的（pending，图集没取回来的那几张）中间有转圈，等满 0.25 秒才出现 -->
               <div
                 v-else
                 class="iv-fb"
-                :class="{ anim: !dragging }"
+                :class="{ anim: !dragging, 'iv-wait': img && img.pending }"
                 :style="[{ backgroundImage: img?.fallback || undefined }, i === cur ? imgStyle : {}]"
-              />
+              >
+                <span v-if="img && img.pending" class="iv-spin" aria-hidden="true" />
+              </div>
             </template>
           </div>
         </div>
@@ -708,6 +763,9 @@ onBeforeUnmount(() => {
         <button type="button" class="iv-close m-hold" aria-label="关闭" @click="close"><Icon name="close" /></button>
         <span v-if="count > 1" class="iv-count" aria-live="polite"><RollNum :value="String(cur + 1)" :n="cur" /> / {{ count }}</span>
       </div>
+
+      <!-- 说明文字（图集标题）：贴在底部，往下拖、放大看细节时让开 -->
+      <div v-if="caption" ref="cap" class="iv-cap" :class="{ off: dragY || scale > 1.01 }"><span id="iv-cap">{{ caption }}</span></div>
     </div>
   </Teleport>
 </template>
@@ -737,6 +795,25 @@ onBeforeUnmount(() => {
   pointer-events: none;
 }
 .iv-fb { width: 100%; aspect-ratio: 4 / 3; background-color: #161616; background-position: center; background-size: cover; }
+/* 还在取的占位：中间一个转圈（和播放器的缓冲转圈一个样子），等满 0.25 秒还没取回来才淡入；减少动态效果时不转 */
+.iv-wait { position: relative; }
+.iv-spin {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 34px;
+  height: 34px;
+  margin: -17px 0 0 -17px;
+  border: 3px solid rgba(255, 255, 255, .25);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: iv-rot .8s linear infinite, iv-spin-in var(--dur-2) var(--ease-out) .25s backwards;
+}
+@keyframes iv-rot { to { transform: rotate(360deg); } }
+@keyframes iv-spin-in { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .iv-spin { animation: iv-spin-in var(--dur-2) linear .25s backwards; }
+}
 .iv-img.anim, .iv-fb.anim { transition: transform var(--dur-3) var(--ease-out); }
 
 .iv-top {
@@ -780,6 +857,25 @@ onBeforeUnmount(() => {
   pointer-events: none;
 }
 
+/* 说明文字（图集标题）：底部一层淡淡的暗角托住最多两行白字；不接手指（点按、滑动照样落到图上） */
+.iv-cap {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 40px 20px calc(18px + var(--safe-b));
+  background: linear-gradient(to top, rgba(0, 0, 0, .5), rgba(0, 0, 0, 0));
+  color: rgba(255, 255, 255, .86);
+  font-size: 14px;
+  line-height: 20px;
+  text-align: center;
+  pointer-events: none;
+  transition: opacity var(--dur-2) var(--ease-out);
+}
+/* 两行以内，多了省略（行数限制放在里面这层：外层的上下内边距里不会露出第三行） */
+.iv-cap > span { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: break-word; }
+.iv-cap.off { opacity: 0; transition-duration: var(--dur-1); }
+
 /* 关闭时的替身：盖在页面上、不接收点击，动画播完自己移除 */
 .iv-ghost { position: absolute; inset: 0; z-index: 70; overflow: hidden; pointer-events: none; }
 .iv-ghost-bg { position: absolute; inset: 0; background: #000; }
@@ -804,6 +900,9 @@ onBeforeUnmount(() => {
   .iv-fb { position: absolute; inset: 0; width: min(100%, 133.3333vh); height: auto; margin: auto; }
   .iv-top { height: 64px; padding: 0 16px; }
   .iv-close { margin-left: auto; }
+  /* 说明文字：一栏居中（最宽 --desk-col），左右让开 ‹ › 按钮 */
+  .iv-cap { padding: 56px 96px 28px; font-size: 15px; line-height: 22px; }
+  .iv-cap > span { max-width: var(--desk-col); margin: 0 auto; }
   .iv-close svg { padding: 8px; }
   .iv-nav { position: absolute; inset: 0; pointer-events: none; transition: opacity var(--dur-2) var(--ease-out); }
   .iv-nav.off { opacity: 0; transition-duration: var(--dur-1); }

@@ -93,5 +93,8 @@ export const icons = {
   sort: s('<path d="M7.2 4.5v15M3.8 16.1l3.4 3.4 3.4-3.4M16.8 19.5v-15M13.4 7.9l3.4-3.4 3.4 3.4"/>'),
   grid: s('<rect x="3.5" y="3.5" width="7" height="7" rx="1.8"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.8"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.8"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.8"/>'),
   theater: s('<rect x="2.5" y="6" width="19" height="12" rx="2.4"/>'),
-  keyboard: s('<rect x="2.5" y="5.5" width="19" height="13" rx="2.4"/><path d="M6.5 9.5h.01M10 9.5h.01M14 9.5h.01M17.5 9.5h.01M6.5 13h.01M17.5 13h.01M10 13h4" stroke-width="2.2"/>')
+  keyboard: s('<rect x="2.5" y="5.5" width="19" height="13" rx="2.4"/><path d="M6.5 9.5h.01M10 9.5h.01M14 9.5h.01M17.5 9.5h.01M6.5 13h.01M17.5 13h.01M10 13h4" stroke-width="2.2"/>'),
+
+  /* creator page: 图集角标（叠在一起的两张图，前面一张实心）。用在很小的角标上，所以是实心的 */
+  images: f('<path d="M7.6 3.4h9.8a3.2 3.2 0 0 1 3.2 3.2v9.8" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/><rect x="3.4" y="7.4" width="13.2" height="13.2" rx="2.8" fill="currentColor"/>')
 }

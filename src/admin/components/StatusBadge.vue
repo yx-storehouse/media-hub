@@ -5,17 +5,19 @@ import { computed } from 'vue'
  * 状态徽标。
  *   kind="content"（视频 / 帖子 / 专题）：1 已发布 · 0 草稿 · 2 已下架
  *   kind="creator"（创作者、分区、账号）：1 正常 · 0 停用
+ *   kind="album"（图集）：1 上架 · 2 下架
  * 也可以用 label 覆盖文字（如分区的「启用 / 停用」）。
  */
 const props = defineProps({
   status: { type: [Number, String], default: null },
-  kind: { type: String, default: 'content', validator: v => ['content', 'creator'].includes(v) },
+  kind: { type: String, default: 'content', validator: v => ['content', 'creator', 'album'].includes(v) },
   label: { type: String, default: '' }
 })
 
 const MAP = {
   content: { 1: ['已发布', 'on'], 0: ['草稿', 'draft'], 2: ['已下架', 'off'] },
-  creator: { 1: ['正常', 'on'], 0: ['停用', 'off'] }
+  creator: { 1: ['正常', 'on'], 0: ['停用', 'off'] },
+  album: { 1: ['上架', 'on'], 2: ['下架', 'off'] }
 }
 const info = computed(() => MAP[props.kind][Number(props.status)] || [String(props.status ?? '—'), 'draft'])
 </script>

@@ -2,6 +2,7 @@
 import AIcon from '../../components/AIcon.vue'
 import Thumb from '../../components/Thumb.vue'
 import { fmtSize, fmtDate } from '../../utils/format'
+import { usedCount, usageText } from './files'
 
 /*
  * 素材网格：文件夹点进去；图片显示缩略图；视频有同名图片时用它当封面，否则显示图标。
@@ -43,7 +44,7 @@ const typeText = { dir: '文件夹', video: '视频', image: '图片', other: '�
           <template v-if="e.type === 'dir'">文件夹 · {{ fmtDate(e.mtime) }}</template>
           <template v-else>{{ fmtSize(e.size) }} · {{ fmtDate(e.mtime) }}</template>
         </div>
-        <div v-if="e.type !== 'dir'" class="used" :class="{ on: e.usedBy }">{{ e.usedBy ? `被 ${e.usedBy} 个视频使用` : '未被使用' }}</div>
+        <div v-if="e.type !== 'dir'" class="used" :class="{ on: usedCount(e) }">{{ usageText(e) }}</div>
       </div>
       <div class="acts">
         <template v-if="e.type !== 'dir'">

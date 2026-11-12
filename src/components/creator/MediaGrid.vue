@@ -7,7 +7,7 @@ import { rememberVideo } from '@/components/video/preview'
 /*
  * 创作者主页「媒体」：三列正方形照片墙，格子之间 2px，左右贴边。
  *   视频格（.mg-video）：右下角一个小播放三角 + 时长，点了进播放页
- *   图片格：点了发 open(item)，由页面打开全屏看大图
+ *   图片格（帖子的图、图集的图）：点了发 open(item)，由页面打开全屏看大图（图集的图看那个图集，见 CreatorView）
  *
  *   <MediaGrid ref="grid" :items="media.list" @open="openImage" />
  *   grid.value.tile(item.id)    // 某一格的元素：看大图从这一格放大出来、关掉时缩回这一格
@@ -16,7 +16,7 @@ import { rememberVideo } from '@/components/video/preview'
  * 正方形用 padding 撑高（iOS 14 不认 aspect-ratio）。
  */
 defineProps({
-  /** MediaItem[]：{ id, kind: 'image' | 'video', cover, title, postId, videoId, dur }（见 src/api/index.js） */
+  /** MediaItem[]：{ id, kind: 'image' | 'video', cover, title, postId, videoId, albumId, albumIndex, dur }（见 src/api/index.js） */
   items: { type: Array, required: true }
 })
 const emit = defineEmits(['open'])

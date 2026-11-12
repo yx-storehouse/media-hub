@@ -7,7 +7,7 @@
 ## 快速开始
 
 ```bash
-node server/db/seed.mjs                      # 建库 + 写入种子数据（约 460 条视频）
+node server/db/seed.mjs                      # 建库 + 写入种子数据（约 460 条视频、27 个图集）
 node server/create-admin.mjs admin 你的密码   # 建管理员（登录用，内网部署跑一次）
 node server/index.mjs                        # 启动接口服务，默认 http://localhost:3000
 ```
@@ -15,12 +15,12 @@ node server/index.mjs                        # 启动接口服务，默认 http:
 测试：
 
 ```bash
-node server/test-api.mjs     # 100 项接口测试（含帖子详情、创作者主页、短视频推荐流、我的收藏 / 关注 / 历史、搜索记录、压缩与缓存、老库补列）
+node server/test-api.mjs     # 107 项接口测试（含帖子详情、创作者主页、图集、短视频推荐流、我的收藏 / 关注 / 历史、搜索记录、压缩与缓存、老库补列 / 补建图集表）
 node server/test-auth.mjs    # 37 项鉴权测试
-node server/test-admin.mjs   # 95 项管理后台测试（导入 / 导出 / 素材文件 / 首页分区 / 超时…）
+node server/test-admin.mjs   # 108 项管理后台测试（图集 / 导入 / 导出 / 素材文件 / 首页分区 / 超时…）
 ```
 
-三套测试各用自己的库（`server/db/*-test.db`）和端口（3178 / 3179 / 3180；管理后台测试另起一个短超时实例用 3181，接口测试另起一个「老库补列」实例用 3182，库建在系统临时目录），不会碰 `reel.db`。
+三套测试各用自己的库（`server/db/*-test.db`）和端口（3178 / 3179 / 3180；管理后台测试另起一个短超时实例用 3181，接口测试另起「老库补列」「老库补建图集表」实例，先后用 3182，库建在系统临时目录），不会碰 `reel.db`。
 
 换个位置放数据库：`DB_PATH=/path/to/reel.db node server/index.mjs`
 换端口：`PORT=4000 node server/index.mjs`
@@ -42,16 +42,18 @@ server/
     routes.mjs     /api/admin/* 路由表
     service.mjs    校验、增删改、批量操作、导入引擎、导出
     fields.mjs     导入 / 导出字段定义 + 单元格取值规范化（唯一来源）
-    media.mjs      素材文件夹：列目录、流式上传、Range 静态访问、扫描、删除
+    media.mjs      素材文件夹：列目录、流式上传、Range 静态访问、扫描、删除、站内图片读宽高
   db/
-    schema.sql     表结构（35 张表 + 索引 + 外键）
+    schema.sql     表结构（38 张表 + 索引 + 外键）
     views.sql      视图 / 全文检索 / 计数触发器
     seed.mjs       建库与种子数据
-    index.mjs      数据库连接与查询封装（前台 App 的查询）
+    seed-albums.mjs 图集的种子数据（seed.mjs 调用；测试工具也可以拿它给已有的库补图集）
+    index.mjs      数据库连接与查询封装（前台 App 的查询）+ 老库启动时的自动补建
     admin.mjs      管理后台的全部 SQL
     reel.db        SQLite 数据库文件（自动生成，已在 .gitignore）
   lib/             随机数与占位图（art.mjs 与 src/mock 同步，保证前后端图片一致；lite-art.mjs 是后台新建数据用的轻量占位图）、
-                   地址比较（urls.mjs：编码 / 未编码算同一个文件）、InputError（errors.mjs）、响应压缩（compress.mjs）
+                   地址比较（urls.mjs：编码 / 未编码算同一个文件）、InputError（errors.mjs）、响应压缩（compress.mjs）、
+                   图片宽高（image-size.mjs：读 PNG / JPEG（含 EXIF 方向）/ GIF / WebP / AVIF 的文件头，零依赖）
 ```
 
 ## 设计要点
@@ -85,6 +87,7 @@ server/
 | 用户 | `users` `creators` `user_follows` `user_stats` `sessions` |
 | 内容 | `videos` `series` `series_episodes` `short_clips` `topics` `topic_covers` `home_sections` `home_section_items` |
 | 社区 | `posts` `post_media` `post_media_blobs` `comments` |
+| 图集 | `albums` `album_images`（创作者主页「图片」：后台单独上传的图片，不是帖子里的图） |
 | 直播同城 | `live_rooms` `places` `place_tags` |
 | 搜索筛选 | `search_keywords` `regions` `category_filters` `nearby_filters` `client_tabs` |
 | 互动 | `video_likes` `video_dislikes` `video_favs` `topic_favs` `post_favs` `comments_likes` `danmaku` `watch_history` `search_history` |
@@ -127,7 +130,9 @@ server/
 | GET | `/api/creators/:id` | `getCreator()`：创作者主页头部（见下面「创作者主页」） |
 | GET | `/api/creators/:id/videos?sort=&limit=&offset=` | `getCreatorVideos()`：他的视频，`sort` 0 最新 / 1 最热 |
 | GET | `/api/creators/:id/posts?limit=&offset=` | `getCreatorPosts()`：他的帖子，结构同社区列表 |
-| GET | `/api/creators/:id/media?limit=&offset=` | `getCreatorMedia()`：「媒体」照片墙，视频封面 + 帖子的图（见下面「创作者主页」） |
+| GET | `/api/creators/:id/media?limit=&offset=` | `getCreatorMedia()`：「媒体」照片墙，视频封面 + 帖子的图 + 图集的图（见下面「创作者主页」） |
+| GET | `/api/creators/:id/albums?limit=&offset=` | `getCreatorAlbums()`：「图片」标签，他的图集（见下面「图集」） |
+| GET | `/api/albums/:id` | `getAlbum()`：图集详情（见下面「图集」） |
 | POST | `/api/videos/:id/fav` `/like` `/dislike` | 对应 toggle |
 | POST | `/api/topics/:id/fav` | `toggleTopicFav()` |
 | GET | `/api/live?tab=` | `getLives()` |
@@ -188,28 +193,63 @@ server/
   id, name, handle, avatar,   // avatar: Cover
   verified, official, bio,
   followers,                  // 粉丝数（creators.follower_count，关注 / 取消关注由触发器维护）
-  videoCount, postCount,      // 只算已发布的视频 / 帖子
+  videoCount,                 // 只算已发布的视频
+  albumCount,                 // 「图片」标签的条数：已上架、至少有一张图的图集，和 /albums 的 total 同一个口径
+  postCount,                  // 只算已发布的帖子
   mediaCount,                 // 「媒体」的条数，和 /media 的 total 同一个口径
-  lastActiveAt, lastActive,   // 最近一条已发布视频 / 帖子的时间（秒）和「1小时前」这类相对时间；什么都没发过时为 null / ''
+  lastActiveAt, lastActive,   // 最近一条已发布视频 / 帖子 / 已上架图集的时间（秒）和「1小时前」这类相对时间；什么都没发过时为 null / ''
   following,
   banner                      // Cover[]，最多 3 张，新的在前；可能为空
 }
 ```
 
-- **头图**：取他最近的作品图——视频封面、帖子主图（没有主图的图文 / 视频帖取第一张配图，文档帖的配图是文档页、不要），草稿 / 下架的不算。
-  视频、帖子两边各先按发布时间取 3 条再合并，作品很多时也不用整表排序。
+- **头图**：取他最近的作品图——视频封面、帖子主图（没有主图的图文 / 视频帖取第一张配图，文档帖的配图是文档页、不要）、图集封面（第一张图，`fallback` 为 `null`），草稿 / 下架的不算。
+  视频、帖子、图集三边各先按发布时间取 3 条再合并，作品很多时也不用整表排序；同一时间视频在前、帖子其次、图集最后。
 - `GET /api/creators/:id/videos?sort=0|1&limit=&offset=` → `{ total, list }`：只含已发布的视频，`sort` 0 = 发布时间倒序（默认，其他值也按它）、1 = 播放数倒序；
   同值再按发布时间、id 排，翻页不重复不遗漏。列表带当前用户的 `liked` / `faved`。
 - `GET /api/creators/:id/posts?limit=&offset=` → `{ total, list }`：和社区列表（`/api/community/posts`）每条的结构完全一样（含 `media`、`time`、`faved`），按发布时间倒序。
 - `GET /api/creators/:id/media?limit=&offset=` → `{ total, list }`：「媒体」照片墙，新的在前。每条
-  `{ id, kind: 'image' | 'video', cover: Cover, title, postId, videoId, dur, publishedAt }`，`id` 是这一格的唯一键（`v<视频 id>` / `i<图片 id>`）：
+  `{ id, kind: 'image' | 'video', cover: Cover, title, postId, videoId, albumId, albumIndex, dur, publishedAt }`，
+  `id` 是这一格的唯一键（`v<视频 id>` / `i<帖子图片 id>` / `a<图集图片 id>`），不是这一类的 `postId` / `videoId` / `albumId` / `albumIndex` 为 `null`：
   - `video`：已发布视频的封面（没有封面地址时用占位图），`videoId` 是点进去播放的视频，`dur` 是「01:15」「1:02:05」（没有时长为 `null`）；
-  - `image`：已发布帖子的主图和配图，只算有地址的；文档帖的文档页不算，和他某个已发布视频封面同一张的图也不重复算；`postId` 是所属帖子。
-  - 排序：发布时间倒序，同一时间视频在前，再按所属内容、图的顺序排（全序，翻页不重复不遗漏）。
-- 分页：`limit` 1～50（默认 20），`offset` 从 0 起，非法值按默认处理。
-- 创作者不存在、已停用，或 id 不是正整数（如演示数据的账号 `aijc`）：三个接口都回 `400 { code: 1, message: '创作者不存在' }`（不会 500）。
+  - `image`（帖子）：已发布帖子的主图和配图，只算有地址的；文档帖的文档页不算，和他某个已发布视频封面同一张的图也不重复算；`postId` 是所属帖子。
+  - `image`（图集）：已上架图集的每一张图（不和视频封面去重），`albumId` 是所属图集，`albumIndex` 是这张图在图集里的下标（0 起，0 是封面），
+    `title` 是图集标题（可能是 `''`），`cover` 是 `{ src: 图片地址, fallback: null }`。点开后可以用 `GET /api/albums/:albumId` 取整个图集、从第 `albumIndex` 张看起。
+  - 排序：发布时间倒序，同一时间视频在前、帖子的图其次、图集的图最后，再按所属内容、图的顺序排（全序，翻页不重复不遗漏）。
+- 分页：`limit` 1～50（默认 20），`offset` 从 0 起，非法值按默认处理；`offset` 再大（`1e20`、`Infinity`）也只是空页，不会报错。
+- 创作者不存在、已停用，或 id 不是正整数（如演示数据的账号 `aijc`）：五个接口（主页头部、视频、帖子、媒体、图集）都回 `400 { code: 1, message: '创作者不存在' }`（不会 500）。
 - 社区列表 / 搜索帖子的每条多了 `creatorId`（发布者 id，创作者被删除时为 `null`），App 的帖子卡片据此把头像和名字链到主页。
 - 关注接口现在多返回一个 `followers`（最新粉丝数），主页关注 / 取消后直接用它刷新；关注已停用或不存在的创作者回 400「创作者不存在」（取消关注总是可以）。
+
+### 图集
+
+图集是管理员在后台单独上传的图片（不是帖子里的图）：标题（单张图片可以为空）、简介、标签、创作者、1～100 张按顺序的图（第一张是封面）、上架 / 下架、发布时间。
+一张图片就是只有一张图的图集。前台只看得到**已上架、至少有一张图、创作者正常**的图集；两个接口都公开。
+
+`GET /api/creators/:id/albums?limit=&offset=` → `{ total, list }`：主页「图片」标签，新的在前（同一时间 id 大的在前，翻页不重复不遗漏），分页同上。
+
+```js
+{ id, title,                       // title 可能是 ''（单张图片）
+  cover: { url, width, height },   // 第一张图；width / height 是像素，0 = 不知道（外部地址又没填时），App 按默认比例占位
+  count,                           // 图的张数（单张图片为 1）
+  publishedAt, time }              // time 是「4天前」这类相对时间
+```
+
+`GET /api/albums/:id`：图集详情，带了登录令牌时按当前用户回填 `following`（未登录 `false`）。
+
+```js
+{ id, title, description,          // description 纯文本，段落之间用换行；没有时是 ''
+  tags,                            // ['街拍', '雨天']，不带 #
+  creator: { id, name, handle, verified, avatar: Cover },   // 和帖子详情的 author 同结构
+  following,                       // 当前用户是否关注了创作者
+  images: [{ url, width, height }],// 按顺序，第一张是封面；宽高规则同上
+  count, publishedAt, time }
+```
+
+- 不存在、已下架、一张图都没有、创作者已停用 / 删除，或 id 不是正整数：`400 { code: 1, message: '图集不存在或已下架' }`（不会 500，和帖子详情一样）。
+- 关注作者用已有的 `POST /api/creators/:id/follow { on }`。
+- 图集的图同时出现在「媒体」照片墙里（见上面 `albumId` / `albumIndex`），头图和「最后更新」也算上图集。
+- `albums.view_count`（浏览数）先留着，还没有前台接口去加它；后台列表能看到、能按它排序。
 
 ### 短视频推荐流
 
@@ -420,7 +460,7 @@ node server/create-admin.mjs admin 你的密码
 
 ## 管理后台接口
 
-给「Reel 管理后台」（`admin.html`，源码在 `src/admin/`）用的接口：管理视频、帖子、专题、创作者、首页推荐分区、搜索热词，批量导入 / 导出，以及素材文件夹。打包后访问 `http://服务器:3000/admin` 会跳到 `/admin.html`。
+给「Reel 管理后台」（`admin.html`，源码在 `src/admin/`）用的接口：管理视频、帖子、专题、创作者、图集、首页推荐分区、搜索热词，批量导入 / 导出，以及素材文件夹。打包后访问 `http://服务器:3000/admin` 会跳到 `/admin.html`。
 
 - 所有 `/api/admin/*` 都要求**管理员**登录：未登录 `401`，普通用户 `403`。
 - 出错时除了 `message` 还可能带 `field`（接口字段名，camelCase），前端据此把提示标到对应输入框下：
@@ -433,16 +473,16 @@ node server/create-admin.mjs admin 你的密码
 - 先匹配路由、先鉴权，再读请求体：未登录 / 没权限 / 路径不对的请求直接回 401 / 403 / 404 / 405，请求体不会先被收进内存。
 - 单值字段（标题、时间、ID、专题引用……）只收字符串 / 数字 / 布尔，传对象或数组返回 400（不会存成 `[object Object]`）；ID 列表只收数字或纯数字字符串。
 - 时间一律是 Unix 秒；布尔是 `true` / `false`。
-- 视频 / 帖子 / 专题的状态：`1` 已发布、`0` 草稿、`2` 已下架；创作者：`1` 正常、`0` 停用。
+- 视频 / 帖子 / 专题的状态：`1` 已发布、`0` 草稿、`2` 已下架；创作者：`1` 正常、`0` 停用；图集：`1` 上架、`2` 下架（没有草稿，传 `0` / 「草稿」按下架存）。
 
 ### 接口一览
 
-`:type` 是 `videos` / `posts` / `topics` / `creators` / `keywords` 之一，五类数据的接口形状一致。
+`:type` 是 `videos` / `posts` / `topics` / `creators` / `keywords` / `albums` 之一，六类数据的接口形状一致。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/admin/meta` | 下拉选项：专题、创作者、分类、地区、清晰度、状态等 |
-| GET | `/api/admin/stats` | 概览统计（各类数量、缺播放地址 / 封面 / 时长的视频数、素材文件数、最近新增）。结果缓存 5 秒，任何后台写操作后立即失效 |
+| GET | `/api/admin/meta` | 下拉选项：专题、创作者、分类、地区、清晰度、状态等（图集状态 `albumStatuses: [{ value: 1, label: '上架' }, { value: 2, label: '下架' }]`） |
+| GET | `/api/admin/stats` | 概览统计（各类数量、缺播放地址 / 封面 / 时长的视频数、素材文件数、最近新增；图集 `albums: { total, published, offline, images }` + 最近新建的 5 个 `recentAlbums`）。结果缓存 5 秒，任何后台写操作后立即失效 |
 | GET | `/api/admin/schema` | 导入 / 导出字段定义（列名、别名、类型、示例、说明） |
 | GET | `/api/admin/:type` | 列表：`?page=1&pageSize=20&sort=&order=asc\|desc` + 各自的筛选，返回 `{ total, page, pageSize, list }` |
 | GET | `/api/admin/:type/export` | 导出（筛选同列表，最多 5 万行）→ `{ fields, rows }` |
@@ -461,7 +501,7 @@ node server/create-admin.mjs admin 你的密码
 | GET | `/api/admin/media?dir=` | 列素材目录 |
 | PUT | `/api/admin/media/upload?path=videos/a.mp4&overwrite=0\|1` | 上传：请求体就是文件字节（不是 JSON） |
 | POST | `/api/admin/media/folder` | 新建文件夹 `{ path }` |
-| DELETE | `/api/admin/media?path=&force=0\|1` | 删除文件或空文件夹；被视频引用的文件要 `force=1` |
+| DELETE | `/api/admin/media?path=&force=0\|1` | 删除文件或空文件夹；被视频或图集引用的文件要 `force=1` |
 | POST | `/api/admin/media/scan` | 扫描视频文件 `{ dir, recursive }`：带同名封面、是否已入库 |
 
 账号管理（`/api/admin/users…`）见上面「鉴权」一节，行为不变。
@@ -473,8 +513,34 @@ node server/create-admin.mjs admin 你的密码
 | videos | `q` `status` `topicId`（`none` = 无专题）`creatorId` `category` `region` `missing=playback\|cover\|duration` `short=1\|0` | `publishedAt`（默认）`createdAt` `playCount` `likeCount` `favCount` `durationSec` `title` `id` |
 | posts | `q` `status` `creatorId` `mediaKind` `isHot` | `publishedAt`（默认）`readCount` `favCount` `id` |
 | topics | `q` `kind` `status` | `sortOrder`（默认升序）`videoCount` `name` `id` |
-| creators | `q` `status` `verified` | `id`（默认）`name` `followerCount` `videoCount` |
+| creators | `q` `status` `verified` | `id`（默认）`name` `followerCount` `videoCount` `albumCount` |
 | keywords | `q` `isHot` `isBanned` | `weight`（默认）`sortOrder` `word` `id` |
+| albums | `q`（标题 / 简介 / 标签，纯数字时也按 ID）`status=1\|2` `creatorId` | `publishedAt`（默认）`createdAt` `updatedAt` `imageCount` `viewCount` `title` `id` |
+
+创作者（`AdminCreator`）多了 `albumCount`（他的图集数，含下架的），和 `videoCount` / `postCount` 一样。
+
+图集（`AdminAlbum`，列表 / 单条 / 新建 / 修改都返回这个结构）：
+
+```js
+{ id, title, description, tags,                 // tags 不带 #
+  creatorId, creatorName, creatorHandle,
+  cover,                                        // = images[0]，{ url, width, height }（没有图时为 null）
+  images: [{ url, width, height }],             // 按顺序，第一张是封面；宽高是像素，0 = 不知道
+  imageCount, viewCount, status,                // status 1 上架 / 2 下架
+  publishedAt, createdAt, updatedAt }
+```
+
+- 新建 `POST /api/admin/albums`：`creatorId`、`images` 必填，其余选填（`title` 默认 `''`、`status` 默认 `1`、`publishedAt` 默认现在）。
+- 修改 `PATCH /api/admin/albums/:id`：只改传了的字段；`images` 是**完整的新列表**（整体替换旧的，顺序就是新顺序），不传 = 不改；
+  `title` / `description` 传 `null` 或空串 = 清空，`images` / `creatorId` 不能清空。什么都没变时不写库、`updatedAt` 不变（导出再原样导入也一样）。
+- `images` 每项是 `{ url, width, height }` 或直接一个地址字符串（字符串里可以用 `|` 或换行隔开多张）；1～100 张；
+  同一个文件只留第一次出现的写法（`/media/a b.jpg`、`/media/a%20b.jpg`、带 `?v=` 的算同一个，规则同下面导入的「播放地址」）；地址规则和其他地址字段一样（`http(s)://` 或 `/` 开头）。
+  一个地址里夹着第二个地址（逗号、空格、顿号、分号后面紧跟 `http(s)://` 或 `/media/`，如 `/media/a.jpg,/media/b.jpg`）报错
+  「多张图片请用 | 或换行隔开（第 n 张里有多个地址）」，免得存成一张打不开的图；地址本身带的逗号、空格（`a,b.jpg`、`my photo.jpg`）照常收。
+  **宽高**：没给（或给 0）时，这个地址原来就在这个图集里 → 沿用原来的宽高；站内 `/media/…` 图片 → 服务端读文件头补上（JPEG 按 EXIF 方向，手机竖拍的宽高会对调成显示时的样子）；
+  外部地址又没给 → `0`。后台上传图片后最好把浏览器里读到的 `naturalWidth / naturalHeight` 一起传上来。
+- 上传图片用已有的素材接口 `PUT /api/admin/media/upload?path=images/albums/…`（建议放在 `images/` 下），拿返回的 `url` 填进 `images`。
+- 字段级错误带 `field`：`creatorId` `images` `title` `description` `tags` `status` `publishedAt`。某一张图的错误写明是第几张（「第 3 张图片必须以 http://、https:// 或 / 开头」「第 2 张图片宽度不能小于 0」），导入的「图片」列也一样。
 
 帖子（`AdminPost`）的两段文字：
 
@@ -492,12 +558,14 @@ node server/create-admin.mjs admin 你的密码
 | topics | `publish` `unpublish` `draft` `delete` |
 | creators | `enable` `disable` `verify` `unverify` `delete` |
 | keywords | `hot` `unhot` `ban` `unban` `delete` |
+| albums | `publish`（上架）`unpublish`（下架）`delete` `setCreator`（`value` = 创作者 id，必填）`addTags` `removeTags` |
 
-注意两处级联：**删专题会连带删掉用它的首页分区**，它下面的视频变成「无专题」；**删创作者会连带删掉他的帖子**，他的视频变成「无创作者」。删除接口会返回受影响的数量。
+注意两处级联：**删专题会连带删掉用它的首页分区**，它下面的视频变成「无专题」；**删创作者会连带删掉他的帖子和图集**，他的视频变成「无创作者」。
+删除接口会返回受影响的数量（删创作者：`deletedPosts` / `deletedAlbums` / `detachedVideos`）。删图集只删库里的行（连带它的图片行），**素材文件不动**。
 
 ### 批量导入
 
-`POST /api/admin/{videos|posts|topics|creators|keywords}/import`，一次最多 20000 行（JSON 请求体上限 32 MB、60 秒内要传完）。后台页面会把 CSV / Excel / 粘贴的表格解析好再分批调这个接口；脚本也可以直接调：
+`POST /api/admin/{videos|posts|topics|creators|keywords|albums}/import`，一次最多 20000 行（JSON 请求体上限 32 MB、60 秒内要传完）。后台页面会把 CSV / Excel / 粘贴的表格解析好再分批调这个接口；脚本也可以直接调：
 
 ```bash
 curl -X POST http://localhost:3000/api/admin/videos/import \
@@ -511,12 +579,14 @@ curl -X POST http://localhost:3000/api/admin/videos/import \
 
 - `rows`：每行一个对象，键是字段 key（见 `GET /api/admin/schema`）；可选 `_row` 表示原文件里的行号，结果里原样带回。
 - `options.onDuplicate`：已存在时 `skip`（默认，跳过）/ `update`（更新）/ `error`（报错）。
-- `options.autoCreate`：视频 / 帖子引用的专题、创作者**按名称**找不到时自动创建（默认 `true`；按 id 引用找不到一律报错）。
-- `options.defaultStatus`：「状态」列为空时新建行用的状态（默认 `1`）。
+- `options.autoCreate`：视频 / 帖子 / 图集引用的专题、创作者**按名称**找不到时自动创建（默认 `true`；按 id 引用找不到一律报错）。
+- `options.defaultStatus`：「状态」列为空时新建行用的状态（默认 `1`；图集只有上架 / 下架，`0` 和 `2` 都按下架）。
 - `dryRun: true`：预检。照常执行每一行，最后整体回滚，返回的结果和真导入完全一致（含文件内重复、自动创建）。
 - `options.importId` + `options.chunk`（可选，重发保护）：`importId` 是 1-64 位字母、数字、`_`、`-`，`chunk` 是不小于 0 的整数（分块序号）。真导入（非预检）两个都带时，服务端按「管理员 + 类型 + importId + chunk」记住这次的完整结果（内存里最多 500 份、1 小时）；同一块再发一次（比如网络断了重试），直接返回上次的结果并加上 `"replayed": true`，**不会再写库**。格式不对返回 400。
 
 **请分块导入。** 导入请求是同步执行的，期间 App 的请求要排队：几万条视频的库里，1000 行约 0.2 秒、5000 行预检约 0.5 秒、2 万行约 5 秒。后台页面预检每块 5000 行、真导入每块 1000 行；脚本也建议每块不超过 1000～5000 行，并带上 `importId` + `chunk`，失败重试时不会重复建数据。
+图集每行最多 100 张图：要补宽高的站内图在进事务之前分片读好文件头（读的时候不挡别的请求，同一个文件只读一次），预检不读；
+事务里只剩写库，300 行 × 99 张约 0.2～0.3 秒。
 
 返回：
 
@@ -534,7 +604,8 @@ curl -X POST http://localhost:3000/api/admin/videos/import \
 规则：
 
 - 整个请求一个事务、每行一个 SAVEPOINT：坏行回滚并报错，不影响其他行；同一个文件里的重复行也能识别（后一行能看到前一行的写入）。
-- 判断「已存在」的顺序：视频 `id → 编号 → 播放地址`，帖子 `id`，专题 `id → 标识 → 名称`，创作者 `id → 账号`，热词 `热词`。填了 `id` 但库里没有 → 报「ID 不存在」（不会按指定 id 插入）。
+- 判断「已存在」的顺序：视频 `id → 编号 → 播放地址`，帖子 `id`，专题 `id → 标识 → 名称`，创作者 `id → 账号`，热词 `热词`，
+  图集 `id → 第一张图片`（「图片」列的第一个地址和某个图集的封面是同一个文件，就算同一个图集；比较规则同下面的播放地址）。填了 `id` 但库里没有 → 报「ID 不存在」（不会按指定 id 插入）。
 - 视频只用**第一个非空的键**：填了编号但库里没有，就当新视频新建，不会再退到播放地址去匹配（否则几条共用同一个占位视频文件的新视频会互相覆盖）。只填了播放地址的行才按播放地址查重。
 - 播放地址按「同一个文件」比较：`/media/a b.mp4` 和 `/media/a%20b.mp4`、`/media/已有/x.mp4` 和它的编码写法、站内地址后面带 `?v=123` 都算同一个；扫描导入的「已导入」、素材的「被 N 个视频使用」用的是同一套规则。外部 `http(s)` 地址的查询串保留比较。
 - 「已更新」的结果带 `message` 写明按哪个键匹配到的（如「按播放地址匹配到 ID 15，已更新」），预检里就能看出来。
@@ -543,6 +614,11 @@ curl -X POST http://localhost:3000/api/admin/videos/import \
 - 帖子不再有「折叠数」列：App 卡片上的 +N 按真实配图数算（最多 3 张缩略图，多出来的张数显示在第 3 张上）；旧表格里的「折叠数」列对应成「不导入」，接口请求里带了 `moreCount` 也忽略，导出不再有这一列。
 - 帖子有「标题」（`text`，别名 title / 帖子标题 / 文案）和「正文」（`content`，别名 content / body / 详情 / 详情正文 / 帖子正文 / 正文内容 / 内容 / 帖子内容）两列，正文单元格可以多行。
   注意：加详情正文之前导出的帖子表格，表头「正文」那一列其实是**标题**；这种旧文件再导入时它会被自动对应到「正文」，请在「对应列」那一步把它改成「标题」。
+- 图集（`albums`）的列：`ID`（id，更新用）、`标题`（title，可空）、`创作者`（creator，**必填**：id / 账号（可带 `@`）/ 名称）、
+  `图片`（images，**必填**：一个或多个地址，按顺序用 `|` 或换行隔开，第一张是封面，最多 100 张；和帖子「配图」不同，**逗号、空格不算分隔**，
+  用它们隔开的多个地址整行报错「多张图片请用 | 或换行隔开」）、`简介`（description，可多行）、`标签`（tags）、
+  `状态`（status：上架 / 下架）、`发布时间`（publishedAt）。站内 `/media/…` 图片的宽高由服务端读文件头补上，外部地址为 0；
+  按「更新」导入时「图片」列是完整的新列表（整体替换），同一地址沿用库里的宽高；「图片」列留空 = 不改图片。
 
 单元格写法（服务端解析，所以脚本也能直接用中文）：
 
@@ -554,13 +630,14 @@ curl -X POST http://localhost:3000/api/admin/videos/import \
 | 时间 | `2026-10-10`、`2026/10/10 14:30`、`2026.10.10 14:30:05`、`2026年10月10日`、`2026年10月10日 14:30`（服务器本地时区）；带时区的 ISO 写法 `2026-10-10T14:30:00Z`、`…+08:00`（按给定时区换算）；Excel 日期序号、Unix 秒 / 毫秒 |
 | 标签 | 逗号、分号、顿号、竖线、换行分隔；视频标签另外按空格分隔并存成 `#标签`，帖子标签存成不带 `#` 的 |
 | 地址 | `http(s)://…` 或 `/` 开头的站内路径（如 `/media/videos/a.mp4`）；多个地址用逗号、空格或换行分隔 |
-| 状态 | `已发布 / 发布 / 上架 / published`、`草稿 / draft`、`下架 / 已下架 / offline / hidden`，或 `1 / 0 / 2` |
+| 图集的图片 | 同上的地址，但多个只用 `\|` 或换行分隔（地址里可以有逗号、空格）；接口请求里也可以直接传数组 `['/media/a.jpg', { url, width, height }]` |
+| 状态 | `已发布 / 发布 / 上架 / published`、`草稿 / draft`、`下架 / 已下架 / offline / hidden`，或 `1 / 0 / 2`；图集的草稿 / `0` 按下架 |
 | 专题 | 依次按 id → 名称（精确）→ 标识（不区分大小写）找：英文名称的专题（如 `Anime`）不会被别的专题的标识 `anime` 抢走 |
 | 创作者 | id、账号（可带 `@`，带 `@` 时只按账号找）或名称 |
 | 分类 / 地区 | key 或中文名（`cn` 或 `国产`） |
 | 清晰度 | `标清 / 高清 / 超清`、`sd / hd / fhd`、`480p / 720p / 1080p / 4k` |
 
-导出（`GET /api/admin/:type/export`）的值就是这些写法：专题 → 名称（按上面的规则读不回同一个专题时——重名、纯数字等——改用标识，标识也不行就用 id）、创作者 → 账号（纯数字账号加 `@`）、时长 `hh:mm:ss`、状态 → 中文、时间 `YYYY-MM-DD HH:mm:ss`、布尔 `是 / 否`、多个地址用换行。所以「导出 → Excel 里改 → 按『更新已有』再导入」不需要手动对应列，没改的数据保持不变。后台页面生成 CSV 时会给 `= + - @` 开头的单元格加 `'` 防公式注入，导入时服务端会去掉。
+导出（`GET /api/admin/:type/export`）的值就是这些写法：专题 → 名称（按上面的规则读不回同一个专题时——重名、纯数字等——改用标识，标识也不行就用 id）、创作者 → 账号（纯数字账号加 `@`）、时长 `hh:mm:ss`、状态 → 中文（图集是「上架 / 下架」）、时间 `YYYY-MM-DD HH:mm:ss`、布尔 `是 / 否`、多个地址用换行（图集的图片只导出地址，再导入时宽高沿用库里的）。所以「导出 → Excel 里改 → 按『更新已有』再导入」不需要手动对应列，没改的数据保持不变。后台页面生成 CSV 时会给 `= + - @` 开头的单元格加 `'` 防公式注入，导入时服务端会去掉。
 
 ### 素材文件（media/）
 
@@ -580,6 +657,8 @@ curl -X POST http://localhost:3000/api/admin/videos/import \
   - 进程被杀等原因留下的旧临时文件（超过 10 分钟没动过的 `*.part`）在启动时清掉；删除「看起来是空的」文件夹时也会顺手清掉。
 - 路径里有 `..`、反斜杠、控制字符的一律拒绝；解析后跑出 `MEDIA_DIR` 的访问返回 403。
 - 站内地址形如 `/media/videos/%E6%97%A5%E8%90%BD.mp4`（每段 URL 编码）；视频的播放地址 / 封面写成编码、未编码、带 `?v=` 参数的形式都能被「被 N 个视频使用」统计到。
+- 图集：列目录的每项除了 `usedBy`（被几个视频用到）还有 `usedByAlbums`（被几个图集用到，同样的比较规则，只统计图片）；
+  删被图集用到的文件同样要 `force=1`，提示是「该文件被 2 个图集使用」或「该文件被 1 个视频、2 个图集使用」（`field: 'usedBy'`）。
 - 开发时 Vite 把 `/media` 和 `/api` 一起代理到接口服务。
 
 ### 连接超时
@@ -600,6 +679,8 @@ curl -X POST http://localhost:3000/api/admin/videos/import \
 老库不用重建，接口服务启动时会自动补上：
 
 - `posts.content` 列（帖子详情正文，`TEXT NOT NULL DEFAULT ''`）：老库没有这一列时 `ALTER TABLE` 补上，日志里提示一次；已有的帖子正文为空，可在后台补写或用导入批量填。
+- 图集表 `albums` / `album_images` 和它们的 4 个索引：按 `schema.sql` 里「图集」那一段原样执行（全是 `CREATE … IF NOT EXISTS`，定义只写在那一处），
+  老库第一次启动时日志里提示「已补建图集表」；原有的表、数据、索引一概不动，没有图集时各接口的结果和以前完全一样（只多了 `albumCount: 0` 等新字段）。
 - `posts_fts_update` 触发器：帖子改了标题 / 标签，社区搜索的全文索引跟着更新（新库由 `views.sql` 建）。
 - 索引：`idx_videos_playback` / `idx_videos_cover`（按地址查重、统计素材引用、统计缺播放地址 / 封面）、`idx_videos_pubtime` / `idx_videos_created`（列表按发布 / 创建时间排序，几万条视频时不用临时排序）、`idx_videos_nodur`（缺时长）、`idx_creators_name`（按名称找创作者）。
 - 修复读不出来的时长：早期版本导入时可能写进超过 2^53 的整数或超大小数，读这一行会让列表、导出、App 详情页报错。启动时把这类时长清零（变成「缺时长」，可在后台重填），并在日志里提示条数。

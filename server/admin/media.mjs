@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join, resolve, relative, extname, basename, sep } from 'node:path'
 import { InputError } from '../lib/errors.mjs'
 import { urlKey, urlSpellings } from '../lib/urls.mjs'
+import { imageSize } from '../lib/image-size.mjs'
 import * as A from '../db/admin.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -31,6 +32,7 @@ const VIDEO_TYPES = {
   '.mp4': 'video/mp4', '.m4v': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime',
   '.mkv': 'video/x-matroska', '.ogv': 'video/ogg', '.m3u8': 'application/vnd.apple.mpegurl', '.ts': 'video/mp2t'
 }
+// 图集上传的文件名在 src/admin/pages/albums/rules.js（uploadName）里按同样的规则先改好，改这里要一起改
 const IMAGE_TYPES = {
   '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp', '.gif': 'image/gif', '.avif': 'image/avif'
 }
@@ -95,6 +97,7 @@ export const urlOf = rel => '/media/' + rel.split('/').map(encodeURIComponent).j
 const relOf = abs => relative(MEDIA_DIR, abs).split(sep).join('/')
 const inside = abs => abs === MEDIA_DIR || abs.startsWith(MEDIA_DIR + sep)
 
+// 图集上传的文件名在 src/admin/pages/albums/rules.js（uploadName）里按同样的规则先改好，改这里要一起改
 /**
  * 规范化相对路径（POSIX，/ 分隔，不带开头的 /）。
  *   strict = 要新建的名字：额外禁止 .. 子串、Windows 保留字符 / 保留名、首尾点和空格、超过 200 字节
@@ -126,6 +129,21 @@ function absOf(rel, field = 'path') {
   const abs = rel ? resolve(MEDIA_DIR, ...rel.split('/')) : MEDIA_DIR
   if (!inside(abs)) fail('路径不正确', field)
   return abs
+}
+
+/**
+ * 站内图片地址（/media/… ，编码 / 未编码、带 ?v= 都行）→ { width, height }；外部地址、不是图片、文件不存在、
+ * 路径不合法或认不出格式都返回 null（不抛错）。图集的图没给宽高时用它补上。
+ */
+export function imageSizeOfUrl(url) {
+  const path = String(url ?? '').trim().split(/[?#]/)[0]
+  if (!path.startsWith('/media/') || !IMAGE_TYPES[extOf(path)]) return null
+  try {
+    const rel = cleanRel(path.slice('/media/'.length).split('/').map(s => decodeURIComponent(s)).join('/'), 'url', { required: true })
+    return imageSize(absOf(rel, 'url'))
+  } catch {
+    return null
+  }
 }
 
 const exists = async p => { try { await stat(p); return true } catch { return false } }
@@ -160,6 +178,26 @@ function usage(paths) {
     if (!p) continue
     if (!users.has(p)) users.set(p, new Set())
     users.get(p).add(v.id)
+  }
+  return new Map([...users].map(([p, ids]) => [p, ids.size]))
+}
+
+/** 一批文件各被多少个图集用到（同一图集里用了几次只算一个），比较规则和 usage() 一样 */
+function albumUsage(paths) {
+  const keyToPath = new Map()
+  const spellings = new Set()
+  for (const p of paths) {
+    const url = urlOf(p)
+    keyToPath.set(urlKey(url), p)
+    for (const s of urlSpellings(url)) spellings.add(s)
+  }
+  if (!keyToPath.size) return new Map()
+  const users = new Map()
+  for (const r of A.albumsByUrlSpellings([...spellings])) {
+    const p = keyToPath.get(urlKey(r.url))
+    if (!p) continue
+    if (!users.has(p)) users.set(p, new Set())
+    users.get(p).add(r.id)
   }
   return new Map([...users].map(([p, ids]) => [p, ids.size]))
 }
@@ -288,12 +326,18 @@ export async function listMedia(q = {}) {
     if (!isDir && !st.isFile()) return null
     return {
       name: d.name, path: p, type: isDir ? 'dir' : kindOf(d.name), size: isDir ? 0 : st.size,
-      mtime: Math.floor(st.mtimeMs / 1000), url: urlOf(p), usedBy: 0
+      mtime: Math.floor(st.mtimeMs / 1000), url: urlOf(p), usedBy: 0, usedByAlbums: 0
     }
   }))).filter(Boolean)
 
-  const counts = usage(entries.filter(e => e.type !== 'dir').map(e => e.path))
-  for (const e of entries) e.usedBy = counts.get(e.path) || 0
+  const files = entries.filter(e => e.type !== 'dir').map(e => e.path)
+  const counts = usage(files)
+  // 图集只用图片，只给图片查
+  const albumCounts = albumUsage(entries.filter(e => e.type === 'image').map(e => e.path))
+  for (const e of entries) {
+    e.usedBy = counts.get(e.path) || 0
+    e.usedByAlbums = albumCounts.get(e.path) || 0
+  }
   entries.sort((a, b) => (a.type === 'dir') === (b.type === 'dir') ? a.name.localeCompare(b.name, 'zh') : a.type === 'dir' ? -1 : 1)
   return { dir: rel, parent: rel ? rel.split('/').slice(0, -1).join('/') : null, entries }
 }
@@ -467,7 +511,7 @@ export async function createFolder(body = {}) {
   return { path: rel, url: urlOf(rel) }
 }
 
-/** DELETE /api/admin/media?path=&force=0|1：删文件或空文件夹；被视频引用的文件默认不让删 */
+/** DELETE /api/admin/media?path=&force=0|1：删文件或空文件夹；被视频 / 图集引用的文件默认不让删 */
 export async function deleteMedia(q = {}) {
   const rel = cleanRel(q.path, 'path', { required: true })
   const abs = absOf(rel)
@@ -478,7 +522,10 @@ export async function deleteMedia(q = {}) {
       await removeDir(abs)
     } else {
       const n = usage([rel]).get(rel) || 0
-      if (n > 0 && q.force !== '1' && q.force !== 'true') fail(`该文件被 ${n} 个视频使用`, 'usedBy')
+      const m = kindOf(rel) === 'image' ? albumUsage([rel]).get(rel) || 0 : 0
+      if ((n > 0 || m > 0) && q.force !== '1' && q.force !== 'true') {
+        fail(`该文件被 ${[n && `${n} 个视频`, m && `${m} 个图集`].filter(Boolean).join('、')}使用`, 'usedBy')
+      }
       await unlink(abs)
     }
   } catch (e) {

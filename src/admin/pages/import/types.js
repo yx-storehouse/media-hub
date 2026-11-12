@@ -28,6 +28,19 @@ export const TYPES = [
     list: { path: '/posts', query: NEWEST, text: '查看帖子' }
   },
   {
+    type: 'albums',
+    label: '图集',
+    icon: 'image',
+    desc: '创作者主页「图片」：标题、创作者、多张图片',
+    keyCols: ['title', 'images', 'creator'],
+    hasStatus: true,
+    // 图集只有上架 / 下架：默认状态选「下架」时传 0，服务端按下架存
+    statuses: [{ value: 1, label: '上架' }, { value: 0, label: '下架' }],
+    statusNote: '新增的行「状态」为空时用这个；下架的图集不会出现在前台',
+    autoCreate: '自动创建不存在的创作者',
+    list: { path: '/albums', query: NEWEST, text: '查看图集' }
+  },
+  {
     type: 'topics',
     label: '专题',
     icon: 'topic',
@@ -75,10 +88,11 @@ const TEMPLATE_EXAMPLES = {
   posts: { id: '', text: '示例帖子标题' + MARK, content: '这里是详情页的正文，可以换行。', creator: '@example_user', video: '', mainImage: '/media/images/example.jpg', images: '/media/images/example-1.jpg,/media/images/example-2.jpg' },
   topics: { id: '', name: '示例专题' + MARK, slug: 'example-topic', covers: '/media/covers/example.jpg' },
   creators: { id: '', handle: 'example_user', name: '示例创作者' + MARK, avatarUrl: '/media/images/example.jpg' },
+  albums: { id: '', title: '示例图集' + MARK, creator: '@example_user', images: '/media/images/albums/example-1.jpg|/media/images/albums/example-2.jpg' },
   keywords: { word: '示例热词' + MARK }
 }
 /** 每种数据认示例行看哪一列 */
-const EXAMPLE_KEY = { videos: 'title', posts: 'text', topics: 'name', creators: 'name', keywords: 'word' }
+const EXAMPLE_KEY = { videos: 'title', posts: 'text', topics: 'name', creators: 'name', keywords: 'word', albums: 'title' }
 
 /** 模板第二行（与 fields 对齐） */
 export function templateRow(type, fields) {

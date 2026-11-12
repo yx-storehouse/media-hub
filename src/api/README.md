@@ -153,19 +153,29 @@ clearSearchHistory(keyword?)         // 不传 = 清空，传了只删这一个�
 
 ## 创作者主页
 
-`#/creator/:id`（`views/CreatorView.vue`）用四个接口：
+`#/creator/:id`（`views/CreatorView.vue`）用六个接口：
 
 ```js
-getCreator(id)                 // { id, name, handle, avatar, verified, official, bio, followers, videoCount, postCount,
+getCreator(id)                 // { id, name, handle, avatar, verified, official, bio, followers, videoCount, albumCount, postCount,
                                //   mediaCount, lastActiveAt, lastActive, following, banner: Cover[] }
 getCreatorVideos(id, sort, { limit, offset })   // sort 0 最新 / 1 最热 → { total, list: Video[] }
+getCreatorAlbums(id, { limit, offset })         // → { total, list: AlbumItem[] }：「图片」图集，新的在前
+                               // AlbumItem = { id, title, cover: AlbumPic, count, publishedAt, time }
 getCreatorPosts(id, { limit, offset })          // → { total, list: Post[] }，和 getPosts() 每条结构一样
 getCreatorMedia(id, { limit, offset })          // → { total, list: MediaItem[] }：「媒体」照片墙，新的在前
-                               // MediaItem = { id: 'v12' | 'i34', kind: 'image' | 'video', cover, title, postId, videoId, dur, publishedAt }
+                               // MediaItem = { id: 'v12' | 'i34' | 'a56', kind: 'image' | 'video', cover, title, postId, videoId,
+                               //               albumId, albumIndex, dur, publishedAt }
+getAlbum(id)                   // 图集详情（看大图）：{ id, title, description, tags, creator, following, images: AlbumPic[], count, publishedAt, time }
 ```
 
-- 「媒体」：视频格是已发布视频的封面（点了进播放页），图片格是已发布帖子的主图 / 配图（文档帖的文档页不算，点了全屏看大图）；`mediaCount` 和它的 `total` 一致。
+- 「图片」：管理员在后台上传的图集（单张图就是只有一张的图集），不是帖子里的图。接口给的图是 `{ url, width, height }`，
+  `src/api/index.js` 统一换成 `AlbumPic` = `Cover` + `{ width, height }`（宽高是像素，0 = 不知道，按默认比例摆）；`title` 可能为空。
+  接口不给图集的图生成占位图，`fallback` 由前端按地址垫一张灰色渐变（`src/utils/art.js` 的 `quietArt`；「媒体」里图集的那几格同样处理），图来不了时不是一块死黑。
+  `albumCount` 和 `getCreatorAlbums` 的 `total` 一致。图集不存在 / 已下架时 `getAlbum` 回 400「图集不存在或已下架」（不退回演示数据）。
+- 「媒体」：视频格是已发布视频的封面（点了进播放页），图片格是已发布帖子的主图 / 配图（文档帖的文档页不算）和图集的每一张
+  （`albumId` 是所属图集、`albumIndex` 是它在图集里的位置，同一图集的图按顺序挨着；不是图集的格子这两个是 `null`），点了全屏看大图；`mediaCount` 和它的 `total` 一致。
 - 计数只算已发布的内容；`banner` 是最近作品的图（最多 3 张，可能为空，页面用按 id 生成的灰色渐变代替）。
 - 创作者不存在或已停用：接口回 400「创作者不存在」，页面显示提示和「返回」，不给重试；网络问题显示「重试」。
 - 帖子列表的每条有 `creatorId`，帖子卡片（`PostCard`）的头像和名字据此链到主页；创作者主页里的卡片传 `author-link="false"`。
 - 演示数据：社区帖子的作者 id 是 `demo:账号`（如 `demo:aijc`，和帖子详情的 `author.id` 一致），热门创作者是 `demo:c1`…`demo:c8`，`demo:数字` 生成一个占位创作者，其他 id 当作不存在。
+  演示创作者每人 0～6 个图集（有的没有，看空状态），图集 id 是 `demo:album:<创作者键>:<序号>`。

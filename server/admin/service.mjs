@@ -13,7 +13,7 @@ import { avatar } from '../lib/art.mjs'
 import { liteCover, liteDoc } from '../lib/lite-art.mjs'
 import { urlKey, urlSpellings } from '../lib/urls.mjs'
 import * as F from './fields.mjs'
-import { mediaStats } from './media.mjs'
+import { mediaStats, imageSizeOfUrl } from './media.mjs'
 
 const now = () => Math.floor(Date.now() / 1000)
 const fail = (message, field) => { throw new InputError(message, field) }
@@ -76,7 +76,8 @@ const FILTERS = {
   }),
   topics: q => ({ q: qText(q.q), kind: qEnum(q.kind, [0, 1, 2]), status: qEnum(q.status, [0, 1, 2]) }),
   creators: q => ({ q: qText(q.q), status: qEnum(q.status, [0, 1]), verified: qEnum(q.verified, [0, 1]) }),
-  keywords: q => ({ q: qText(q.q), isHot: qEnum(q.isHot, [0, 1]), isBanned: qEnum(q.isBanned, [0, 1]) })
+  keywords: q => ({ q: qText(q.q), isHot: qEnum(q.isHot, [0, 1]), isBanned: qEnum(q.isBanned, [0, 1]) }),
+  albums: q => ({ q: qText(q.q), status: qEnum(q.status, [1, 2]), creatorId: qId(q.creatorId, false) })
 }
 
 /* 分类 / 地区几乎不变，缓存几秒，导入上万行时不用每行查一次 */
@@ -181,6 +182,7 @@ export function meta() {
     postKinds: F.POST_KINDS,
     topicKinds: F.TOPIC_KINDS,
     creatorStatuses: F.CREATOR_STATUSES,
+    albumStatuses: F.ALBUM_STATUSES,
     mediaBase: '/media/'
   }
 }
@@ -527,7 +529,7 @@ function deleteCreator(id) {
   return tx(() => {
     const impact = A.creatorsDeleteImpact([id])
     A.deleteRows('creators', [id])
-    return { ok: true, deletedPosts: impact.posts, detachedVideos: impact.videos }
+    return { ok: true, deletedPosts: impact.posts, deletedAlbums: impact.albums, detachedVideos: impact.videos }
   })
 }
 
@@ -573,6 +575,86 @@ function deleteKeyword(id) {
   return { ok: true }
 }
 
+/* ---------------- 图集 ---------------- */
+
+const pAlbumStatus = (v, k) => F.toEnum(v, k, '状态', F.ALBUM_STATUS_WORDS, ['上架', '下架'])
+
+/* 标题可以为空（单张图片）；状态只有 1 上架 / 2 下架 */
+const ALBUM_SPEC = {
+  title: { col: 'title', label: '标题', blank: '', parse: pText('标题', 200) },
+  description: { col: 'description', label: '简介', blank: '', parse: (v, k) => F.toLongText(v, k, '简介', { max: 5000 }) },
+  creatorId: { col: 'creator_id', label: '创作者', required: '请选择创作者', parse: pCreatorRef },
+  tags: { col: 'tags', label: '标签', blank: '[]', parse: (v, k) => JSON.stringify(F.toTags(v, k, { hash: false })) },
+  status: { col: 'status', label: '状态', parse: pAlbumStatus },
+  publishedAt: { col: 'published_at', label: '发布时间', parse: pTime('发布时间') }
+}
+
+/**
+ * 请求体里的 images → 按顺序的 [{ url, width, height }]；undefined = 不改，null / 空 = 报错（至少一张）。
+ * 没给宽高（或为 0）的图：同一个地址原来就在这个图集里 → 沿用原来的宽高；站内 /media/ 文件 → 读文件头补上；
+ * 都不行就是 0（App 按默认比例占位）。所以导入只填地址、导出再导入，宽高都不会丢。
+ * 「同一个地址」按同一个文件比（编码 / 未编码、带 ?v= 的算同一个，见 lib/urls.mjs）。
+ * sizeOf：读文件头的函数，导入时换成事先读好的结果（见 albumImageSizer），后台抽屉的新建 / 修改当场读（最多 100 张）。
+ */
+function albumImagesInput(body, current = [], sizeOf = imageSizeOfUrl) {
+  if (body.images === undefined) return undefined
+  const images = F.toAlbumImages(body.images, 'images', { max: F.ALBUM_IMAGES_MAX })
+  const known = new Map(current.map(m => [urlKey(m.url), m]))
+  return images.map(m => {
+    if (m.width > 0 && m.height > 0) return m
+    const prev = known.get(urlKey(m.url))
+    if (prev && prev.width > 0 && prev.height > 0) return { url: m.url, width: prev.width, height: prev.height }
+    const size = sizeOf(m.url)
+    return size ? { url: m.url, ...size } : { url: m.url, width: 0, height: 0 }
+  })
+}
+
+const sameImages = (a, b) => a.length === b.length && a.every((m, i) => m.url === b[i].url && m.width === b[i].width && m.height === b[i].height)
+
+/* 导入选项里的默认状态（0 / 1 / 2）→ 图集状态：只有「已发布」是上架，草稿 / 下架都是下架 */
+const albumStatusOf = s => (s === 1 ? 1 : 2)
+
+function createAlbum(body, ctx = {}) {
+  requireObject(body)
+  const cols = collect(body, ALBUM_SPEC, { create: true })
+  const images = albumImagesInput(body, [], ctx.imageSizeOf)
+  if (!images) fail('至少要有一张图片', 'images')
+  return tx(() => {
+    const t = now()
+    cols.status ??= albumStatusOf(ctx.defaultStatus ?? 1)
+    cols.published_at ??= t
+    cols.created_at = t
+    cols.updated_at = t
+    const id = A.insertRow('albums', cols)
+    A.replaceAlbumImages(id, images)
+    return id
+  })
+}
+
+/** 只改传了的字段；images 是完整的新列表（整体替换）。什么都没变时不写库、不动 updated_at（导出再原样导入不算修改） */
+function updateAlbum(id, body, ctx = {}) {
+  requireObject(body)
+  const row = A.albumRow(requireId(id))
+  if (!row) fail('图集不存在')
+  const cols = collect(body, ALBUM_SPEC, { create: false })
+  const cur = A.albumImages(id)
+  const images = albumImagesInput(body, cur, ctx.imageSizeOf)
+  tx(() => {
+    const changed = changedOnly(row, cols)
+    const imagesChanged = images !== undefined && !sameImages(images, cur)
+    if (imagesChanged) A.replaceAlbumImages(id, images)
+    if (Object.keys(changed).length || imagesChanged) A.updateRow('albums', id, { ...changed, updated_at: now() })
+  })
+  return id
+}
+
+/** 删图集：只删库里的行（连带图片行），素材文件不动 */
+function deleteAlbum(id) {
+  if (!A.albumRow(requireId(id))) fail('图集不存在')
+  A.deleteRows('albums', [id])
+  return { ok: true }
+}
+
 /* ---------------- 按类型分派（路由用） ---------------- */
 
 const TYPES = {
@@ -580,7 +662,8 @@ const TYPES = {
   posts: { list: A.listPosts, get: A.getPost, create: createPost, update: updatePost, remove: deletePost, notFound: '帖子不存在' },
   topics: { list: A.listTopics, get: A.getTopic, create: createTopic, update: updateTopic, remove: deleteTopic, notFound: '专题不存在' },
   creators: { list: A.listCreators, get: A.getCreator, create: createCreator, update: updateCreator, remove: deleteCreator, notFound: '创作者不存在' },
-  keywords: { list: A.listKeywords, get: A.getKeyword, create: createKeyword, update: updateKeyword, remove: deleteKeyword, notFound: '热词不存在' }
+  keywords: { list: A.listKeywords, get: A.getKeyword, create: createKeyword, update: updateKeyword, remove: deleteKeyword, notFound: '热词不存在' },
+  albums: { list: A.listAlbums, get: A.getAlbum, create: createAlbum, update: updateAlbum, remove: deleteAlbum, notFound: '图集不存在' }
 }
 
 const typeOf = type => TYPES[type] || fail('未知的数据类型：' + type)
@@ -710,9 +793,21 @@ export function batch(type, body) {
         if (action === 'delete') {
           const impact = A.creatorsDeleteImpact(ids)
           const affected = A.deleteRows('creators', ids)
-          return { affected, deletedPosts: impact.posts, detachedVideos: impact.videos }
+          return { affected, deletedPosts: impact.posts, deletedAlbums: impact.albums, detachedVideos: impact.videos }
         }
         return unsupported()
+      }
+      case 'albums': {
+        let affected
+        if (action === 'publish' || action === 'unpublish') affected = A.setAlbumColumn(ids, 'status', action === 'publish' ? 1 : 2)
+        else if (action === 'delete') affected = A.deleteRows('albums', ids)
+        else if (action === 'setCreator') {
+          if (isNullish(value)) fail('请选择创作者', 'value')
+          affected = A.setAlbumColumn(ids, 'creator_id', pCreatorRef(value, 'value'))
+        } else if (action === 'addTags' || action === 'removeTags') {
+          affected = batchTags(ids, value, { hash: false, read: A.albumTags, write: A.setAlbumTags, add: action === 'addTags' })
+        } else unsupported()
+        return { affected }
       }
       case 'keywords': {
         if (action === 'delete') return { affected: A.deleteRows('search_keywords', ids) }
@@ -853,7 +948,7 @@ export function rebuildSection(id, body) {
 /* ---------------- 批量导入 ---------------- */
 
 const MAX_IMPORT_ROWS = 20000
-const KEY_LABELS = { id: 'ID', publicId: '编号', playbackUrl: '播放地址', slug: '标识', name: '名称', handle: '账号', word: '热词' }
+const KEY_LABELS = { id: 'ID', publicId: '编号', playbackUrl: '播放地址', slug: '标识', name: '名称', handle: '账号', word: '热词', images: '第一张图片' }
 
 /** 引用单元格：只收字符串 / 数字（['2'] 这类数组不能 String() 成 '2' 再去匹配） */
 const refCell = (cell, field, label) => String(F.scalar(cell, field, label)).trim()
@@ -917,7 +1012,7 @@ function resolveVideo(cell) {
 function findExisting(type, cells) {
   if (cells.id !== undefined) {
     const id = F.toInt(cells.id, 'id', 'ID', { min: 1 })
-    const exists = { videos: A.videoRow, posts: A.postRow, topics: A.topicRow, creators: A.creatorRow }[type]?.(id)
+    const exists = { videos: A.videoRow, posts: A.postRow, topics: A.topicRow, creators: A.creatorRow, albums: A.albumRow }[type]?.(id)
     if (!exists) fail('ID 不存在', 'id')
     return { id, by: 'id' }
   }
@@ -935,6 +1030,11 @@ function findExisting(type, cells) {
       return (cells.handle !== undefined && tryKey('handle', A.creatorIdByHandle(str(cells.handle, 'handle').replace(/^[@＠]+/, '')))) || null
     case 'keywords':
       return (cells.word !== undefined && tryKey('word', A.keywordIdByWord(str(cells.word, 'word')))) || null
+    case 'albums': {
+      // 第一张图（封面）指向同一个文件 = 同一个图集；地址写得不对时不算重复，交给新建时的校验报错
+      const first = cells.images !== undefined ? F.firstAlbumImageUrl(cells.images) : null
+      return (first && tryKey('images', A.albumIdByCoverUrl(first))) || null
+    }
   }
   return null
 }
@@ -955,6 +1055,8 @@ function toBody(type, cells, ctx) {
     rename('creator', 'creatorId', v => resolveCreator(v, ctx))
     rename('kind', 'mediaKind')
     rename('video', 'videoId', v => resolveVideo(v))
+  } else if (type === 'albums') {
+    rename('creator', 'creatorId', v => resolveCreator(v, ctx))
   }
   return body
 }
@@ -1036,12 +1138,69 @@ function replayKey(type, o, userId) {
  * 批量导入。整个请求一个事务，每行一个 SAVEPOINT：坏行回滚、报错，不影响其他行。
  * dryRun = 全部照做一遍，最后整体回滚 —— 预检结果（含文件内重复、自动创建）和真导入完全一致。
  *
- * 整个请求是同步执行的（同一个连接上不能让别的请求插进事务里），期间 App 的请求要排队：
+ * 事务部分是同步执行的（同一个连接上不能让别的请求插进事务里），期间 App 的请求要排队：
  * 几万条视频的库里一千行约 0.2 秒、两万行约 5 秒。所以单次上限虽是 2 万行，脚本 / 前端都应分块
  * （后台页面预检每块 5000 行、真导入每块 1000 行），配合 importId + chunk 可安全重发。
+ * 图集每行最多 100 张图：要读文件头补宽高的站内图在事务之前分片读好（albumImageSizer，读的时候不挡别的请求），
+ * 事务里只剩写库，一千行 × 100 张约 1 秒。
  * @param {{ userId?: number }} [who] 当前管理员（重发缓存按人区分）
  */
-export function importRows(type, body, who = {}) {
+export async function importRows(type, body, who = {}) {
+  const imageSizeOf = type === 'albums' ? await albumImageSizer(body, who) : null
+  return importRowsNow(type, body, who, imageSizeOf)
+}
+
+/* 脚本 / curl 可能把布尔写成字符串；尤其 dryRun 认错了会把「预检」当成真导入 */
+const importFlag = (v, def) => (v === undefined || v === null ? def : v === true || v === 1 || v === 'true' || v === '1')
+
+/* 事务外读文件头时，连续读这么久就让一次事件循环 */
+const IMPORT_YIELD_MS = 20
+
+/**
+ * 图集导入：没给宽高的站内 /media/ 图，在进事务之前先把文件头读好（同一个文件只读一次）。
+ * 一块上千行、每行最多 100 张，就是几万个文件头；放在同步的事务里读，整个服务会卡住好几秒。
+ * 这里每读 IMPORT_YIELD_MS 毫秒让一次事件循环，读的时候 App 的请求照常响应，事务里只查表。
+ * 预检不读：宽高不出现在预检结果里，读了也白读。
+ * 请求格式不对、或是重发命中缓存的块，返回 null（照旧当场读），报错 / 返回旧结果交给 importRowsNow。
+ * @returns {Promise<((url: string) => ({ width: number, height: number } | null)) | null>}
+ */
+async function albumImageSizer(body, who) {
+  if (!body || typeof body !== 'object' || Array.isArray(body) || !Array.isArray(body.rows) || body.rows.length > MAX_IMPORT_ROWS) return null
+  if (importFlag(body.dryRun, false)) return () => null
+  const o = body.options && typeof body.options === 'object' && !Array.isArray(body.options) ? body.options : {}
+  try {
+    const key = replayKey('albums', o, who.userId)
+    if (key && replayCache.has(key)) return null
+  } catch {
+    return null
+  }
+  const todo = new Map()   // urlKey → 第一次出现的写法
+  for (const raw of body.rows) {
+    const cell = raw && typeof raw === 'object' && !Array.isArray(raw) ? F.cleanCell(raw.images) : undefined
+    if (F.isBlank(cell)) continue
+    let list
+    try { list = F.toAlbumImages(cell, 'images') } catch { continue }   // 写得不对的行，导入时照常报错
+    for (const m of list) {
+      const k = urlKey(m.url)
+      if (!(m.width > 0 && m.height > 0) && k.startsWith('/media/') && !todo.has(k)) todo.set(k, m.url)
+    }
+  }
+  const sizes = new Map()
+  let slice = Date.now()
+  for (const [k, url] of todo) {
+    sizes.set(k, imageSizeOfUrl(url))
+    if (Date.now() - slice >= IMPORT_YIELD_MS) {
+      await new Promise(resolve => setImmediate(resolve))
+      slice = Date.now()
+    }
+  }
+  return url => {
+    const k = urlKey(url)
+    return sizes.has(k) ? sizes.get(k) : imageSizeOfUrl(url)
+  }
+}
+
+function importRowsNow(type, body, who, imageSizeOf) {
   if (!F.IMPORT_TYPES.includes(type)) fail('未知的导入类型：' + type)
   requireObject(body)
   const { rows } = body
@@ -1054,9 +1213,7 @@ export function importRows(type, body, who = {}) {
   const defaultStatus = ds === undefined || ds === null ? 1
     : typeof ds === 'number' || (typeof ds === 'string' && /^\d$/.test(ds.trim())) ? Number(ds) : NaN
   if (![0, 1, 2].includes(defaultStatus)) fail('defaultStatus 只能是 0 / 1 / 2', 'defaultStatus')
-  // 脚本 / curl 可能把布尔写成字符串；尤其 dryRun 认错了会把「预检」当成真导入
-  const flag = (v, def) => (v === undefined || v === null ? def : v === true || v === 1 || v === 'true' || v === '1')
-  const dryRun = flag(body.dryRun, false)
+  const dryRun = importFlag(body.dryRun, false)
   const key = replayKey(type, o, who.userId)
   if (key && !dryRun) {
     const prev = replayGet(key)
@@ -1064,11 +1221,13 @@ export function importRows(type, body, who = {}) {
   }
 
   const ctx = {
-    autoCreate: flag(o.autoCreate, true),
-    // 创作者没有「草稿」，默认状态只作用于视频 / 帖子 / 专题
+    autoCreate: importFlag(o.autoCreate, true),
+    // 创作者没有「草稿」，默认状态只作用于视频 / 帖子 / 专题 / 图集（图集只有上架 / 下架，草稿按下架，见 createAlbum）
     defaultStatus: type === 'creators' ? 1 : defaultStatus,
     deferRecount: true,
-    pending: null
+    pending: null,
+    // 图集：事先读好的图片宽高（albumImageSizer）；undefined = 当场读
+    imageSizeOf: imageSizeOf || undefined
   }
   const out = {
     total: rows.length, created: 0, updated: 0, skipped: 0, failed: 0,
@@ -1179,6 +1338,13 @@ export function exportRows(type, q = {}) {
     rows = A.exportCreators(f, opts).map(r => ({
       id: str(r.id), handle: str(r.handle), name: str(r.name), avatarUrl: str(r.avatar_url), bio: str(r.bio),
       isVerified: F.fmtBool(r.is_verified), isOfficial: F.fmtBool(r.is_official), status: F.creatorStatusLabel(r.status)
+    }))
+  } else if (type === 'albums') {
+    // 图片只导出地址（换行分隔、按顺序）；再导入时同一地址沿用库里的宽高
+    rows = A.exportAlbums(f, opts).map(r => ({
+      id: str(r.id), title: str(r.title), creator: creatorRef(r.creator_handle), images: (r.images || []).map(m => m.url).join('\n'),
+      description: str(r.description), tags: parseTags(r.tags).join(','), status: F.albumStatusLabel(r.status),
+      publishedAt: F.fmtTimestamp(r.published_at)
     }))
   } else {
     rows = A.exportKeywords(f, opts).map(r => ({

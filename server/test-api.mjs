@@ -660,7 +660,7 @@ adminCheck('帖子详情：草稿 / 下架返回 400，同一时间按 id 排下
  * ---- 创作者主页（GET /api/creators/:id、/videos、/posts）----
  * 每个用例自己建创作者 / 视频 / 帖子，结束时删掉（删创作者会连带删他的帖子）。
  */
-const PROFILE_KEYS = 'id,name,handle,avatar,verified,official,bio,followers,videoCount,postCount,mediaCount,lastActiveAt,lastActive,following,banner'
+const PROFILE_KEYS = 'id,name,handle,avatar,verified,official,bio,followers,videoCount,albumCount,postCount,mediaCount,lastActiveAt,lastActive,following,banner'
 /** 建一个只给这个用例用的创作者，fn 结束后连同他的视频、帖子一起删掉 */
 async function withCreator(body, fn) {
   const c = await data('POST', '/api/admin/creators', body)
@@ -709,11 +709,12 @@ adminCheck('创作者主页：结构、计数只算已发布、最后更新、�
 adminCheck('创作者主页：没有作品时头图为空、不显示最后更新', async () =>
   withCreator({ name: '空主页', handle: 'profile_t2' }, async c => {
     const d = await data('GET', `/api/creators/${c.id}`)
-    must(d.videoCount === 0 && d.postCount === 0 && d.mediaCount === 0 && d.banner.length === 0 && d.lastActiveAt === null && d.lastActive === '', json(d).slice(0, 200))
+    must(d.videoCount === 0 && d.albumCount === 0 && d.postCount === 0 && d.mediaCount === 0 && d.banner.length === 0 && d.lastActiveAt === null && d.lastActive === '', json(d).slice(0, 200))
     const v = await data('GET', `/api/creators/${c.id}/videos`)
     const p = await data('GET', `/api/creators/${c.id}/posts`)
     const m = await data('GET', `/api/creators/${c.id}/media`)
-    must(v.total === 0 && v.list.length === 0 && p.total === 0 && p.list.length === 0 && m.total === 0 && m.list.length === 0, '空列表')
+    const a = await data('GET', `/api/creators/${c.id}/albums`)
+    must(v.total === 0 && v.list.length === 0 && p.total === 0 && p.list.length === 0 && m.total === 0 && m.list.length === 0 && a.total === 0 && a.list.length === 0, '空列表')
     return 'banner []，lastActive \'\''
   }))
 
@@ -741,12 +742,13 @@ adminCheck('创作者主页：不存在 / 已停用返回 400', async () =>
     await mkPost({ text: '停用作者的帖子' })
     await data('POST', `/api/creators/${c.id}/follow`, { on: true })
     await data('PATCH', `/api/admin/creators/${c.id}`, { status: 0 })
-    for (const sub of ['', '/videos', '/posts', '/media']) await expect400(`/api/creators/${c.id}${sub}`)
+    for (const sub of ['', '/videos', '/posts', '/media', '/albums']) await expect400(`/api/creators/${c.id}${sub}`)
     // 已停用的不能再关注，但可以取消关注
     await data('POST', `/api/creators/${c.id}/follow`, { on: false })
     await expect400(`/api/creators/${c.id}/follow`, 'POST', { on: true })
     for (const path of ['/api/creators/99999999', '/api/creators/0', '/api/creators/abc', '/api/creators/99999999999999999999', '/api/creators/1.5',
-      '/api/creators/99999999/videos', '/api/creators/abc/posts', '/api/creators/99999999/media', '/api/creators/abc/media']) await expect400(path)
+      '/api/creators/99999999/videos', '/api/creators/abc/posts', '/api/creators/99999999/media', '/api/creators/abc/media',
+      '/api/creators/99999999/albums', '/api/creators/abc/albums', '/api/creators/0/albums']) await expect400(path)
     await expect400('/api/creators/99999999/follow', 'POST', { on: true })
     await data('PATCH', `/api/admin/creators/${c.id}`, { status: 1 })
     must((await data('GET', `/api/creators/${c.id}`)).videoCount === 1, '重新启用后能打开')
@@ -816,7 +818,7 @@ adminCheck('创作者主页：帖子与社区列表同结构，翻页、收藏�
   })
 })
 
-const MEDIA_KEYS = 'id,kind,cover,title,postId,videoId,dur,publishedAt'
+const MEDIA_KEYS = 'id,kind,cover,title,postId,videoId,albumId,albumIndex,dur,publishedAt'
 adminCheck('创作者主页「媒体」：视频封面 + 帖子的图，新的在前、翻页、只算已发布、去重', async () => {
   const T = Math.floor(Date.now() / 1000)
   return withCreator({ name: '媒体测试', handle: 'profile_t7' }, async (c, { mkVideo, mkPost }) => {
@@ -876,6 +878,142 @@ adminCheck('创作者主页「媒体」：视频封面 + 帖子的图，新的�
     const anon = await anonCall('GET', `/api/creators/${c.id}/media`)
     must(anon.status === 200 && anon.json.data.total === 8, '未登录 ' + anon.status)
     return `8 条：${all.list.map(m => m.kind[0]).join('')}，3 条一页翻页一致，草稿 / 下架 / 文档页 / 重复封面不算`
+  })
+})
+
+/*
+ * ---- 图集：创作者主页「图片」（GET /api/creators/:id/albums）、图集详情（GET /api/albums/:id）、「媒体」里的图集图片 ----
+ * 图集由后台建（POST /api/admin/albums），创作者删掉时连同图集一起删（withCreator 结束时）。
+ */
+const ALBUM_ITEM_KEYS = 'id,title,cover,count,publishedAt,time'
+const ALBUM_KEYS = 'id,title,description,tags,creator,following,images,count,publishedAt,time'
+const mkAlbumFor = creatorId => body => data('POST', '/api/admin/albums', { creatorId, ...body })
+const albumMsg = async (path, method = 'GET') => {
+  const { status, json: j } = await call(method, path)
+  must(status === 400 && j?.message === '图集不存在或已下架', `${method} ${path} → HTTP ${status} ${j?.message}`)
+}
+
+adminCheck('创作者主页「图片」：图集新的在前、翻页、只算上架、封面 / 张数、albumCount', async () => {
+  const T = Math.floor(Date.now() / 1000)
+  return withCreator({ name: '图集列表测试', handle: 'profile_t8' }, async c => {
+    const mk = mkAlbumFor(c.id)
+    const a1 = await mk({ title: '三张图', images: [{ url: '/m/a1.jpg', width: 1080, height: 1440 }, '/m/a1b.jpg', { url: '/m/a1c.jpg', width: 800, height: 600 }], publishedAt: T - 3600 })
+    const a2 = await mk({ images: ['https://e.com/single.jpg'], publishedAt: T - 600 })          // 单张图片，不写标题
+    const a3 = await mk({ title: '同一时间 A', images: ['/m/a3.jpg'], publishedAt: T - 7200 })
+    const a4 = await mk({ title: '同一时间 B', images: ['/m/a4.jpg'], publishedAt: T - 7200 })
+    const off = await mk({ title: '下架的图集', images: ['/m/off.jpg'], status: 2, publishedAt: T })
+    const ids = list => list.map(a => a.id).join()
+    const all = await data('GET', `/api/creators/${c.id}/albums?limit=50`)
+    const exp = [a2, a1, a4, a3].map(a => a.id).join()
+    must(all.total === 4 && ids(all.list) === exp, `顺序 ${ids(all.list)}（total ${all.total}），期望 ${exp}`)
+    must(all.list.every(a => Object.keys(a).join() === ALBUM_ITEM_KEYS), '字段 ' + Object.keys(all.list[0]).join())
+    const g1 = all.list.find(a => a.id === a1.id), g2 = all.list.find(a => a.id === a2.id)
+    must(json(g1.cover) === json({ url: '/m/a1.jpg', width: 1080, height: 1440 }) && g1.count === 3 && g1.title === '三张图' && g1.publishedAt === T - 3600 && g1.time === '1小时前', '三张图 ' + json(g1))
+    must(json(g2.cover) === json({ url: 'https://e.com/single.jpg', width: 0, height: 0 }) && g2.count === 1 && g2.title === '', '单张图片（不知道宽高为 0）' + json(g2))
+    must((await data('GET', `/api/creators/${c.id}`)).albumCount === 4, '头部 albumCount 和 total 一致（下架的不算）')
+    // 翻页：3 条一页拼起来和一次取完全一样
+    const pages = [...(await data('GET', `/api/creators/${c.id}/albums?limit=3&offset=0`)).list, ...(await data('GET', `/api/creators/${c.id}/albums?limit=3&offset=3`)).list]
+    must(ids(pages) === exp, '分页 ' + ids(pages))
+    must((await data('GET', `/api/creators/${c.id}/albums?limit=999`)).list.length === 4, 'limit 上限')
+    must((await data('GET', `/api/creators/${c.id}/albums?limit=0&offset=-5`)).list.length === 4, 'limit 0 → 默认 20、offset 负数 → 0')
+    must((await data('GET', `/api/creators/${c.id}/albums?offset=4`)).list.length === 0, '翻过头是空页')
+    // offset 超出 SQLite 整数范围也只是空页（以前 500）；四个标签的列表共用同一个分页
+    for (const tab of ['albums', 'videos', 'posts', 'media']) {
+      for (const o of ['1e20', 'Infinity', '1e308']) {
+        const r = await data('GET', `/api/creators/${c.id}/${tab}?offset=${o}`)
+        must(r.list.length === 0 && r.total >= 0, `${tab}?offset=${o} 应是空页`)
+      }
+    }
+    // 上架后马上出现在最前，再下架又没了
+    await data('PATCH', `/api/admin/albums/${off.id}`, { status: 1 })
+    const on = await data('GET', `/api/creators/${c.id}/albums`)
+    must(on.total === 5 && on.list[0].id === off.id, '上架后 ' + ids(on.list))
+    await data('POST', '/api/admin/albums/batch', { ids: [off.id, a1.id], action: 'unpublish' })
+    const less = await data('GET', `/api/creators/${c.id}/albums`)
+    must(less.total === 3 && !less.list.some(a => a.id === off.id || a.id === a1.id), '批量下架后 ' + ids(less.list))
+    await data('POST', '/api/admin/albums/batch', { ids: [a1.id], action: 'publish' })
+    // 未登录也能看（公开接口）
+    const anon = await anonCall('GET', `/api/creators/${c.id}/albums`)
+    must(anon.status === 200 && anon.json.data.total === 4, '未登录 ' + anon.status)
+    return `4 个（下架不算），同一时间 id 大的在前，3 个一页翻页一致；单张图片 count 1、标题可空`
+  })
+})
+
+adminCheck('图集详情：结构、作者、标签、图片顺序和宽高、关注状态；下架 / 不存在 / 创作者停用 / 删除后 400', async () =>
+  withCreator({ name: '图集详情测试', handle: 'profile_t9', isVerified: true }, async c => {
+    const imgs = [{ url: '/m/d0.jpg', width: 1080, height: 1350 }, { url: 'https://e.com/d1.jpg', width: 1600, height: 900 }, '/m/d2.jpg']
+    const a = await mkAlbumFor(c.id)({ title: '雨后', description: '第一段\r\n\r\n第二段  ', tags: '街拍,#雨天', images: imgs })
+    const d = await data('GET', `/api/albums/${a.id}`)
+    must(Object.keys(d).join() === ALBUM_KEYS, '字段 ' + Object.keys(d).join())
+    must(d.id === a.id && d.title === '雨后' && d.description === '第一段\n\n第二段' && json(d.tags) === '["街拍","雨天"]', '基本字段 ' + json({ ...d, creator: undefined, images: undefined }))
+    must(Object.keys(d.creator).join() === 'id,name,handle,verified,avatar' && d.creator.id === c.id && d.creator.name === '图集详情测试' &&
+      d.creator.handle === 'profile_t9' && d.creator.verified === true && isCover(d.creator.avatar), '作者 ' + json(d.creator).slice(0, 120))
+    must(json(d.images) === json([imgs[0], imgs[1], { url: '/m/d2.jpg', width: 0, height: 0 }]) && d.count === 3, '图片 ' + json(d.images))
+    must(d.following === false && typeof d.time === 'string' && d.publishedAt > 0, '关注 / 时间')
+    // 关注作者后 following 为 true，未登录仍是 false
+    await data('POST', `/api/creators/${c.id}/follow`, { on: true })
+    must((await data('GET', `/api/albums/${a.id}`)).following === true, '关注后 following')
+    const anon = await anonCall('GET', `/api/albums/${a.id}`)
+    must(anon.status === 200 && anon.json.data.following === false, '未登录 following')
+    await data('POST', `/api/creators/${c.id}/follow`, { on: false })
+    // 下架 → 400，重新上架 → 能打开
+    await data('PATCH', `/api/admin/albums/${a.id}`, { status: 2 })
+    await albumMsg(`/api/albums/${a.id}`)
+    await data('PATCH', `/api/admin/albums/${a.id}`, { status: '上架' })
+    must((await data('GET', `/api/albums/${a.id}`)).id === a.id, '重新上架后能打开')
+    // 创作者停用 → 图集也打不开
+    await data('PATCH', `/api/admin/creators/${c.id}`, { status: 0 })
+    await albumMsg(`/api/albums/${a.id}`)
+    await data('PATCH', `/api/admin/creators/${c.id}`, { status: 1 })
+    for (const path of ['/api/albums/99999999', '/api/albums/0', '/api/albums/abc', '/api/albums/1.5', '/api/albums/99999999999999999999', '/api/albums/demo:a1']) await albumMsg(path)
+    must((await call('POST', `/api/albums/${a.id}`)).status === 405, '只支持 GET')
+    // 后台删掉 → 400
+    await data('DELETE', `/api/admin/albums/${a.id}`)
+    await albumMsg(`/api/albums/${a.id}`)
+    return `字段 ${ALBUM_KEYS}；下架 / 停用 / 不存在 / 非法 id / 删除后都是 400「图集不存在或已下架」`
+  }))
+
+adminCheck('创作者主页「媒体」/ 头图 / 最后更新：图集的每张图都在（带 albumId / albumIndex），和视频、帖子按时间混排', async () => {
+  const T = Math.floor(Date.now() / 1000)
+  return withCreator({ name: '媒体图集测试', handle: 'profile_t10' }, async (c, { mkVideo, mkPost }) => {
+    const mk = mkAlbumFor(c.id)
+    const v = await mkVideo({ title: '媒体图集视频', publishedAt: T - 3600, coverUrl: '/m/mv.jpg', durationSec: 75 })
+    const p = await mkPost({ text: '媒体图集帖子', mainImage: '/m/mp.jpg', publishedAt: T - 1800 })
+    const a = await mk({ title: '三张的图集', images: ['/m/ma0.jpg', '/m/ma1.jpg', '/m/ma2.jpg'], publishedAt: T - 2400 })
+    // 和视频同一时间：视频在前、图集的图在后
+    const s = await mk({ images: ['/m/ms.jpg'], publishedAt: T - 3600 })
+    await mk({ title: '下架', images: ['/m/moff.jpg'], status: 2, publishedAt: T })
+    const m = await data('GET', `/api/creators/${c.id}/media?limit=50`)
+    const srcs = list => list.map(x => x.cover?.src ?? '-').join()
+    const exp = '/m/mp.jpg,/m/ma0.jpg,/m/ma1.jpg,/m/ma2.jpg,/m/mv.jpg,/m/ms.jpg'
+    must(m.total === 6 && srcs(m.list) === exp, `顺序 ${srcs(m.list)}（total ${m.total}），期望 ${exp}`)
+    must(m.list.every(x => Object.keys(x).join() === MEDIA_KEYS && isCover(x.cover)), '字段 ' + Object.keys(m.list[0]).join())
+    const albumCells = m.list.filter(x => x.albumId != null)
+    must(albumCells.length === 4 && albumCells.every(x => x.kind === 'image' && /^a\d+$/.test(x.id) && x.postId === null && x.videoId === null && x.dur === null && x.cover.fallback === null), '图集格 ' + json(albumCells[0]))
+    must(albumCells.slice(0, 3).map(x => `${x.albumId}:${x.albumIndex}`).join() === [0, 1, 2].map(i => `${a.id}:${i}`).join() && albumCells[0].title === '三张的图集' && albumCells[0].publishedAt === T - 2400, '下标 ' + albumCells.map(x => `${x.albumId}:${x.albumIndex}`).join())
+    must(albumCells[3].albumId === s.id && albumCells[3].albumIndex === 0 && albumCells[3].title === '', '单张图片 ' + json(albumCells[3]))
+    must(m.list.filter(x => x.albumId == null).every(x => x.albumIndex === null), '不是图集的格 albumId / albumIndex 为 null')
+    must(m.list[0].postId === p.id && m.list[4].videoId === v.id && m.list[4].dur === '01:15', '帖子 / 视频格照旧')
+    must(new Set(m.list.map(x => x.id)).size === 6, 'id 不重复')
+    const pages = []
+    for (let off = 0; off < 6; off += 4) pages.push(...(await data('GET', `/api/creators/${c.id}/media?limit=4&offset=${off}`)).list)
+    must(pages.map(x => x.id).join() === m.list.map(x => x.id).join(), '分页 ' + pages.map(x => x.id).join())
+    let d = await data('GET', `/api/creators/${c.id}`)
+    must(d.mediaCount === 6 && d.albumCount === 2, `mediaCount ${d.mediaCount} / albumCount ${d.albumCount}`)
+    // 头图：帖子主图、图集封面、视频封面（同一时间视频在前）
+    must(d.banner.map(b => b.src).join() === '/m/mp.jpg,/m/ma0.jpg,/m/mv.jpg', '头图 ' + d.banner.map(b => b.src).join())
+    // 改图集的图（整体替换）：媒体跟着变
+    await data('PATCH', `/api/admin/albums/${a.id}`, { images: ['/m/ma2.jpg', '/m/ma0.jpg'] })
+    const m2 = await data('GET', `/api/creators/${c.id}/media?limit=50`)
+    must(m2.total === 5 && srcs(m2.list) === '/m/mp.jpg,/m/ma2.jpg,/m/ma0.jpg,/m/mv.jpg,/m/ms.jpg' && m2.list[2].albumIndex === 1, '改图后 ' + srcs(m2.list))
+    // 最新的一条是图集：最后更新跟着它
+    const fresh = await mk({ images: ['/m/mnew.jpg'], publishedAt: T - 60 })
+    d = await data('GET', `/api/creators/${c.id}`)
+    must(d.lastActiveAt === T - 60 && d.banner[0].src === '/m/mnew.jpg', `最后更新 ${d.lastActiveAt} 头图 ${d.banner[0].src}`)
+    await data('POST', '/api/admin/albums/batch', { ids: [fresh.id, a.id, s.id], action: 'delete' })
+    d = await data('GET', `/api/creators/${c.id}`)
+    must(d.albumCount === 0 && d.mediaCount === 2 && d.lastActiveAt === T - 1800, '删掉图集后 ' + json({ albumCount: d.albumCount, mediaCount: d.mediaCount, lastActiveAt: d.lastActiveAt }))
+    return `6 格：${m.list.map(x => (x.albumId != null ? 'a' : x.kind[0])).join('')}，albumIndex 0/1/2，头图 / 最后更新算上图集`
   })
 })
 
@@ -1304,6 +1442,95 @@ async function oldDbCheck() {
 }
 if (argBase) results.push({ name: '老库自动补 posts.content 列 / 重建 v_users', ok: true, note: '跳过（--base 模式）' })
 else await check('老库自动补 posts.content 列 / 重建 v_users', oldDbCheck)
+
+/*
+ * ---- 老库迁移：没有图集表的库（加图集之前的版本建的）----
+ * 按现在的表结构建库、删掉 albums / album_images，记下每张表的行数和每个对象的定义；
+ * 另起一个服务（同样用 3182，上一个已经关了）指向它：启动时应补建两张表和索引，原有的表、行数、定义一样不动，
+ * 原有接口照常（图集数 0、「媒体」里没有图集格）。再重启一次不应重复补建。
+ */
+async function startOn(dbPath, port) {
+  let log = ''
+  const srv = spawn(process.execPath, [join(here, 'index.mjs')], { env: { ...process.env, PORT: String(port), DB_PATH: dbPath, MEDIA_DIR: TEST_MEDIA }, stdio: ['ignore', 'pipe', 'pipe'] })
+  srv.stdout.on('data', d => { log += d })
+  srv.stderr.on('data', d => { log += d })
+  const b = `http://127.0.0.1:${port}`
+  let up = false
+  for (let i = 0; i < 100 && srv.exitCode === null && !up; i++) {
+    up = await fetch(b + '/api/health').then(r => r.ok, () => false)
+    if (!up) await new Promise(r => setTimeout(r, 100))
+  }
+  const stop = async () => {
+    if (srv.exitCode !== null) return
+    const exited = new Promise(r => srv.once('exit', r))
+    srv.kill()
+    await Promise.race([exited, new Promise(r => setTimeout(r, 3000))])
+  }
+  return { up, base: b, log: () => log, stop }
+}
+
+async function oldDbAlbumsCheck() {
+  const dir = mkdtempSync(join(tmpdir(), 'reel-old-albums-'))
+  const OLD_DB = join(dir, 'old.db')
+  let srv = null
+  try {
+    await new Promise(r => spawn(process.execPath, [join(here, 'db', 'seed.mjs')], { env: { ...process.env, DB_PATH: OLD_DB }, stdio: 'ignore' }).on('exit', r))
+    const w = new DatabaseSync(OLD_DB)
+    w.exec('DROP TABLE album_images; DROP TABLE albums')
+    const objects = db2 => new Map(db2.prepare("SELECT type || ':' || name AS k, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").all().map(r => [r.k, r.sql]))
+    const tables = db2 => db2.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all().map(r => r.name)
+    const counts = db2 => Object.fromEntries(tables(db2).map(t => [t, db2.prepare(`SELECT COUNT(*) c FROM "${t}"`).get().c]))
+    const objBefore = objects(w)
+    const countsBefore = counts(w)
+    must(!objBefore.has('table:albums') && !objBefore.has('table:album_images'), '没能删掉图集表')
+    // 期望值直接从库里算：trip 的已发布视频 / 帖子数
+    const trip = w.prepare("SELECT id FROM creators WHERE handle = 'trip'").get().id
+    const expVideos = w.prepare('SELECT COUNT(*) c FROM videos WHERE creator_id = ? AND status = 1').get(trip).c
+    const expPosts = w.prepare('SELECT COUNT(*) c FROM posts WHERE creator_id = ? AND status = 1').get(trip).c
+    w.close()
+
+    srv = await startOn(OLD_DB, 3182)
+    must(srv.up, '老库上的服务没启动起来：' + srv.log().slice(0, 200))
+    const get1 = async p => { const j = await fetch(srv.base + p).then(r => r.json()); must(j.code === 0, `${p} → ${j.message}`); return j.data }
+    const prof = await get1(`/api/creators/${trip}`)
+    must(prof.videoCount === expVideos && prof.postCount === expPosts && prof.albumCount === 0, '头部计数 ' + json({ v: prof.videoCount, p: prof.postCount, a: prof.albumCount }))
+    const media = await get1(`/api/creators/${trip}/media?limit=50`)
+    must(media.total === prof.mediaCount && media.total > 0 && media.list.every(x => x.albumId === null && x.albumIndex === null && !x.id.startsWith('a')), '媒体 ' + media.total)
+    const albums = await get1(`/api/creators/${trip}/albums`)
+    must(albums.total === 0 && albums.list.length === 0, '图集列表应为空')
+    const miss = await fetch(srv.base + '/api/albums/1').then(r => r.json())
+    must(miss.code === 1 && miss.message === '图集不存在或已下架', '图集详情 ' + json(miss))
+    for (const p of ['/api/home/recommend', '/api/community/posts', `/api/creators/${trip}/videos`, `/api/creators/${trip}/posts`, '/api/library']) await get1(p)
+    must(/已补建图集表/.test(srv.log()), '启动日志里应提示补建图集表')
+    await srv.stop()
+
+    const r = new DatabaseSync(OLD_DB, { readOnly: true })
+    const objAfter = objects(r)
+    const countsAfter = counts(r)
+    const cols = t => r.prepare(`PRAGMA table_info(${t})`).all().map(c => `${c.name}:${c.type}:${c.notnull}:${c.dflt_value ?? ''}`).join(' ')
+    const albumCols = cols('albums'), imageCols = cols('album_images')
+    const fks = r.prepare('PRAGMA foreign_key_list(albums)').all().concat(r.prepare('PRAGMA foreign_key_list(album_images)').all())
+    r.close()
+    for (const [k, sql] of objBefore) must(objAfter.get(k) === sql, `原有的 ${k} 被改了`)
+    for (const [t, n] of Object.entries(countsBefore)) must(countsAfter[t] === n, `${t} 行数 ${n} → ${countsAfter[t]}`)
+    must(countsAfter.albums === 0 && countsAfter.album_images === 0, '补建的表应为空')
+    must(albumCols === "id:INTEGER:0: creator_id:INTEGER:1: title:TEXT:1:'' description:TEXT:1:'' tags:TEXT:1:'[]' image_count:INTEGER:1:0 view_count:INTEGER:1:0 status:INTEGER:1:1 published_at:INTEGER:1: created_at:INTEGER:1: updated_at:INTEGER:1:", 'albums 列 ' + albumCols)
+    must(imageCols === 'id:INTEGER:0: album_id:INTEGER:1: url:TEXT:1: width:INTEGER:1:0 height:INTEGER:1:0 sort:INTEGER:1:0 created_at:INTEGER:1:', 'album_images 列 ' + imageCols)
+    must(fks.map(f => `${f.table}.${f.from}→${f.on_delete}`).join() === 'creators.creator_id→CASCADE,albums.album_id→CASCADE', '外键 ' + fks.map(f => `${f.table}.${f.from}→${f.on_delete}`).join())
+    for (const idx of ['idx_albums_creator', 'idx_albums_pub', 'idx_album_images_album', 'idx_album_images_url']) must(objAfter.has('index:' + idx), '缺索引 ' + idx)
+
+    // 再启动一次：表已经在了，不重复提示、不动数据
+    srv = await startOn(OLD_DB, 3182)
+    must(srv.up && (await get1(`/api/creators/${trip}`)).albumCount === 0, '第二次启动')
+    must(!/已补建图集表/.test(srv.log()), '第二次启动不应再提示补建')
+    return `补建 albums / album_images + 4 个索引；原有 ${objBefore.size} 个对象定义、${Object.keys(countsBefore).length} 张表的行数不变；接口照常`
+  } finally {
+    if (srv) await srv.stop()
+    try { rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
+}
+if (argBase) results.push({ name: '老库自动补建图集表（原有数据不动）', ok: true, note: '跳过（--base 模式）' })
+else await check('老库自动补建图集表（原有数据不动）', oldDbAlbumsCheck)
 
 /* ---- 错误处理：这些用例「必须失败」 ---- */
 async function tFail(name, method, path, expectHint, body) {

@@ -5,6 +5,7 @@ export const NAV = [
   { name: 'dashboard', label: '概览', icon: 'dashboard', to: '/' },
   { name: 'videos', label: '视频', icon: 'video', to: '/videos' },
   { name: 'posts', label: '帖子', icon: 'post', to: '/posts' },
+  { name: 'albums', label: '图片', icon: 'image', to: '/albums' },
   { name: 'topics', label: '专题', icon: 'topic', to: '/topics' },
   { name: 'creators', label: '创作者', icon: 'creator', to: '/creators' },
   { name: 'sections', label: '首页推荐', icon: 'home', to: '/sections' },

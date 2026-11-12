@@ -17,7 +17,9 @@ defineOptions({ name: 'DashboardPage' })
 /*
  * 概览：各类数据总数、待完善的数据（缺播放地址 / 封面 / 时长）、快捷入口、最近添加的视频和帖子。
  * 卡片和提示都可以点，直接跳到带好筛选条件的列表。
+ * 总数卡片：前三张是前台的内容（视频 / 帖子 / 图集），宽一些；其余六张排在第二行。
  */
+const PRIMARY = 3
 const router = useRouter()
 const stats = shallowRef(null)
 const loading = ref(true)
@@ -49,6 +51,15 @@ const cards = computed(() => {
   return [
     { key: 'videos', label: '视频', icon: 'video', to: '/videos', value: s.videos?.total, sub: `已发布 ${fmtNum(s.videos?.published)} · 草稿 ${fmtNum(s.videos?.draft)} · 下架 ${fmtNum(s.videos?.offline)}` },
     { key: 'posts', label: '帖子', icon: 'post', to: '/posts', value: s.posts?.total, sub: `已发布 ${fmtNum(s.posts?.published)} · 热门 ${fmtNum(s.posts?.hot)}` },
+    {
+      key: 'albums',
+      // 数字是图集个数（侧边栏「图片」页管理的就是图集），图片张数放在小字里
+      label: '图集',
+      icon: 'image',
+      to: '/albums',
+      value: s.albums?.total,
+      sub: `上架 ${fmtNum(s.albums?.published)} · 下架 ${fmtNum(s.albums?.offline)} · 共 ${fmtNum(s.albums?.images)} 张图`
+    },
     { key: 'topics', label: '专题', icon: 'topic', to: '/topics', value: s.topics?.total, sub: '专题页与片库分类' },
     { key: 'creators', label: '创作者', icon: 'creator', to: '/creators', value: s.creators?.total, sub: '视频与帖子的发布者' },
     { key: 'sections', label: '首页推荐分区', icon: 'home', to: '/sections', value: s.sections?.total, sub: '首页「推荐」里的分区' },
@@ -107,10 +118,10 @@ const openPost = p => router.push({ path: '/posts', query: { edit: p.id } })
         <!-- 总数 -->
         <section class="cards" aria-label="数据总数">
           <template v-if="!stats">
-            <div v-for="n in 8" :key="n" class="stat sk" />
+            <div v-for="n in 9" :key="n" class="stat sk" :class="{ primary: n <= PRIMARY }" />
           </template>
           <template v-else>
-            <RouterLink v-for="c in cards" :key="c.key" :to="c.to" class="stat">
+            <RouterLink v-for="(c, i) in cards" :key="c.key" :to="c.to" class="stat" :class="{ primary: i < PRIMARY }">
               <span class="stat-hd"><AIcon :name="c.icon" :size="15" />{{ c.label }}</span>
               <span class="stat-v num">{{ fmtNum(c.value) }}</span>
               <span class="stat-sub">{{ c.sub }}</span>
@@ -216,9 +227,11 @@ const openPost = p => router.push({ path: '/posts', query: { edit: p.id } })
 </template>
 
 <style scoped>
-.cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.cards { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; }
+.stat.primary { grid-column: span 2; }
 @media (max-width: 1100px) {
-  .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .cards { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .stat.primary { grid-column: auto; }
 }
 @media (max-width: 520px) {
   .cards { grid-template-columns: minmax(0, 1fr); }

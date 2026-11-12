@@ -83,6 +83,21 @@ if (get("SELECT 1 x FROM sqlite_master WHERE type = 'view' AND name = 'v_users' 
   }
 }
 
+/*
+ * 图集（albums / album_images）：老库没有这两张表，启动时按 schema.sql 里「图集」那一段补建（定义只写在 schema.sql 一处）。
+ * 全是 CREATE … IF NOT EXISTS，不碰已有的表和数据；建库前（还没有 creators 表）跳过。
+ */
+if (get("SELECT 1 x FROM sqlite_master WHERE type = 'table' AND name = 'creators'")) {
+  const missing = !get("SELECT 1 x FROM sqlite_master WHERE type = 'table' AND name = 'album_images'")
+  const def = readFileSync(join(here, 'schema.sql'), 'utf8').match(/CREATE TABLE IF NOT EXISTS albums \([\s\S]*?-- 图集结束/)
+  if (def) {
+    db.exec(def[0])
+    if (missing) console.log('已补建图集表 albums / album_images（创作者主页「图片」）')
+  } else if (missing) {
+    console.warn('schema.sql 里找不到图集表的定义，没有补建 albums / album_images')
+  }
+}
+
 /* ---------------- 行 → 前端结构 ---------------- */
 
 /** 数据库行 → 前端 Cover { src, fallback } */
@@ -952,14 +967,15 @@ export const isFollowing = (userId, creatorId) => !!get('SELECT 1 x FROM user_fo
 
 /**
  * 创作者主页头部；不存在或已停用返回 null。
- * 视频数 / 帖子数 / 最后更新时间只算已发布的内容（走 idx_videos_creator / idx_posts_creator）。
+ * 视频数 / 图集数 / 帖子数 / 最后更新时间只算已发布（上架）的内容（走 idx_videos_creator / idx_albums_creator / idx_posts_creator）。
  */
 export function creatorProfile(id, userId = null) {
   const c = get('SELECT * FROM creators WHERE id = ? AND status = 1', id)
   if (!c) return null
   const v = get('SELECT COUNT(*) n, MAX(published_at) t FROM videos WHERE creator_id = ? AND status = 1', id)
+  const a = get(`SELECT COUNT(*) n, MAX(a.published_at) t FROM albums a WHERE a.creator_id = ? AND ${ALBUM_LIVE}`, id)
   const p = get('SELECT COUNT(*) n, MAX(published_at) t FROM posts WHERE creator_id = ? AND status = 1', id)
-  const lastActiveAt = Math.max(v.t ?? 0, p.t ?? 0) || null
+  const lastActiveAt = Math.max(v.t ?? 0, a.t ?? 0, p.t ?? 0) || null
   return {
     id: c.id,
     name: c.name,
@@ -970,9 +986,11 @@ export function creatorProfile(id, userId = null) {
     bio: c.bio || '',
     followers: c.follower_count,
     videoCount: v.n,
+    // 「图片」标签的条数（已上架、至少有一张图的图集），和 creatorAlbums().total 同一个口径
+    albumCount: a.n,
     postCount: p.n,
     // 「媒体」标签的条数，和 creatorMedia().total 同一个口径
-    mediaCount: get(`SELECT COUNT(*) c FROM (${CREATOR_MEDIA})`, id, id).c,
+    mediaCount: get(`SELECT COUNT(*) c FROM (${CREATOR_MEDIA})`, id, id, id).c,
     lastActiveAt,
     lastActive: relativeTime(lastActiveAt),
     following: !!userId && isFollowing(userId, id),
@@ -982,8 +1000,8 @@ export function creatorProfile(id, userId = null) {
 
 /*
  * 主页头图：最近的作品图，新的在前，最多 3 张。
- * 视频取封面；帖子取主图，没有主图的图文 / 视频帖取第一张配图（文档帖的配图是文档页，不要）。
- * 两边各先按发布时间取 3 条再合并，创作者作品很多时也不用整表排序。
+ * 视频取封面；帖子取主图，没有主图的图文 / 视频帖取第一张配图（文档帖的配图是文档页，不要）；图集取封面（第一张图）。
+ * 三边各先按发布时间取 3 条再合并，创作者作品很多时也不用整表排序。
  */
 const BANNER_SIZE = 3
 function creatorBanner(id) {
@@ -999,7 +1017,12 @@ function creatorBanner(id) {
                                                             ORDER BY role, sort_order, id LIMIT 1)
                                WHERE p.creator_id = ? AND p.status = 1
                                ORDER BY p.published_at DESC, p.id DESC LIMIT ${BANNER_SIZE})
-              ) ORDER BY t DESC, k, i DESC LIMIT ${BANNER_SIZE}`, id, id).map(r => toCover(r.src, r.fallback))
+                UNION ALL
+                SELECT * FROM (SELECT ai.url AS src, NULL AS fallback, a.published_at AS t, 2 AS k, a.id AS i FROM albums a
+                               JOIN album_images ai ON ai.id = (SELECT id FROM album_images WHERE album_id = a.id ORDER BY sort, id LIMIT 1)
+                               WHERE a.creator_id = ? AND a.status = 1
+                               ORDER BY a.published_at DESC, a.id DESC LIMIT ${BANNER_SIZE})
+              ) ORDER BY t DESC, k, i DESC LIMIT ${BANNER_SIZE}`, id, id, id).map(r => toCover(r.src, r.fallback))
 }
 
 /** 主页「视频」：sort 0 最新（发布时间）/ 1 最热（播放量）；同值再按 id 定序，翻页不重复也不遗漏 */
@@ -1020,12 +1043,14 @@ export function creatorPosts(id, { limit = 20, offset = 0 } = {}) {
 }
 
 /*
- * 主页「媒体」：他发过的所有图拼成的照片墙 —— 已发布视频的封面 + 已发布帖子的图（主图和配图）。
+ * 主页「媒体」：他发过的所有图拼成的照片墙 —— 已发布视频的封面 + 已发布帖子的图（主图和配图）+ 已上架图集的每一张图。
  *   - 帖子的图只要真有图片地址的（只有生成占位图的不算）；文档帖的配图是文档页（media_type 2），不要；
  *   - 和他某条已发布视频的封面是同一张的帖子图不再单独出现（视频帖常拿视频封面当主图，墙上已经有那条视频了）；
- *   - 草稿 / 下架的视频和帖子都不算。
- * 两个参数都是创作者 id（视频、帖子各一个）。
- * 列：k 0 视频 / 1 帖子图，owner 视频或帖子的 id，role 0 主图 / 1 配图，so 配图顺序，mid post_media.id。
+ *   - 图集的图全部都算（后台单独上传的，不和视频封面去重）；
+ *   - 草稿 / 下架的视频、帖子、图集都不算。
+ * 三个参数都是创作者 id（视频、帖子、图集各一个）。
+ * 列：k 0 视频 / 1 帖子图 / 2 图集的图，owner 视频、帖子或图集的 id，role 0 主图 / 1 配图（图集为 0），
+ *     so 配图顺序 / 图在图集里的下标（0 起，按 sort、id 数），mid post_media.id / album_images.id。
  */
 const CREATOR_MEDIA = `
   SELECT 0 AS k, v.id AS owner, NULL AS mid, v.title AS title, v.cover_url AS src, v.cover_fallback AS fallback,
@@ -1037,20 +1062,92 @@ const CREATOR_MEDIA = `
     FROM posts p JOIN post_media m ON m.post_id = p.id
    WHERE p.creator_id = ? AND p.status = 1
      AND m.url IS NOT NULL AND m.media_type != 2 AND (m.role = 0 OR p.media_kind != 2)
-     AND NOT EXISTS (SELECT 1 FROM videos cv WHERE cv.creator_id = p.creator_id AND cv.status = 1 AND cv.cover_url = m.url)`
+     AND NOT EXISTS (SELECT 1 FROM videos cv WHERE cv.creator_id = p.creator_id AND cv.status = 1 AND cv.cover_url = m.url)
+  UNION ALL
+  SELECT 2, a.id, ai.id, a.title, ai.url, NULL, NULL, a.published_at, 0,
+         ROW_NUMBER() OVER (PARTITION BY ai.album_id ORDER BY ai.sort, ai.id) - 1
+    FROM albums a JOIN album_images ai ON ai.album_id = a.id
+   WHERE a.creator_id = ? AND a.status = 1`
 
 /*
- * 顺序：发布时间倒序；同一时间视频在前，再按视频 / 帖子 id 倒序；同一帖子里主图在前、配图按顺序。
- * 这是全序（最后落到 post_media.id），翻页不重复也不遗漏。
+ * 顺序：发布时间倒序；同一时间视频在前、帖子的图其次、图集的图最后，再按视频 / 帖子 / 图集 id 倒序；
+ * 同一帖子里主图在前、配图按顺序，同一图集按图的顺序。这是全序（最后落到 post_media.id / album_images.id），翻页不重复也不遗漏。
+ * 每格都带 postId / videoId / albumId / albumIndex（不是这一类的为 null），App 据此决定点开后去哪。
  */
 export function creatorMedia(id, { limit = 20, offset = 0 } = {}) {
-  const total = get(`SELECT COUNT(*) c FROM (${CREATOR_MEDIA})`, id, id).c
-  const rows = all(`SELECT * FROM (${CREATOR_MEDIA}) ORDER BY t DESC, k, owner DESC, role, so, mid LIMIT ? OFFSET ?`, id, id, limit, offset)
+  const total = get(`SELECT COUNT(*) c FROM (${CREATOR_MEDIA})`, id, id, id).c
+  const rows = all(`SELECT * FROM (${CREATOR_MEDIA}) ORDER BY t DESC, k, owner DESC, role, so, mid LIMIT ? OFFSET ?`, id, id, id, limit, offset)
+  const cell = (r, kind, extra) => ({
+    id: '', kind, cover: toCover(r.src, r.fallback), title: r.title,
+    postId: null, videoId: null, albumId: null, albumIndex: null, dur: null, publishedAt: r.t, ...extra
+  })
   return {
     total,
     list: rows.map(r => r.k === 0
-      ? { id: 'v' + r.owner, kind: 'video', cover: toCover(r.src, r.fallback), title: r.title, postId: null, videoId: r.owner, dur: r.len > 0 ? clock(r.len) : null, publishedAt: r.t }
-      : { id: 'i' + r.mid, kind: 'image', cover: toCover(r.src, r.fallback), title: r.title, postId: r.owner, videoId: null, dur: null, publishedAt: r.t })
+      ? cell(r, 'video', { id: 'v' + r.owner, videoId: r.owner, dur: r.len > 0 ? clock(r.len) : null })
+      : r.k === 1
+        ? cell(r, 'image', { id: 'i' + r.mid, postId: r.owner })
+        : cell(r, 'image', { id: 'a' + r.mid, albumId: r.owner, albumIndex: r.so }))
+  }
+}
+
+/* ---------------- 图集（创作者主页「图片」、图集详情） ---------------- */
+
+/** 前台能看到的图集：已上架，并且至少有一张图（创作者是否正常由调用方把关） */
+const ALBUM_LIVE = 'a.status = 1 AND EXISTS (SELECT 1 FROM album_images ai WHERE ai.album_id = a.id)'
+
+/** 图集里的一张图 → { url, width, height }（宽高 0 = 不知道，App 按默认比例占位） */
+const toAlbumImage = r => ({ url: r.url, width: r.width || 0, height: r.height || 0 })
+
+/**
+ * 主页「图片」：已上架的图集，新的在前（同一时间 id 大的在前，翻页不重复也不遗漏）。
+ * 每条 { id, title, cover: { url, width, height }, count, publishedAt, time }，cover 是第一张图，count 是图的张数。
+ */
+export function creatorAlbums(id, { limit = 20, offset = 0 } = {}) {
+  const total = get(`SELECT COUNT(*) c FROM albums a WHERE a.creator_id = ? AND ${ALBUM_LIVE}`, id).c
+  const rows = all(`SELECT a.id, a.title, a.published_at, ci.url, ci.width, ci.height,
+                           (SELECT COUNT(*) FROM album_images n WHERE n.album_id = a.id) AS n
+                    FROM albums a
+                    JOIN album_images ci ON ci.id = (SELECT id FROM album_images WHERE album_id = a.id ORDER BY sort, id LIMIT 1)
+                    WHERE a.creator_id = ? AND a.status = 1
+                    ORDER BY a.published_at DESC, a.id DESC LIMIT ? OFFSET ?`, id, limit, offset)
+  return {
+    total,
+    list: rows.map(r => ({
+      id: r.id, title: r.title, cover: toAlbumImage(r), count: r.n, publishedAt: r.published_at, time: relativeTime(r.published_at)
+    }))
+  }
+}
+
+/**
+ * 图集详情：只认已上架、至少有一张图、创作者正常的图集，否则返回 null。
+ * creator 和帖子详情的 author 同结构；following 是当前用户有没有关注他（未登录 false）。
+ */
+export function albumDetail(id, userId = null) {
+  const r = get(`SELECT a.*, c.name AS creator_name, c.handle AS creator_handle, c.is_verified AS creator_verified,
+                        c.avatar_url AS creator_avatar_url, c.avatar_fallback AS creator_avatar_fallback
+                 FROM albums a JOIN creators c ON c.id = a.creator_id AND c.status = 1
+                 WHERE a.id = ? AND a.status = 1`, id)
+  if (!r) return null
+  const images = all('SELECT url, width, height FROM album_images WHERE album_id = ? ORDER BY sort, id', id).map(toAlbumImage)
+  if (!images.length) return null
+  return {
+    id: r.id,
+    title: r.title,
+    description: r.description || '',
+    tags: parseTags(r.tags).map(t => String(t).replace(/^[#＃]+/, '')).filter(Boolean),
+    creator: {
+      id: r.creator_id,
+      name: r.creator_name,
+      handle: r.creator_handle,
+      verified: !!r.creator_verified,
+      avatar: toCover(r.creator_avatar_url, r.creator_avatar_fallback)
+    },
+    following: !!userId && isFollowing(userId, r.creator_id),
+    images,
+    count: images.length,
+    publishedAt: r.published_at,
+    time: relativeTime(r.published_at)
   }
 }
 

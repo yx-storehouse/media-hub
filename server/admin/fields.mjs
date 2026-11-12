@@ -9,6 +9,7 @@
  * 所有解析函数都接受字符串 / 数字 / 布尔，出错抛 InputError(message, field)。
  */
 import { InputError } from '../lib/errors.mjs'
+import { urlKey } from '../lib/urls.mjs'
 
 /* ---------------- 枚举 ---------------- */
 
@@ -17,6 +18,8 @@ export const CREATOR_STATUSES = [{ value: 1, label: '正常' }, { value: 0, labe
 export const POST_KINDS = [{ value: 1, label: '视频' }, { value: 0, label: '图文' }, { value: 2, label: '文档' }]
 export const TOPIC_KINDS = [{ value: 0, label: '普通' }, { value: 1, label: '首页分区' }, { value: 2, label: '片库分类' }]
 export const QUALITIES = [{ key: 'sd', label: '标清' }, { key: 'hd', label: '高清' }, { key: 'fhd', label: '超清' }]
+/* 图集只有上架 / 下架两种（值和视频 / 帖子的「已发布 1 / 已下架 2」一致，没有草稿） */
+export const ALBUM_STATUSES = [{ value: 1, label: '上架' }, { value: 2, label: '下架' }]
 
 /** 词 → 值 的查找表；词统一小写比较 */
 const wordTable = groups => {
@@ -29,6 +32,11 @@ export const STATUS_WORDS = wordTable([
   [1, ['1', '已发布', '发布', '上架', '已上架', 'published', 'publish', 'online']],
   [0, ['0', '草稿', 'draft', '未发布']],
   [2, ['2', '下架', '已下架', 'offline', 'hidden', '隐藏']]
+])
+/* 图集状态：草稿 / 0 也按下架处理（图集没有草稿，前台一样看不到） */
+export const ALBUM_STATUS_WORDS = wordTable([
+  [1, ['1', '上架', '已上架', '发布', '已发布', 'published', 'publish', 'online']],
+  [2, ['2', '下架', '已下架', 'offline', 'hidden', '隐藏', '0', '草稿', 'draft', '未发布']]
 ])
 export const CREATOR_STATUS_WORDS = wordTable([
   [1, ['1', '正常', '启用', 'enabled', 'active', 'normal']],
@@ -53,6 +61,7 @@ export const QUALITY_WORDS = wordTable([
 const labelOf = (list, value) => list.find(o => o.value === value)?.label ?? String(value)
 export const statusLabel = v => labelOf(STATUSES, v)
 export const creatorStatusLabel = v => labelOf(CREATOR_STATUSES, v)
+export const albumStatusLabel = v => labelOf(ALBUM_STATUSES, v)
 export const postKindLabel = v => labelOf(POST_KINDS, v)
 export const topicKindLabel = v => labelOf(TOPIC_KINDS, v)
 
@@ -278,6 +287,7 @@ export function toTags(v, field, { hash = false, label = '标签', maxCount = 20
   return out
 }
 
+// 后台图集编辑器 src/admin/pages/albums/rules.js 里有一份同样的检查（urlProblem），改这里要一起改
 /**
  * 地址：http(s):// 绝对地址，或以 / 开头的站内路径（如 /media/videos/a.mp4）。
  * javascript:、data:、不带 / 的相对路径一律拒绝。
@@ -303,6 +313,70 @@ export function toUrls(v, field, { label = '图片', max = 9 } = {}) {
   }
   if (out.length > max) bad(field, `${label}最多 ${max} 张`)
   return out
+}
+
+/* 图集最多这么多张图；宽高上限（像素），0 = 不知道 */
+export const ALBUM_IMAGES_MAX = 100
+const IMAGE_SIDE_MAX = 100000
+/* 图集的图片列表只按 | 和换行分隔（地址里可能有逗号、空格），导出也用换行 */
+const ALBUM_IMAGE_SEP = /[|｜\r\n]+/
+/*
+ * 一个地址里又冒出第二个地址：逗号 / 空格 / 顿号 / 分号后面紧跟 http(s):// 或 /media/
+ * （帖子「配图」列就是这么隔开的，容易照搬过来）。不拦的话会存成一张打不开的图。
+ * 地址本身带的逗号、空格（a,b.jpg、my photo.jpg）、查询串里的地址（?u=https://…）、外链路径里的 /media/ 都不受影响。
+ */
+// src/admin/pages/albums/rules.js 的 urlProblem 里有同样的 SECOND_URL，改这里要一起改
+const SECOND_URL = /[\s,，;；、](?:https?:\/\/|\/media\/)/i
+
+/**
+ * 图集的图片：按顺序的 [{ url, width, height }]，第一张是封面。接受
+ *   - 字符串：一个或多个地址，用 | 或换行隔开（导入的「图片」列）
+ *   - 数组：每项是地址字符串，或 { url, width, height }（宽高可省略 / 为 0 = 不知道）
+ * 同一个文件只留第一次出现的写法（编码 / 未编码、带 ?v= 的算同一个，规则同 lib/urls.mjs）；至少 1 张、最多 max 张。
+ * 一个地址里夹着第二个地址（用逗号、空格隔开的）报错，提示改用 | 或换行。
+ */
+export function toAlbumImages(v, field, { label = '图片', max = ALBUM_IMAGES_MAX } = {}) {
+  if (v !== null && typeof v === 'object' && !Array.isArray(v)) bad(field, `${label}格式不正确`)
+  const out = [], seen = new Set()
+  let n = 0
+  const urlOf = raw => {
+    n++
+    const url = toUrl(raw, field, `第 ${n} 张${label}`)
+    if (SECOND_URL.test(url)) bad(field, `多张${label}请用 | 或换行隔开（第 ${n} 张里有多个地址）`)
+    return url
+  }
+  const add = (url, width = 0, height = 0) => {
+    const key = urlKey(url)
+    if (seen.has(key)) return
+    seen.add(key)
+    out.push({ url, width, height })
+  }
+  const side = (x, name) => (x === undefined || x === null || x === '' ? 0 : toInt(x, field, `第 ${n} 张${label}${name}`, { min: 0, max: IMAGE_SIDE_MAX }))
+  for (const it of Array.isArray(v) ? v : [v]) {
+    if (it === null || it === undefined) continue
+    if (typeof it === 'object') {
+      if (Array.isArray(it)) bad(field, `第 ${n + 1} 张${label}格式不正确`)
+      // 先取地址（n 加一），宽高报错时也写明是第几张
+      const url = urlOf(it.url)
+      const w = side(it.width, '宽度'), h = side(it.height, '高度')
+      // 宽高只给了一个等于不知道
+      add(url, w && h ? w : 0, w && h ? h : 0)
+      continue
+    }
+    scalar(it, field, label)
+    for (const part of String(it).split(ALBUM_IMAGE_SEP)) {
+      const s = part.trim()
+      if (s) add(urlOf(s))
+    }
+  }
+  if (!out.length) bad(field, `至少要有一张${label}`)
+  if (out.length > max) bad(field, `${label}最多 ${max} 张`)
+  return out
+}
+
+/** 图集「图片」单元格里的第一个地址（导入按它查重）；写得不对返回 null，交给新建时的校验报错 */
+export function firstAlbumImageUrl(v) {
+  try { return toAlbumImages(v, 'images')[0].url } catch { return null }
 }
 
 /** 枚举：按查找表认值或标签（不区分大小写） */
@@ -406,6 +480,22 @@ export const SCHEMAS = {
       f('weight', '权重', 'int', ['weight', '热度', '分值'], { example: '100', help: '越大越靠前' }),
       f('sortOrder', '排序', 'int', ['sort', 'sortorder', 'sort_order', '顺序', '序号'], { example: '0', help: '权重相同时按它排，越小越靠前' })
     ]
+  },
+  albums: {
+    type: 'albums', label: '图集', keyFields: ['id', 'images'],
+    fields: [
+      f('id', 'ID', 'id', ['id', '图集id'], { help: '已有图集的 ID：填了就更新这个图集（不存在会报错）；新增留空' }),
+      f('title', '标题', 'text', ['title', '图集标题', '名称', 'name'], { example: '雨后的老街', help: '最多 200 字；单张图片可以留空' }),
+      f('creator', '创作者', 'ref', ['creator', 'creatorid', 'creator_id', '作者', '发布者', 'up主', 'author'], { required: true, example: '@trip', help: '必填：创作者 ID、账号（可带 @）或名称；不存在时可自动创建' }),
+      f('images', '图片', 'images', ['images', 'image', 'imgs', 'photos', 'photo', 'pictures', '图片地址', '多图', '图'], {
+        required: true, example: '/media/images/albums/a1.jpg|/media/images/albums/a2.jpg',
+        help: `一张或多张图片地址（http(s):// 或 /media/ 开头），按顺序用 | 或换行隔开，第一张是封面；最多 ${ALBUM_IMAGES_MAX} 张。也用于判断是否重复（第一张图相同算同一个图集）`
+      }),
+      f('description', '简介', 'longtext', ['description', 'desc', '描述', '介绍', '说明', '图集简介'], { example: '下了一夜的雨', help: '最多 5000 字，可以换行' }),
+      f('tags', '标签', 'tags', ['tags', 'tag', '话题', '关键词'], { example: '街拍,雨天', help: '多个用逗号或分号隔开，不需要写 #；最多 20 个' }),
+      f('status', '状态', 'enum', ['status', '上架状态', '发布状态'], { example: '上架', help: '上架 / 下架（或 1 / 2）；留空用导入选项里的默认状态（草稿按下架）', options: ALBUM_STATUSES.map(o => ({ value: o.value, label: o.label })) }),
+      f('publishedAt', '发布时间', 'datetime', ['publishedat', 'published_at', '发布日期', '上架时间', '日期', 'date'], { example: '2026-10-10 14:30', help: TIME_HELP })
+    ]
   }
 }
 
@@ -437,7 +527,8 @@ export function buildSchema(dyn) {
 export const IMPORT_TO_API = {
   videos: { topic: 'topicId', creator: 'creatorId', category: 'categoryKey', duration: 'durationSec' },
   posts: { creator: 'creatorId', kind: 'mediaKind', video: 'videoId' },
-  topics: {}, creators: {}, keywords: {}
+  topics: {}, creators: {}, keywords: {},
+  albums: { creator: 'creatorId' }
 }
 export const apiToImportKey = (type, apiKey) => {
   const m = IMPORT_TO_API[type]

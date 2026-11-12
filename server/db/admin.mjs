@@ -70,7 +70,8 @@ const COLUMNS = {
   topics: ['slug', 'name', 'description', 'kind', 'is_featured', 'sort_order', 'card_size', 'plays_count', 'status', 'created_at'],
   creators: ['handle', 'name', 'avatar_url', 'avatar_fallback', 'is_verified', 'is_official', 'bio', 'status', 'created_at'],
   search_keywords: ['word', 'is_hot', 'is_banned', 'weight', 'sort_order', 'updated_at'],
-  home_sections: ['topic_id', 'title', 'subtitle', 'is_featured', 'card_size', 'sort_order', 'status', 'updated_at']
+  home_sections: ['topic_id', 'title', 'subtitle', 'is_featured', 'card_size', 'sort_order', 'status', 'updated_at'],
+  albums: ['creator_id', 'title', 'description', 'tags', 'status', 'published_at', 'created_at', 'updated_at']
 }
 
 function checkCols(table, cols) {
@@ -99,7 +100,7 @@ export function setColumn(table, ids, col, value) {
   return run(`UPDATE ${table} SET ${col} = ? WHERE id IN ${IN}`, value, json(ids)).changes
 }
 
-const DELETABLE = ['videos', 'posts', 'topics', 'creators', 'search_keywords', 'home_sections']
+const DELETABLE = ['videos', 'posts', 'topics', 'creators', 'search_keywords', 'home_sections', 'albums']
 export function deleteRows(table, ids) {
   if (!DELETABLE.includes(table)) throw new Error('不允许删除 ' + table)
   return run(`DELETE FROM ${table} WHERE id IN ${IN}`, json(ids)).changes
@@ -138,6 +139,7 @@ export function stats() {
   const total = [...byStatus.values()].reduce((a, b) => a + b, 0)
   const missing = col => get(`SELECT COUNT(*) c FROM videos WHERE ${col} IS NULL OR ${col} = ''`).c
   const p = get('SELECT COUNT(*) total, COALESCE(SUM(status = 1), 0) published, COALESCE(SUM(is_hot = 1), 0) hot FROM posts')
+  const a = get('SELECT COUNT(*) total, COALESCE(SUM(status = 1), 0) published, COALESCE(SUM(status = 2), 0) offline FROM albums')
   const count = t => get(`SELECT COUNT(*) c FROM ${t}`).c
   return {
     videos: {
@@ -147,13 +149,15 @@ export function stats() {
       short: count('short_clips')
     },
     posts: { total: p.total, published: p.published, hot: p.hot },
+    albums: { total: a.total, published: a.published, offline: a.offline, images: count('album_images') },
     topics: { total: count('topics') },
     creators: { total: count('creators') },
     sections: { total: count('home_sections') },
     keywords: { total: count('search_keywords') },
     users: { total: count('users'), admins: get("SELECT COUNT(*) c FROM users WHERE role = 'admin'").c },
     recentVideos: all(`${VIDEO_SELECT} ORDER BY v.created_at DESC, v.id DESC LIMIT 8`).map(toAdminVideo),
-    recentPosts: withPostMedia(all(`${POST_SELECT} ORDER BY p.created_at DESC, p.id DESC LIMIT 5`)).map(toAdminPost)
+    recentPosts: withPostMedia(all(`${POST_SELECT} ORDER BY p.created_at DESC, p.id DESC LIMIT 5`)).map(toAdminPost),
+    recentAlbums: withAlbumImages(all(`${ALBUM_SELECT} ORDER BY a.created_at DESC, a.id DESC LIMIT 5`)).map(toAdminAlbum)
   }
 }
 
@@ -475,7 +479,8 @@ export function reorderTopics(ids) {
 const CREATOR_SELECT = `
   SELECT c.id, c.handle, c.name, c.avatar_url, c.bio, c.is_verified, c.is_official, c.follower_count, c.status, c.created_at,
          (SELECT COUNT(*) FROM videos v WHERE v.creator_id = c.id) AS video_count,
-         (SELECT COUNT(*) FROM posts p WHERE p.creator_id = c.id) AS post_count
+         (SELECT COUNT(*) FROM posts p WHERE p.creator_id = c.id) AS post_count,
+         (SELECT COUNT(*) FROM albums a WHERE a.creator_id = c.id) AS album_count
   FROM creators c`
 
 export function toAdminCreator(r) {
@@ -483,11 +488,11 @@ export function toAdminCreator(r) {
   return {
     id: r.id, handle: r.handle, name: r.name, avatarUrl: r.avatar_url, bio: r.bio, isVerified: !!r.is_verified,
     isOfficial: !!r.is_official, followerCount: r.follower_count, status: r.status,
-    videoCount: r.video_count, postCount: r.post_count, createdAt: r.created_at
+    videoCount: r.video_count, postCount: r.post_count, albumCount: r.album_count ?? 0, createdAt: r.created_at
   }
 }
 
-const CREATOR_SORT = { id: 'c.id', name: 'c.name', followerCount: 'c.follower_count', videoCount: 'video_count' }
+const CREATOR_SORT = { id: 'c.id', name: 'c.name', followerCount: 'c.follower_count', videoCount: 'video_count', albumCount: 'album_count' }
 const CREATOR_SORT_DEF = { key: 'id', order: { name: 'asc' } }
 
 function creatorWhere(f) {
@@ -525,9 +530,10 @@ export const creatorIdByName = name => get('SELECT id FROM creators WHERE name =
 export const handleTaken = (handle, exceptId = 0) => !!get('SELECT 1 x FROM creators WHERE handle = ? AND id != ?', handle, exceptId)
 export const setCreatorAvatarFallback = (id, fallback) => run('UPDATE creators SET avatar_fallback = ? WHERE id = ?', fallback, id)
 
-/** 删创作者前统计：帖子级联删除，视频变成「无创作者」 */
+/** 删创作者前统计：帖子、图集级联删除，视频变成「无创作者」 */
 export const creatorsDeleteImpact = ids => ({
   posts: get(`SELECT COUNT(*) c FROM posts WHERE creator_id IN ${IN}`, json(ids)).c,
+  albums: get(`SELECT COUNT(*) c FROM albums WHERE creator_id IN ${IN}`, json(ids)).c,
   videos: get(`SELECT COUNT(*) c FROM videos WHERE creator_id IN ${IN}`, json(ids)).c
 })
 
@@ -642,6 +648,114 @@ export const keywordIdByWord = word => get('SELECT id FROM search_keywords WHERE
 export const nextKeywordSort = () => get('SELECT COALESCE(MAX(sort_order), -1) + 1 n FROM search_keywords').n
 export const touchKeywords = ids => run(`UPDATE search_keywords SET updated_at = ? WHERE id IN ${IN}`, now(), json(ids))
 
+/* ---------------- 图集 ---------------- */
+
+const ALBUM_SELECT = `
+  SELECT a.id, a.creator_id, c.name AS creator_name, c.handle AS creator_handle, a.title, a.description, a.tags,
+         a.image_count, a.view_count, a.status, a.published_at, a.created_at, a.updated_at
+  FROM albums a
+  LEFT JOIN creators c ON c.id = a.creator_id`
+
+/** 给一批图集行挂上全部图片（一次查询），按图集里的顺序 */
+function withAlbumImages(rows) {
+  if (!rows.length) return rows
+  const byAlbum = new Map()
+  for (const m of all(`SELECT album_id, url, width, height FROM album_images WHERE album_id IN ${IN}
+                       ORDER BY album_id, sort, id`, json(rows.map(r => r.id)))) {
+    if (!byAlbum.has(m.album_id)) byAlbum.set(m.album_id, [])
+    byAlbum.get(m.album_id).push({ url: m.url, width: m.width, height: m.height })
+  }
+  for (const r of rows) r.images = byAlbum.get(r.id) ?? []
+  return rows
+}
+
+export function toAdminAlbum(r) {
+  if (!r) return null
+  const images = r.images ?? []
+  return {
+    id: r.id, title: r.title, description: r.description, tags: parseTags(r.tags),
+    creatorId: r.creator_id, creatorName: r.creator_name ?? null, creatorHandle: r.creator_handle ?? null,
+    cover: images[0] ?? null, images, imageCount: r.image_count, viewCount: r.view_count,
+    status: r.status, publishedAt: r.published_at, createdAt: r.created_at, updatedAt: r.updated_at
+  }
+}
+
+const ALBUM_SORT = {
+  publishedAt: 'a.published_at', createdAt: 'a.created_at', updatedAt: 'a.updated_at', imageCount: 'a.image_count',
+  viewCount: 'a.view_count', title: 'a.title', id: 'a.id'
+}
+const ALBUM_SORT_DEF = { key: 'publishedAt', order: { title: 'asc' } }
+
+function albumWhere(f) {
+  const w = [], a = []
+  if (f.q) {
+    const like = likeArg(f.q)
+    // 标题 / 简介 / 标签都搜
+    let c = `a.title ${LIKE} OR a.description ${LIKE} OR a.tags ${LIKE}`
+    a.push(like, like, like)
+    if (/^\d+$/.test(f.q)) { c += ' OR a.id = ?'; a.push(Number(f.q)) }
+    w.push(`(${c})`)
+  }
+  if (f.status !== undefined) { w.push('a.status = ?'); a.push(f.status) }
+  if (f.creatorId !== undefined) { w.push('a.creator_id = ?'); a.push(f.creatorId) }
+  return { where: w.length ? 'WHERE ' + w.join(' AND ') : '', args: a }
+}
+
+export function listAlbums(f, { sort, order, limit, offset }) {
+  const { where, args } = albumWhere(f)
+  const total = get(`SELECT COUNT(*) c FROM albums a ${where}`, ...args).c
+  const ob = orderBy(ALBUM_SORT, sort, order, ALBUM_SORT_DEF)
+  const rows = all(`${ALBUM_SELECT} ${where} ORDER BY ${ob}, a.id ${ob.endsWith('ASC') ? 'ASC' : 'DESC'} LIMIT ? OFFSET ?`,
+    ...args, limit, offset)
+  return { total, list: withAlbumImages(rows).map(toAdminAlbum) }
+}
+
+export function exportAlbums(f, { sort, order, limit }) {
+  const { where, args } = albumWhere(f)
+  const ob = orderBy(ALBUM_SORT, sort, order, ALBUM_SORT_DEF)
+  return withAlbumImages(all(`${ALBUM_SELECT} ${where} ORDER BY ${ob}, a.id DESC LIMIT ?`, ...args, limit))
+}
+
+export const getAlbum = id => {
+  const r = get(`${ALBUM_SELECT} WHERE a.id = ?`, id)
+  return r ? toAdminAlbum(withAlbumImages([r])[0]) : null
+}
+export const albumRow = id => get('SELECT * FROM albums WHERE id = ?', id)
+/** 图集现在的图片 [{ url, width, height }]，按顺序 */
+export const albumImages = id => all('SELECT url, width, height FROM album_images WHERE album_id = ? ORDER BY sort, id', id)
+export const albumTags = ids => all(`SELECT id, tags FROM albums WHERE id IN ${IN}`, json(ids))
+export const setAlbumTags = (id, tags) => run('UPDATE albums SET tags = ?, updated_at = ? WHERE id = ?', json(tags), now(), id).changes
+
+/** 整体替换图集的图片（sort = 下标，0 是封面），并同步 image_count */
+export function replaceAlbumImages(albumId, images) {
+  const t = now()
+  run('DELETE FROM album_images WHERE album_id = ?', albumId)
+  images.forEach((m, k) => run('INSERT INTO album_images(album_id, url, width, height, sort, created_at) VALUES(?,?,?,?,?,?)',
+    albumId, m.url, m.width || 0, m.height || 0, k, t))
+  run('UPDATE albums SET image_count = ? WHERE id = ?', images.length, albumId)
+}
+
+/**
+ * 批量改一列（状态 / 创作者）：真的变了的行顺便更新 updated_at；affected 和其他类型一样按选中且存在的行数算
+ */
+export function setAlbumColumn(ids, col, value) {
+  checkCols('albums', { [col]: value })
+  run(`UPDATE albums SET updated_at = ? WHERE id IN ${IN} AND ${col} IS NOT ?`, now(), json(ids), value)
+  return run(`UPDATE albums SET ${col} = ? WHERE id IN ${IN}`, value, json(ids)).changes
+}
+
+/**
+ * 第一张图（封面）指向这个文件的图集 id（编码 / 未编码、站内地址带 ?v= 都算同一个文件），取 id 最小的；
+ * 导入没填 ID 时按它判断「已存在」。
+ */
+export function albumIdByCoverUrl(url) {
+  const key = urlKey(url)
+  if (!key) return null
+  // 先按索引找出用到这个文件的图集（超集），再逐个确认它的第一张图就是这个文件
+  const ids = [...new Set(albumsByUrlSpellings(urlSpellings(url)).filter(r => urlKey(r.url) === key).map(r => r.id))]
+  return ids.find(id => urlKey(get('SELECT url FROM album_images WHERE album_id = ? ORDER BY sort, id LIMIT 1', id)?.url) === key) ?? null
+}
+
 /* ---------------- 按地址找视频（导入查重 / 扫描已导入 / 素材引用数） ---------------- */
 
 /**
@@ -659,6 +773,17 @@ export function videosByUrlSpellings(spellings, { playback = true, cover = false
   if (cover) { sql.push(part('cover_url', 'cover')); args.push(json(spellings)) }
   if (!sql.length) return []
   return all(`${sql.join(' UNION ALL ')} ORDER BY 1`, ...args)
+}
+
+/**
+ * 图片地址以这些写法之一开头的图集图片：{ id: 图集 id, url }，按图集 id 升序（规则同 videosByUrlSpellings，走 idx_album_images_url）。
+ * 结果是超集，调用方再用 urlKey() 精确比对。素材「被 N 个图集使用」、导入按第一张图查重用。
+ */
+export function albumsByUrlSpellings(spellings) {
+  if (!spellings.length) return []
+  return all(`SELECT i.album_id AS id, i.url FROM json_each(?) j
+              CROSS JOIN album_images i ON i.url >= j.value AND i.url < j.value || '@'
+              ORDER BY 1`, json(spellings))
 }
 
 /**

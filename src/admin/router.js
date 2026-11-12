@@ -10,6 +10,7 @@ const routes = [
   { path: '/', name: 'dashboard', component: () => import('./pages/DashboardPage.vue'), meta: { title: '概览' } },
   { path: '/videos', name: 'videos', component: () => import('./pages/VideosPage.vue'), meta: { title: '视频' } },
   { path: '/posts', name: 'posts', component: () => import('./pages/PostsPage.vue'), meta: { title: '帖子' } },
+  { path: '/albums', name: 'albums', component: () => import('./pages/AlbumsPage.vue'), meta: { title: '图片' } },
   { path: '/topics', name: 'topics', component: () => import('./pages/TopicsPage.vue'), meta: { title: '专题' } },
   { path: '/creators', name: 'creators', component: () => import('./pages/CreatorsPage.vue'), meta: { title: '创作者' } },
   { path: '/sections', name: 'sections', component: () => import('./pages/SectionsPage.vue'), meta: { title: '首页推荐' } },

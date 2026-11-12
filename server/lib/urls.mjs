@@ -22,6 +22,7 @@ function splitUrl(url) {
 /** 路径逐段解码（解不开的段原样保留） */
 const decodePath = path => path.split('/').map(decodeSeg).join('/')
 
+// src/admin/pages/albums/rules.js 有同样的 urlKey（图集编辑器判断重复），改这里要一起改
 /**
  * 比较用的键：路径部分逐段解码。
  * 站内 /media/ 地址再去掉 ?查询串 和 #片段（?v=123 这类缓存参数指的还是同一个文件）；

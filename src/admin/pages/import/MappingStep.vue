@@ -128,7 +128,10 @@ const DUP = [
   { value: 'update', label: '更新已有', text: '用表里的值覆盖；空单元格不改' },
   { value: 'error', label: '报错', text: '已存在的行标为错误' }
 ]
-const STATUS = [{ value: 1, label: '已发布' }, { value: 0, label: '草稿' }]
+/* 默认状态的选项：视频 / 帖子 / 专题是「已发布 / 草稿」，图集是「上架 / 下架」（types.js 里的 statuses） */
+const STATUS_DEFAULT = [{ value: 1, label: '已发布' }, { value: 0, label: '草稿' }]
+const STATUS = computed(() => store.info.value.statuses || STATUS_DEFAULT)
+const statusNote = computed(() => store.info.value.statusNote || '新增的行「状态」为空时用这个；草稿不会出现在前台')
 
 function next() {
   if (blocked.value) { toast(blocked.value, { type: 'error' }); return }
@@ -249,7 +252,7 @@ function next() {
                 <b>{{ s.label }}</b>
               </button>
             </div>
-            <p class="dim small note">新增的行「状态」为空时用这个；草稿不会出现在前台</p>
+            <p class="dim small note">{{ statusNote }}</p>
           </div>
         </div>
 

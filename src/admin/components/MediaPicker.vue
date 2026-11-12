@@ -157,7 +157,7 @@ const acceptLabel = computed(() => ({ image: '图片', video: '视频', any: '�
               <Thumb v-if="e.type === 'image'" :src="e.url" :ratio="4 / 3" width="100%" />
               <span v-else class="ph" :class="e.type"><AIcon :name="iconOf(e)" :size="26" :stroke="1.3" /></span>
               <span class="name ellipsis">{{ e.name }}</span>
-              <span class="meta">{{ e.type === 'dir' ? '文件夹' : fmtSize(e.size) }}<template v-if="e.usedBy"> · 已用 {{ e.usedBy }}</template></span>
+              <span class="meta">{{ e.type === 'dir' ? '文件夹' : fmtSize(e.size) }}<template v-if="e.usedBy || e.usedByAlbums"> · 已用 {{ (e.usedBy || 0) + (e.usedByAlbums || 0) }}</template></span>
             </button>
           </li>
         </ul>

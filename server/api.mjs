@@ -238,21 +238,27 @@ export function toggleFollow(creatorId, userId, on) {
 
 /* ---------------- 创作者主页 ---------------- */
 
-/** 路径里的创作者 id 只认正整数；其他写法（演示数据的账号、超大数字）一律当作不存在，不会 500 */
-function creatorIdOf(raw) {
+/** 路径里的创作者 / 图集 id 只认正整数；其他写法（演示数据的账号、超大数字）一律当作不存在，不会 500 */
+function pathIdOf(raw) {
   const id = /^\d{1,16}$/.test(String(raw)) ? Number(raw) : 0
   return Number.isSafeInteger(id) && id > 0 ? id : null
 }
+const creatorIdOf = pathIdOf
 function requireCreator(raw) {
   const id = creatorIdOf(raw)
   if (!id || !q.creatorActive(id)) inputError('创作者不存在')
   return id
 }
-/** 列表分页：limit 1-50（默认 20），offset 不小于 0 */
-const pageOf = ({ limit, offset } = {}) => ({
-  limit: Math.min(Math.max(Math.floor(Number(limit)) || 20, 1), 50),
-  offset: Math.max(Math.floor(Number(offset)) || 0, 0)
-})
+/* offset 上限：再大也只是翻不到数据；不封顶的话 1e20、Infinity 超出 SQLite 整数范围会报错（500） */
+const MAX_OFFSET = 1e9
+/** 列表分页：limit 1-50（默认 20），offset 0 ~ MAX_OFFSET（不是数字、负数按 0） */
+const pageOf = ({ limit, offset } = {}) => {
+  const o = Math.floor(Number(offset))
+  return {
+    limit: Math.min(Math.max(Math.floor(Number(limit)) || 20, 1), 50),
+    offset: o > 0 ? Math.min(o, MAX_OFFSET) : 0
+  }
+}
 
 /** 主页头部（公开）；登录时回填 following。不存在或已停用：400「创作者不存在」 */
 export function getCreator(rawId, userId = null) {
@@ -278,11 +284,30 @@ export function getCreatorPosts(rawId, opts = {}, userId = null) {
 }
 
 /**
- * 主页「媒体」：已发布视频的封面 + 已发布帖子的图，新的在前（规则见 db/index.mjs 的 creatorMedia）
- * → { total, list: [{ id, kind: 'image' | 'video', cover, title, postId, videoId, dur, publishedAt }] }
+ * 主页「媒体」：已发布视频的封面 + 已发布帖子的图 + 已上架图集的图，新的在前（规则见 db/index.mjs 的 creatorMedia）
+ * → { total, list: [{ id, kind: 'image' | 'video', cover, title, postId, videoId, albumId, albumIndex, dur, publishedAt }] }
  */
 export function getCreatorMedia(rawId, opts = {}) {
   return Promise.resolve(q.creatorMedia(requireCreator(rawId), pageOf(opts)))
+}
+
+/**
+ * 主页「图片」：已上架的图集，新的在前
+ * → { total, list: [{ id, title, cover: { url, width, height }, count, publishedAt, time }] }
+ */
+export function getCreatorAlbums(rawId, opts = {}) {
+  return Promise.resolve(q.creatorAlbums(requireCreator(rawId), pageOf(opts)))
+}
+
+/**
+ * 图集详情（公开）；登录时回填 following。
+ * 不存在、已下架、一张图都没有、创作者已停用，或 id 不是正整数：400「图集不存在或已下架」（不会 500）
+ */
+export function getAlbum(rawId, userId = null) {
+  const id = pathIdOf(rawId)
+  const a = id ? q.albumDetail(id, userId) : null
+  if (!a) inputError('图集不存在或已下架')
+  return Promise.resolve(a)
 }
 
 /* ---------------- 直播 / 同城 ---------------- */

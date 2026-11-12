@@ -18,9 +18,16 @@ src/admin/
   components/   组件库（见下）
   composables/  useListPage / useEditor / useBatch / useExport / useMeta / useSchema /
                 useLeaveGuard / useUploader / useVideoProbe / useReorder
-  utils/        csv.js / xlsx.js（手写的 .xlsx 读取） / format.js / download.js / probe.js / roving.js
+  utils/        csv.js / xlsx.js（手写的 .xlsx 读取） / format.js / download.js / probe.js / image.js / roving.js
   pages/        页面；KeywordsPage.vue 是列表页的参考实现
 ```
+
+侧边栏「图片」（`#/albums`，`pages/AlbumsPage.vue`）管理的是**图集**：前台创作者主页「图片」里的内容，一个图集 = 标题（单张可不写）+ 简介 + 标签 +
+创作者 + 1~100 张有顺序的图（第一张是封面）+ 上架 / 下架。图片列表编辑器在 `pages/albums/AlbumImages.vue`（上传 / 素材库 / 粘贴地址、
+拖动排序、设为封面、读宽高）；服务端不收的东西在它里面先挡下 / 先改好，规则在 `pages/albums/rules.js`（粘贴的地址按服务端
+`toUrl` 的规则检查；上传的文件名按服务端的规则改写：连续的点、Windows 保留名、超过 200 字节、没有扩展名，不支持的格式直接跳过），
+改服务端的这两条规则时要一起改。上传失败的格子上直接写服务端给的原因，断网 / 5xx 可以「重试」，其他 4xx 只能「移除」。
+素材文件页可以把一个文件夹「建成图集」（`pages/media/AlbumFromFolder.vue`）。
 
 ## 约定
 
@@ -35,8 +42,8 @@ src/admin/
 
 ### 界面统一写法
 
-- 页头主按钮「新建<实体>」（新建视频 / 新建帖子 / 新建专题 / 新建创作者 / 新建热词 / 新建账号 / 新建分区）；
-  抽屉底部主按钮新建时「创建」、编辑时「保存」；批量状态操作叫「上架 / 下架 / 设为草稿 / 删除」。
+- 页头主按钮「新建<实体>」（新建视频 / 新建帖子 / 新建图集 / 新建专题 / 新建创作者 / 新建热词 / 新建账号 / 新建分区）；
+  抽屉底部主按钮新建时「创建」、编辑时「保存」；批量状态操作叫「上架 / 下架 / 设为草稿 / 删除」（图集没有草稿）。
 - 「在前台查看」= 打开移动端里的这一条（新标签页，带 `external` 图标）；「打开前台」只用于侧边栏；原始文件用「在新标签页打开」。
   后台内部的路由跳转不用 `external` 图标（用 `chevron-right` 或该实体的图标）。
 - 筛选栏的重置链接、空状态里的按钮都叫「清除筛选」。
@@ -90,7 +97,7 @@ src/admin/
 | `UrlListInput` | `v-model`（字符串数组）、`max`=9、`uploadDir`='images'、`addText` | 每行：缩略图、上传、素材库、上下移、删除；删掉上传中的行 / 组件卸载会取消上传 |
 | `MediaUrlInput` | `v-model`（字符串或 null）、`kind`=image/video、`uploadDir`（默认 covers / videos） | `@uploaded({ path, url, size, file })`；上传可取消，卸载时自动取消 |
 | `Thumb` | `src`、`ratio`=16/10、`width`、`round`、`icon`、`fit` | 只加载 `http(s)://`、站内 `/…`、`blob:` 地址，其他（ftp://、C:\…）和加载失败都显示占位；被覆盖上传过的地址自动加版本号刷新 |
-| `StatusBadge` | `status`、`kind`=content/creator、`label` | content：1 已发布 / 0 草稿 / 2 已下架；creator：1 正常 / 0 停用 |
+| `StatusBadge` | `status`、`kind`=content/creator/album、`label` | content：1 已发布 / 0 草稿 / 2 已下架；creator：1 正常 / 0 停用；album：1 上架 / 2 下架 |
 | `SearchBox` | `v-model`（防抖 300ms）、`placeholder`、`width`=240、`delay`、`autoKey`（按 / 聚焦） | `@search` |
 | `VideoPicker` | `v-model:open`、`multiple`、`excludeIds`、`title` | `@select([{ id, publicId, title, coverUrl, status, durationSec, topicName }])` |
 | `MediaPicker` | `v-model:open`、`accept`=image/video/any、`startDir` | `@select({ path, url, entry })`；连续点文件夹只认最后一次；关闭 = 取消上传 |
@@ -181,14 +188,14 @@ const r = useReorder(() => rows.value, { onReset: had => had && toast('列表已
 //       表格：容器上 @dragover="r.drag.over" @drop="r.drag.drop"（按鼠标下的 <tr> 算落点），rowClass: row => r.drag.itemClass(r.indexOf(row))
 ```
 
-数据由调用方自己管、只要拖动交互时用 `useDragSort({ axis, onMove(from, to) })`（返回 `{ dragIndex, dropAt, dragging, start, over, drop, end, leave, itemClass }`）。
+数据由调用方自己管、只要拖动交互时用 `useDragSort({ axis, onMove(from, to) })`（例：图集的图片网格 `pages/albums/AlbumImages.vue`）（返回 `{ dragIndex, dropAt, dragging, start, over, drop, end, leave, itemClass }`）。
 `itemClass(i)` → `{ dragging, 'drop-before', 'drop-after' }`，样式由页面写。
 
 ### 其他
 
 - `useBatch(batchFn, { selected, reload, clearSelection })` → `{ busy, run(action, value, { confirm, done, keepSelection }) }`
 - `useExport(type, () => params())` → `{ busy, run() }`，导出 `<类型名>-YYYYMMDD-HHmm.csv`，表头 = 字段中文名（可直接再导入）。也可直接用 `exportToCSV(type, query)`。
-- `useMeta()` → `meta`、`topicOptions / creatorOptions / categoryOptions / regionOptions / qualityOptions / statusOptions / postKindOptions / topicKindOptions / enableOptions`、
+- `useMeta()` → `meta`、`topicOptions / creatorOptions / categoryOptions / regionOptions / qualityOptions / statusOptions / postKindOptions / topicKindOptions / albumStatusOptions / enableOptions`、
   `labelOf(listName, value)`、`refreshMeta()`（改了专题 / 创作者后调用）。加载失败时 App 顶部出现带「重试」的提示条（`metaStatus`），
   之后再调用 `useMeta()` 也会自动重试（间隔至少 5 秒）。
 - `useSchema()` → `schema`、`loadSchema()`、`fieldsOf(type)`、`labelOf(type, key)`。
@@ -200,6 +207,8 @@ const r = useReorder(() => rows.value, { onReset: had => had && toast('列表已
 - `format.js`：`fmtDate / fmtShortDate / fmtDay / fmtDuration / parseDuration / fmtSize / fmtCount / fmtNum / relTime / fileStamp`。
 - `download.js`：`downloadText / downloadBlob / downloadCSV`。
 - `probe.js`：`probeVideo(url, { at, maxWidth, timeout, signal })` → `{ durationSec, blob }`（浏览器里读时长、截封面；页面请用 `useVideoProbe`）。
+- `image.js`：`imageSize(urlOrFile, { timeout, signal })` → `{ width, height }` 或 `null`（浏览器里读图片的 naturalWidth / naturalHeight，
+  按 EXIF 方向转正；读不到不抛错）；`rememberImageSize(url, size)` 记下已知尺寸。图集保存前补宽高、列表批量「读取尺寸」都用它。
 - `roving.js`：单选组 / 标签页的键盘操作，普通 `<button>` 就能用：
 
 ```html

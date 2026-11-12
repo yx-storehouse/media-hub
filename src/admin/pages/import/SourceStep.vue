@@ -358,7 +358,11 @@ const optionText = f => {
 <style scoped>
 .step1 { display: flex; flex-direction: column; gap: 16px; }
 .card-hd { font-size: 13.5px; }
-.types { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; }
+/* 六种数据：一排三个，两排排满（auto-fill 时 1280 宽会剩下一个单独占一排） */
+.types { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+@media (max-width: 860px) {
+  .types { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 .type { position: relative; display: flex; align-items: flex-start; gap: 10px; min-height: 66px; padding: 12px; border: 1px solid var(--line-2); border-radius: 8px; background: var(--panel-2); text-align: left; transition: border-color .12s, background .12s; }
 .type:hover { border-color: #4a4a4a; background: var(--hover); }
 .type.on { border-color: var(--accent); background: #1d1d1d; box-shadow: inset 0 0 0 1px var(--accent); }

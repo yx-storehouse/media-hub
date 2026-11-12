@@ -286,6 +286,7 @@ await t('meta：下拉选项', async () => {
   must(d.topics.length === 11 && d.creators.length === 12, `专题 ${d.topics.length} / 创作者 ${d.creators.length}`)
   must(d.categories.map(c => c.key).join(',') === 'ai,cn,jk,anime,show,doc', '分类：' + d.categories.map(c => c.key))
   must(d.regions.length === 3 && d.qualities.length === 3 && d.statuses.length === 3 && d.postKinds.length === 3 && d.topicKinds.length === 3, '枚举数量不对')
+  must(JSON.stringify(d.albumStatuses) === JSON.stringify([{ value: 1, label: '上架' }, { value: 2, label: '下架' }]), '图集状态 ' + JSON.stringify(d.albumStatuses))
   must(d.mediaBase === '/media/', 'mediaBase')
   must(d.topics[0].name === '热门推荐' && 'slug' in d.topics[0] && 'kind' in d.topics[0] && 'status' in d.topics[0], '专题字段')
   return `${d.categories.length} 个分类，${d.regions.length} 个地区`
@@ -297,6 +298,9 @@ await t('stats：概览统计', async () => {
   must(d.posts.total === 4 && d.posts.hot === 1, JSON.stringify(d.posts))
   must(d.topics.total === 11 && d.creators.total === 12 && d.sections.total === 6 && d.keywords.total === 16, '计数不对')
   must(d.users.total === 3 && d.users.admins === 1, JSON.stringify(d.users))
+  // 种子图集：10 个创作者共 27 个、123 张图，全部上架
+  must(JSON.stringify(d.albums) === JSON.stringify({ total: 27, published: 27, offline: 0, images: 123 }) && d.recentAlbums.length === 5, '图集 ' + JSON.stringify(d.albums))
+  must(d.recentAlbums.every(a => a.images.length === a.imageCount && a.cover && a.cover.url === a.images[0].url), '最近图集结构')
   must(d.media.dirExists === true && d.media.files === 0, JSON.stringify(d.media))
   must(d.recentVideos.length === 8 && d.recentPosts.length === 4, '最近列表')
   must(!('coverFallback' in d.recentVideos[0]) && !JSON.stringify(d).includes('data:image/svg'), '不应返回占位图')
@@ -308,7 +312,7 @@ const normHeader = s => String(s).toLowerCase().replace(/[（(【[][^）)】\]]*
 let SCHEMA = null
 await t('schema：字段定义完整、别名不冲突', async () => {
   const d = SCHEMA = await get('/api/admin/schema')
-  must(Object.keys(d).join(',') === 'videos,posts,topics,creators,keywords', Object.keys(d).join(','))
+  must(Object.keys(d).join(',') === 'videos,posts,topics,creators,keywords,albums', Object.keys(d).join(','))
   for (const [type, s] of Object.entries(d)) {
     const seen = new Map()
     for (const f of s.fields) {
@@ -833,21 +837,27 @@ await t('创作者批量：启用 / 停用 / 认证 / 取消认证', async () =>
   return 'ok'
 })
 
-await t('创作者删除：帖子级联删除、视频脱离', async () => {
+await t('创作者删除：帖子、图集级联删除（图片行也删）、视频脱离', async () => {
   const c = await post('/api/admin/creators', { name: '将删除的作者' })
   await post('/api/admin/posts', { creatorId: c.id, text: '帖子一' })
   await post('/api/admin/posts', { creatorId: c.id, text: '帖子二' })
   const v = await post('/api/admin/videos', { title: '作者的视频', creatorId: c.id })
+  const al = await post('/api/admin/albums', { creatorId: c.id, title: '作者的图集', images: ['/m/del1.jpg', '/m/del2.jpg'] })
+  await post('/api/admin/albums', { creatorId: c.id, images: ['/m/del3.jpg'] })
   const row = await get(`/api/admin/creators/${c.id}`)
-  must(row.postCount === 2 && row.videoCount === 1, JSON.stringify(row))
+  must(row.postCount === 2 && row.videoCount === 1 && row.albumCount === 2, JSON.stringify(row))
   const d = await del(`/api/admin/creators/${c.id}`)
-  must(d.ok && d.deletedPosts === 2 && d.detachedVideos === 1, JSON.stringify(d))
+  must(d.ok && d.deletedPosts === 2 && d.deletedAlbums === 2 && d.detachedVideos === 1, JSON.stringify(d))
   must((await get(`/api/admin/videos/${v.id}`)).creatorId === null, '视频应脱离创作者')
+  mustFail(await req('GET', `/api/admin/albums/${al.id}`), undefined, 400, /图集不存在/)
+  must(dbq('SELECT COUNT(*) n FROM albums WHERE creator_id = ?', c.id)[0].n === 0 && dbq('SELECT COUNT(*) n FROM album_images WHERE album_id = ?', al.id)[0].n === 0, '图集 / 图片行应级联删掉')
   const c2 = await post('/api/admin/creators', { name: '批量删除的作者' })
   await post('/api/admin/posts', { creatorId: c2.id, text: '帖子三' })
+  await post('/api/admin/albums', { creatorId: c2.id, images: ['/m/del4.jpg'] })
   const b = await post('/api/admin/creators/batch', { ids: [c2.id], action: 'delete' })
-  must(b.affected === 1 && b.deletedPosts === 1 && b.detachedVideos === 0, JSON.stringify(b))
-  return `帖子 ${d.deletedPosts}，视频 ${d.detachedVideos}`
+  must(b.affected === 1 && b.deletedPosts === 1 && b.deletedAlbums === 1 && b.detachedVideos === 0, JSON.stringify(b))
+  must(dbq('SELECT COUNT(*) n FROM album_images i LEFT JOIN albums a ON a.id = i.album_id WHERE a.id IS NULL')[0].n === 0, '不应留下孤儿图片行')
+  return `帖子 ${d.deletedPosts}，图集 ${d.deletedAlbums}，视频 ${d.detachedVideos}`
 })
 
 /* ================================================================ */
@@ -966,6 +976,275 @@ await t('分区排序 + 删除', async () => {
   const tmp = await post('/api/admin/sections', { title: '临时' })
   must((await del(`/api/admin/sections/${tmp.id}`)).ok, '删除')
   mustFail(await req('GET', `/api/admin/sections/${tmp.id}/items`), undefined, 400, /分区不存在/)
+  return 'ok'
+})
+
+/* ================================================================ */
+/*  图集                                                             */
+/* ================================================================ */
+
+/* 只有文件头的「图片」：够服务端读出宽高就行（不是能显示的完整图片） */
+function pngHead(w, h) {
+  const b = Buffer.alloc(33)
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(b, 0)
+  b.writeUInt32BE(13, 8)
+  b.write('IHDR', 12, 'latin1')
+  b.writeUInt32BE(w, 16)
+  b.writeUInt32BE(h, 20)
+  b[24] = 8
+  b[25] = 2
+  return b
+}
+/** JPEG：APP1 里写 EXIF 方向（6 = 手机竖拍，显示时宽高对调），中间可以垫几个大段（ICC 之类）把 SOF 推到 64 KB 以后 */
+function jpegHead(w, h, orientation = 1, padBytes = 0) {
+  const seg = (marker, body) => {
+    const s = Buffer.alloc(4)
+    s[0] = 0xff
+    s[1] = marker
+    s.writeUInt16BE(body.length + 2, 2)
+    return Buffer.concat([s, body])
+  }
+  const tiff = Buffer.alloc(26)
+  tiff.write('MM', 0, 'latin1')
+  tiff.writeUInt16BE(42, 2)
+  tiff.writeUInt32BE(8, 4)
+  tiff.writeUInt16BE(1, 8)                 // IFD0 只有 1 个条目：方向
+  tiff.writeUInt16BE(0x0112, 10)
+  tiff.writeUInt16BE(3, 12)
+  tiff.writeUInt32BE(1, 14)
+  tiff.writeUInt16BE(orientation, 18)
+  const sof = Buffer.alloc(15)
+  sof[0] = 8
+  sof.writeUInt16BE(h, 1)
+  sof.writeUInt16BE(w, 3)
+  sof[5] = 3
+  const parts = [Buffer.from([0xff, 0xd8]), seg(0xe1, Buffer.concat([Buffer.from('Exif\0\0', 'latin1'), tiff]))]
+  for (let left = padBytes; left > 0; left -= 60000) parts.push(seg(0xe2, Buffer.alloc(Math.min(60000, left))))
+  parts.push(seg(0xc0, sof), Buffer.from([0xff, 0xd9]))
+  return Buffer.concat(parts)
+}
+function webpHead(w, h) {
+  const b = Buffer.alloc(30)
+  b.write('RIFF', 0, 'latin1')
+  b.writeUInt32LE(22, 4)
+  b.write('WEBP', 8, 'latin1')
+  b.write('VP8X', 12, 'latin1')
+  b.writeUInt32LE(10, 16)
+  b.writeUIntLE(w - 1, 24, 3)
+  b.writeUIntLE(h - 1, 27, 3)
+  return b
+}
+function gifHead(w, h) {
+  const b = Buffer.alloc(13)
+  b.write('GIF89a', 0, 'latin1')
+  b.writeUInt16LE(w, 6)
+  b.writeUInt16LE(h, 8)
+  return b
+}
+
+const TRIP = 3   // 种子创作者「旅行日记」（@trip）
+const ALBUM_ROW_KEYS = 'id,title,description,tags,creatorId,creatorName,creatorHandle,cover,images,imageCount,viewCount,status,publishedAt,createdAt,updatedAt'
+let AL = null
+
+await t('图集：所有接口都要管理员（未登录 401、普通用户 403）', async () => {
+  const cases = [['GET', '/api/admin/albums'], ['GET', '/api/admin/albums/1'], ['POST', '/api/admin/albums', {}], ['PATCH', '/api/admin/albums/1', { title: 'x' }],
+    ['DELETE', '/api/admin/albums/1'], ['POST', '/api/admin/albums/batch', { ids: [1], action: 'delete' }], ['POST', '/api/admin/albums/import', { rows: [] }],
+    ['GET', '/api/admin/albums/export']]
+  for (const [m, p, body] of cases) {
+    must((await req(m, p, { body, token: null })).status === 401, `${m} ${p} 未登录应 401`)
+    must((await req(m, p, { body, token: userToken })).status === 403, `${m} ${p} 普通用户应 403`)
+  }
+  must(dbq('SELECT COUNT(*) n FROM albums WHERE id = 1')[0].n === 1 && dbq("SELECT title FROM albums WHERE id = 1")[0].title !== 'x', '被拒绝的请求不应生效')
+  return `${cases.length} 个接口`
+})
+
+await t('图集新建：最少字段 + 宽高（给了用给的，站内图片读文件头含 EXIF 方向，外部地址为 0）', async () => {
+  okData(await upload('images/albums/t-portrait.jpg', jpegHead(4000, 3000, 6, 100000)))
+  okData(await upload('images/albums/t-wide.png', pngHead(1600, 900)))
+  okData(await upload('images/albums/t 空格.webp', webpHead(1080, 1350)))
+  okData(await upload('images/albums/t.gif', gifHead(320, 240)))
+  const d = AL = await post('/api/admin/albums', {
+    creatorId: TRIP,
+    images: ['/media/images/albums/t-portrait.jpg', urlOf('images/albums/t-wide.png'), '/media/images/albums/t 空格.webp?v=2',
+      { url: '/media/images/albums/t.gif', width: 0 }, { url: 'https://e.com/x.jpg', width: 640, height: 480 }, 'https://e.com/unknown.jpg',
+      '/media/images/albums/missing.jpg', '/media/images/albums/t-portrait.jpg', urlOf('images/albums/t 空格.webp'), '/media/images/albums/t-wide.png?v=7']
+  })
+  must(Object.keys(d).join() === ALBUM_ROW_KEYS, '字段 ' + Object.keys(d).join())
+  must(d.title === '' && d.description === '' && d.tags.length === 0 && d.status === 1 && d.creatorId === TRIP && d.creatorHandle === 'trip', JSON.stringify(d).slice(0, 300))
+  must(d.publishedAt > 0 && d.createdAt === d.updatedAt && d.viewCount === 0, '时间 / 浏览数')
+  const dims = d.images.map(m => `${m.width}x${m.height}`).join()
+  // 重复的地址只留第一次（同一个文件的编码 / 未编码 / 带 ?v= 写法也算重复）；EXIF 方向 6 的 4000×3000 显示为 3000×4000
+  must(d.images.length === 7 && d.imageCount === 7 && dims === '3000x4000,1600x900,1080x1350,320x240,640x480,0x0,0x0', '宽高 ' + dims)
+  must(JSON.stringify(d.cover) === JSON.stringify(d.images[0]), 'cover = 第一张')
+  must(dbq('SELECT group_concat(sort) s FROM (SELECT sort FROM album_images WHERE album_id = ? ORDER BY sort)', d.id)[0].s === '0,1,2,3,4,5,6', 'sort 是 0..n-1')
+  const pub = (await req('GET', `/api/albums/${d.id}`, { token: null })).data
+  must(pub && pub.count === 7 && pub.images[0].width === 3000 && pub.title === '', 'App 马上能看到 ' + JSON.stringify(pub?.images?.[0]))
+  return dims
+})
+
+await t('图集校验：错误带 field，失败不写库；状态 0 / 草稿按下架', async () => {
+  const ok = { creatorId: TRIP, images: ['/m/v.jpg'] }
+  const cases = [
+    [{ images: ['/m/v.jpg'] }, 'creatorId'], [{ ...ok, creatorId: 99999 }, 'creatorId'], [{ ...ok, creatorId: 'abc' }, 'creatorId'],
+    [{ creatorId: TRIP }, 'images'], [{ ...ok, images: [] }, 'images'], [{ ...ok, images: null }, 'images'], [{ ...ok, images: '' }, 'images'],
+    [{ ...ok, images: ['javascript:alert(1)'] }, 'images'], [{ ...ok, images: ['a.jpg'] }, 'images'], [{ ...ok, images: { url: '/m/a.jpg' } }, 'images'],
+    [{ ...ok, images: [['/m/a.jpg']] }, 'images'], [{ ...ok, images: [{ url: '/m/a.jpg', width: -1, height: 5 }] }, 'images'],
+    [{ ...ok, images: [{ url: '/m/a.jpg', width: 'x', height: 5 }] }, 'images'], [{ ...ok, images: [{ width: 5, height: 5 }] }, 'images'],
+    [{ ...ok, images: Array.from({ length: 101 }, (_, i) => `/m/${i}.jpg`) }, 'images'],
+    [{ ...ok, title: 'x'.repeat(201) }, 'title'], [{ ...ok, title: { a: 1 } }, 'title'], [{ ...ok, description: 'x'.repeat(5001) }, 'description'],
+    [{ ...ok, tags: Array.from({ length: 21 }, (_, i) => 't' + i) }, 'tags'], [{ ...ok, status: '审核中' }, 'status'], [{ ...ok, status: 3 }, 'status'],
+    [{ ...ok, publishedAt: 'abc' }, 'publishedAt']
+  ]
+  for (const [body, field] of cases) mustFail(await req('POST', '/api/admin/albums', { body }), field)
+  mustFail(await req('POST', '/api/admin/albums', { body: [] }), undefined, 400, /JSON 对象/)
+  must(dbq('SELECT COUNT(*) n FROM album_images WHERE url = ?', '/m/v.jpg')[0].n === 0, '校验失败不应写库')
+  const s0 = await post('/api/admin/albums', { ...ok, status: 0 })
+  const s1 = await post('/api/admin/albums', { ...ok, images: ['/m/v2.jpg'], status: '上架' })
+  const s2 = await post('/api/admin/albums', { ...ok, images: ['/m/v3.jpg'], status: '草稿' })
+  must(s0.status === 2 && s1.status === 1 && s2.status === 2, `状态 ${s0.status} / ${s1.status} / ${s2.status}`)
+  for (const a of [s0, s1, s2]) await del(`/api/admin/albums/${a.id}`)
+  return `${cases.length} 种`
+})
+
+await t('图集图片：用逗号 / 空格 / 顿号隔开的多个地址报错（新建、修改、导入），地址本身带的逗号空格照常收', async () => {
+  const multi = ['/media/images/albums/a.jpg,/media/images/albums/b.jpg', 'https://e.com/s1.jpg https://e.com/s2.jpg', '/media/x1.jpg、/media/x2.jpg',
+    'https://e.com/a.jpg；https://e.com/b.jpg', '/media/a.jpg, https://e.com/b.jpg']
+  for (const s of multi) {
+    mustFail(await req('POST', '/api/admin/albums', { body: { creatorId: TRIP, images: [s] } }), 'images', 400, /请用 \| 或换行隔开（第 1 张/)
+    mustFail(await req('POST', '/api/admin/albums', { body: { creatorId: TRIP, images: [{ url: s, width: 10, height: 10 }] } }), 'images')
+  }
+  mustFail(await req('POST', '/api/admin/albums', { body: { creatorId: TRIP, images: 'https://e.com/ok.jpg|https://e.com/c1.jpg,https://e.com/c2.jpg' } }), 'images', 400, /第 2 张/)
+  mustFail(await req('PATCH', `/api/admin/albums/${AL.id}`, { body: { images: [multi[1]] } }), 'images')
+  must((await get(`/api/admin/albums/${AL.id}`)).images.length === 7, '修改失败不应生效')
+  const imp = await importRows('albums', multi.map(images => ({ creator: '@trip', images })), {}, true)
+  must(imp.failed === multi.length && imp.results.every(r => r.field === 'images' && /请用 \| 或换行隔开/.test(r.message)), '导入 ' + JSON.stringify(imp.results[0]))
+  // 地址里本来就有的逗号、空格，查询串里的地址，外链路径里的 /media/：都是一张图
+  const fine = ['/media/images/albums/a,b.jpg', '/media/images/albums/my photo.jpg', 'https://e.com/p?u=https://x.com/b.jpg', 'https://cdn.e.com/media/x.jpg']
+  const d = await post('/api/admin/albums', { creatorId: TRIP, images: fine })
+  must(d.images.map(m => m.url).join('|') === fine.join('|'), '照常收 ' + JSON.stringify(d.images.map(m => m.url)))
+  await del(`/api/admin/albums/${d.id}`)
+  return `${multi.length} 种多地址写法都报错，${fine.length} 种单地址照常收`
+})
+
+await t('图集修改：部分字段、图片整体替换、同一地址沿用宽高、没变不动 updated_at', async () => {
+  const before = await get(`/api/admin/albums/${AL.id}`)
+  await sleep(1100)
+  // 原样保存：什么都不变
+  const same = await patch(`/api/admin/albums/${AL.id}`, { title: before.title, tags: before.tags, images: before.images.map(m => m.url), status: '上架', publishedAt: before.publishedAt })
+  must(same.updatedAt === before.updatedAt && JSON.stringify(same.images) === JSON.stringify(before.images), '原样保存不应改 updated_at / 宽高')
+  const rowIds = () => dbq('SELECT id FROM album_images WHERE album_id = ? ORDER BY sort', AL.id).map(r => r.id).join()
+  const ids0 = rowIds()
+  const d = await patch(`/api/admin/albums/${AL.id}`, { title: '  新标题  ', description: '一\r\n二  ', tags: '#a；b、c' })
+  must(d.title === '新标题' && d.description === '一\n二' && JSON.stringify(d.tags) === '["a","b","c"]' && d.updatedAt > before.updatedAt, JSON.stringify(d).slice(0, 200))
+  must(rowIds() === ids0, '没传 images 不应重写图片行')
+  // 图片：换顺序 + 去掉几张 + 加一张；同一地址沿用原来的宽高（显式传 0 也一样），新的站内图读文件头
+  okData(await upload('images/albums/t-new.png', pngHead(500, 700)))
+  const r = await patch(`/api/admin/albums/${AL.id}`, { images: [before.images[1].url, '/media/images/albums/t-new.png', { url: before.images[0].url, width: 0, height: 0 }] })
+  must(r.images.map(m => `${m.width}x${m.height}`).join() === '1600x900,500x700,3000x4000' && r.imageCount === 3 && r.cover.url === before.images[1].url, JSON.stringify(r.images))
+  // 显式给的宽高覆盖原来的
+  const r2 = await patch(`/api/admin/albums/${AL.id}`, { images: [{ url: before.images[1].url, width: 160, height: 90 }, ...r.images.slice(1)] })
+  must(r2.images[0].width === 160 && r2.images[0].height === 90 && r2.images[2].width === 3000, '显式宽高 ' + JSON.stringify(r2.images))
+  // 标题 / 简介可以清空；图片、创作者不能清空
+  const c = await patch(`/api/admin/albums/${AL.id}`, { title: null, description: '' })
+  must(c.title === '' && c.description === '', '清空标题 / 简介')
+  mustFail(await req('PATCH', `/api/admin/albums/${AL.id}`, { body: { images: null } }), 'images')
+  mustFail(await req('PATCH', `/api/admin/albums/${AL.id}`, { body: { images: [] } }), 'images')
+  mustFail(await req('PATCH', `/api/admin/albums/${AL.id}`, { body: { creatorId: null } }), 'creatorId')
+  mustFail(await req('PATCH', `/api/admin/albums/${AL.id}`, { body: { title: 'ok', images: ['bad'] } }), 'images')
+  must((await get(`/api/admin/albums/${AL.id}`)).title === '' && (await get(`/api/admin/albums/${AL.id}`)).images.length === 3, '失败的修改一项都不应生效')
+  mustFail(await req('PATCH', '/api/admin/albums/99999999', { body: { title: 'x' } }), undefined, 400, /图集不存在/)
+  mustFail(await req('GET', '/api/admin/albums/99999999'), undefined, 400, /图集不存在/)
+  const e = await patch(`/api/admin/albums/${AL.id}`, { creatorId: 5, status: 2, publishedAt: '2026-01-02 03:04:05' })
+  must(e.creatorHandle === 'qingchuan' && e.status === 2 && e.publishedAt === localTs(2026, 0, 2, 3, 4, 5), JSON.stringify(e).slice(0, 200))
+  await patch(`/api/admin/albums/${AL.id}`, { creatorId: TRIP, status: 1 })
+  return 'ok'
+})
+
+await t('图集列表：筛选 / 排序 / 分页', async () => {
+  const n = dbq('SELECT COUNT(*) n FROM albums')[0].n
+  const d = await get('/api/admin/albums')
+  must(d.total === n && d.page === 1 && d.pageSize === 20 && d.list.length === 20, `默认分页 ${d.total} / ${n}`)
+  must(d.list.every((a, i) => i === 0 || d.list[i - 1].publishedAt >= a.publishedAt), '默认按发布时间倒序')
+  must(d.list.every(a => Object.keys(a).join() === ALBUM_ROW_KEYS && a.images.length === a.imageCount && a.cover?.url === a.images[0]?.url), '字段 ' + Object.keys(d.list[0]).join())
+  const mine = await get(`/api/admin/albums?creatorId=${TRIP}&pageSize=50`)
+  must(mine.total === dbq('SELECT COUNT(*) n FROM albums WHERE creator_id = ?', TRIP)[0].n && mine.list.every(a => a.creatorId === TRIP) && mine.list.some(a => a.id === AL.id), '按创作者 ' + mine.total)
+  await post('/api/admin/albums/batch', { ids: [AL.id], action: 'unpublish' })
+  const off = await get('/api/admin/albums?status=2')
+  must(off.total === 1 && off.list[0].id === AL.id, '按状态 ' + off.total)
+  must((await get('/api/admin/albums?status=1')).total === n - 1 && (await get('/api/admin/albums?status=0')).total === n, '状态 1 / 不认识的状态不筛')
+  await post('/api/admin/albums/batch', { ids: [AL.id], action: 'publish' })
+  const q = await get('/api/admin/albums?q=' + encodeURIComponent('随手') + '&pageSize=50')
+  must(q.total > 0 && q.list.every(a => (a.title + a.description + a.tags.join()).includes('随手')), '关键词 ' + q.total)
+  must((await get(`/api/admin/albums?q=${AL.id}`)).list.some(a => a.id === AL.id), '按 ID 搜')
+  const cnt = await get('/api/admin/albums?sort=imageCount&order=desc&pageSize=200')
+  must(cnt.list.every((a, i) => i === 0 || cnt.list[i - 1].imageCount >= a.imageCount) && cnt.list[0].imageCount === 12, '张数倒序')
+  const asc = await get('/api/admin/albums?sort=imageCount&order=asc')
+  must(asc.list.every((a, i) => i === 0 || asc.list[i - 1].imageCount <= a.imageCount) && asc.list[0].imageCount === 1, '张数正序')
+  const upd = await get('/api/admin/albums?sort=updatedAt&order=desc')
+  must(upd.list.every((a, i) => i === 0 || upd.list[i - 1].updatedAt >= a.updatedAt), '按修改时间')
+  const big = await get('/api/admin/albums?pageSize=500')
+  must(big.pageSize === 200, 'pageSize 上限 200')
+  const p2 = await get('/api/admin/albums?page=2&pageSize=10')
+  must(p2.list.length === 10 && p2.list[0].id === d.list[10].id, '第 2 页')
+  must((await get('/api/admin/albums?sort=nope')).list[0].id === d.list[0].id, '未知排序按默认')
+  return `${n} 个`
+})
+
+await t('图集批量：上架 / 下架 / 改创作者 / 加删标签 / 删除 + 参数错误', async () => {
+  const a = await post('/api/admin/albums', { creatorId: TRIP, title: '批量一', images: ['/m/b1.jpg'], tags: ['x'] })
+  const b = await post('/api/admin/albums', { creatorId: TRIP, title: '批量二', images: ['/m/b2.jpg'] })
+  const ids = [a.id, b.id]
+  const both = () => Promise.all(ids.map(id => get(`/api/admin/albums/${id}`)))
+  await sleep(1100)
+  must((await post('/api/admin/albums/batch', { ids, action: 'unpublish' })).affected === 2, 'unpublish')
+  let [ra, rb] = await both()
+  must(ra.status === 2 && rb.status === 2 && ra.updatedAt > a.updatedAt, '下架 + updated_at')
+  must((await post('/api/admin/albums/batch', { ids: [...ids, '99999999'], action: 'publish' })).affected === 2, 'publish（不存在的 id 不算）')
+  must((await post('/api/admin/albums/batch', { ids, action: 'setCreator', value: '6' })).affected === 2, 'setCreator')
+  ;[ra, rb] = await both()
+  must(ra.status === 1 && ra.creatorId === 6 && rb.creatorHandle === 'xingye', JSON.stringify([ra.creatorId, rb.creatorHandle]))
+  mustFail(await req('POST', '/api/admin/albums/batch', { body: { ids, action: 'setCreator', value: '' } }), 'value')
+  mustFail(await req('POST', '/api/admin/albums/batch', { body: { ids, action: 'setCreator', value: 99999 } }), 'value')
+  must((await post('/api/admin/albums/batch', { ids, action: 'addTags', value: '#y, z' })).affected === 2, 'addTags')
+  ;[ra, rb] = await both()
+  must(JSON.stringify(ra.tags) === '["x","y","z"]' && JSON.stringify(rb.tags) === '["y","z"]', JSON.stringify([ra.tags, rb.tags]))
+  must((await post('/api/admin/albums/batch', { ids, action: 'removeTags', value: 'x' })).affected === 1, 'removeTags 只算真改了的')
+  for (const action of ['draft', 'setHot', 'setTopic', 'toString', '__proto__']) mustFail(await req('POST', '/api/admin/albums/batch', { body: { ids, action } }), 'action')
+  mustFail(await req('POST', '/api/admin/albums/batch', { body: { ids: [], action: 'publish' } }), 'ids')
+  mustFail(await req('POST', '/api/admin/albums/batch', { body: { ids: ['x'], action: 'publish' } }), 'ids')
+  mustFail(await req('POST', '/api/admin/albums/batch', { body: { ids } }), 'action')
+  must((await post('/api/admin/albums/batch', { ids, action: 'delete' })).affected === 2, 'delete')
+  must(dbq('SELECT COUNT(*) n FROM album_images WHERE album_id IN (?, ?)', a.id, b.id)[0].n === 0, '图片行跟着删')
+  return 'ok'
+})
+
+await t('图集删除：只删库里的行，素材文件不动', async () => {
+  okData(await upload('images/albums/keep.png', pngHead(10, 10)))
+  const a = await post('/api/admin/albums', { creatorId: TRIP, images: ['/media/images/albums/keep.png'] })
+  must((await del(`/api/admin/albums/${a.id}`)).ok === true, '删除')
+  must(existsSync(join(MEDIA_DIR, 'images', 'albums', 'keep.png')), '素材文件应还在')
+  must((await req('GET', '/media/images/albums/keep.png', { token: null })).status === 200, '素材仍能访问')
+  mustFail(await req('DELETE', `/api/admin/albums/${a.id}`), undefined, 400, /图集不存在/)
+  mustFail(await req('DELETE', '/api/admin/albums/0'), undefined, 400, /ID 不正确/)
+  return 'ok'
+})
+
+await t('素材：被图集用到的图片删除要 force，列表带 usedByAlbums', async () => {
+  okData(await upload('images/albums/used.png', pngHead(20, 20)))
+  const p = encodeURIComponent('images/albums/used.png')
+  const a1 = await post('/api/admin/albums', { creatorId: TRIP, images: ['/media/images/albums/used.png', '/m/x.jpg'] })
+  const a2 = await post('/api/admin/albums', { creatorId: 4, images: ['/m/y.jpg', urlOf('images/albums/used.png') + '?v=1'] })
+  const list = await get('/api/admin/media?dir=' + encodeURIComponent('images/albums'))
+  const e = list.entries.find(x => x.name === 'used.png')
+  must(e && e.usedByAlbums === 2 && e.usedBy === 0 && e.type === 'image', JSON.stringify(e))
+  must(list.entries.every(x => typeof x.usedByAlbums === 'number') && list.entries.find(x => x.name === 'keep.png').usedByAlbums === 0, '每项都有 usedByAlbums')
+  mustFail(await req('DELETE', `/api/admin/media?path=${p}`), 'usedBy', 400, /该文件被 2 个图集使用/)
+  const v = await post('/api/admin/videos', { title: '图集素材当封面', coverUrl: '/media/images/albums/used.png' })
+  mustFail(await req('DELETE', `/api/admin/media?path=${p}`), 'usedBy', 400, /该文件被 1 个视频、2 个图集使用/)
+  must(existsSync(join(MEDIA_DIR, 'images', 'albums', 'used.png')), '没加 force 不应删除')
+  must((await del(`/api/admin/media?path=${p}&force=1`)).ok, 'force 删除')
+  await del(`/api/admin/videos/${v.id}`)
+  for (const a of [a1, a2]) await del(`/api/admin/albums/${a.id}`)
   return 'ok'
 })
 
@@ -1154,6 +1433,72 @@ await t('导入：专题 / 创作者 / 热词', async () => {
   return 'ok'
 })
 
+await t('导入：图集（创作者 id / 名称 / @账号，图片用 | 或换行隔开；预检 / 跳过 / 更新 / 报错）', async () => {
+  okData(await upload('images/albums/imp-a.png', pngHead(1200, 800)))
+  const aCount = () => dbq('SELECT COUNT(*) n FROM albums')[0].n
+  const rows = [
+    { _row: 2, title: '导入图集一', creator: '@trip', images: '/media/images/albums/imp-a.png | https://e.com/i2.jpg\n https://e.com/i3.jpg', description: '第一行\r\n第二行', tags: '街拍;雨天', status: '上架', publishedAt: '2026-03-04 05:06:07' },
+    { _row: 3, creator: '晴川', images: 'https://e.com/single.jpg' },
+    { _row: 4, title: '按 id 找创作者', creator: '4', images: ['https://e.com/arr1.jpg', 'https://e.com/arr2.jpg|https://e.com/arr3.jpg'], status: '下架' },
+    { _row: 5, title: '没有图片', creator: '@trip' },
+    { _row: 6, title: '坏地址', creator: '@trip', images: 'javascript:1' },
+    { _row: 7, title: '没有创作者', images: 'https://e.com/nobody.jpg' },
+    { _row: 8, title: '自动建的作者', creator: '图集新作者', images: 'https://e.com/auto.jpg' },
+    { _row: 9, title: '同一文件内重复', creator: '@trip', images: 'https://e.com/single.jpg|https://e.com/more.jpg' },
+    { _row: 10, title: '状态不对', creator: '@trip', images: 'https://e.com/s.jpg', status: '审核中' },
+    { _row: 11, id: '99999999', title: 'ID 不存在', creator: '@trip', images: 'https://e.com/s.jpg' }
+  ]
+  const st = d => d.results.map(r => r.status[0] + (r.field ? ':' + r.field : '')).join(' ')
+  const before = aCount()
+  const dry = await importRows('albums', rows, {}, true)
+  must(st(dry) === 'c c c e:images e:images e:creator c s e:status e:id', '预检 ' + st(dry))
+  must(dry.created === 4 && dry.failed === 5 && dry.skipped === 1 && aCount() === before && dry.autoCreated.creators.join() === '图集新作者', JSON.stringify({ ...dry, results: undefined }))
+  must(dry.results.map(r => r.row).join() === '2,3,4,5,6,7,8,9,10,11', '行号应用 _row')
+  must(dry.results[7].message === `已存在（按第一张图片匹配到 ID ${dry.results[1].id}），已跳过`, dry.results[7].message)
+  must(dry.results[9].message === 'ID 不存在' && /至少要有一张图片/.test(dry.results[3].message), JSON.stringify([dry.results[3], dry.results[9]]))
+  must(!dbq('SELECT 1 x FROM creators WHERE name = ?', '图集新作者').length, '预检不应留下自动创建的创作者')
+  const d = await importRows('albums', rows)
+  must(st(d) === st(dry) && aCount() === before + 4, '真导入 ' + st(d))
+  const [a, b, c] = await Promise.all([0, 1, 2].map(i => get(`/api/admin/albums/${d.results[i].id}`)))
+  must(a.creatorHandle === 'trip' && a.title === '导入图集一' && a.description === '第一行\n第二行' && JSON.stringify(a.tags) === '["街拍","雨天"]' &&
+    a.status === 1 && a.publishedAt === localTs(2026, 2, 4, 5, 6, 7), JSON.stringify(a).slice(0, 300))
+  must(a.images.map(m => m.url).join() === '/media/images/albums/imp-a.png,https://e.com/i2.jpg,https://e.com/i3.jpg' && a.images[0].width === 1200 && a.images[0].height === 800 && a.images[1].width === 0,
+    '图片顺序 / 站内图读宽高 ' + JSON.stringify(a.images))
+  must(b.title === '' && b.creatorHandle === 'qingchuan' && b.imageCount === 1 && b.status === 1, JSON.stringify(b).slice(0, 200))
+  must(c.creatorId === 4 && c.images.length === 3 && c.status === 2, '数组单元格 / 按 id / 下架 ' + JSON.stringify(c.images))
+  // 重复：skip（默认）/ error / update；更新时空单元格不改，同一地址的宽高保留
+  const again = [{ creator: '@trip', images: '/media/images/albums/imp-a.png|https://e.com/i2.jpg' }]
+  const skip = await importRows('albums', again)
+  must(skip.skipped === 1 && skip.results[0].id === a.id, JSON.stringify(skip.results))
+  const err = await importRows('albums', again, { onDuplicate: 'error' })
+  must(err.failed === 1 && err.results[0].field === 'images', JSON.stringify(err.results))
+  const upd = await importRows('albums', again, { onDuplicate: 'update' })
+  must(upd.updated === 1 && upd.results[0].message === `按第一张图片匹配到 ID ${a.id}，已更新`, JSON.stringify(upd.results))
+  const a2 = await get(`/api/admin/albums/${a.id}`)
+  must(a2.title === '导入图集一' && a2.description === '第一行\n第二行' && a2.images.length === 2 && a2.images[0].width === 1200 && a2.status === 1,
+    '空单元格不改、图片整体替换、宽高保留 ' + JSON.stringify(a2).slice(0, 300))
+  const byId = await importRows('albums', [{ id: String(b.id), title: '补上标题' }], { onDuplicate: 'update' })
+  must(byId.updated === 1 && (await get(`/api/admin/albums/${b.id}`)).title === '补上标题', JSON.stringify(byId.results))
+  const ds = await importRows('albums', [{ creator: '@trip', images: 'https://e.com/default-status.jpg' }], { defaultStatus: 0 })
+  must((await get(`/api/admin/albums/${ds.results[0].id}`)).status === 2, '默认状态 0 → 下架')
+  const off = await importRows('albums', [{ creator: '没有这个人', images: 'https://e.com/z.jpg' }], { autoCreate: false })
+  must(off.failed === 1 && off.results[0].field === 'creator' && /不存在/.test(off.results[0].message), JSON.stringify(off.results))
+  return `新增 ${d.created} / 跳过 ${d.skipped} / 错误 ${d.failed}`
+})
+
+await t('导出（图集）：字段顺序、筛选、导入格式', async () => {
+  const ex = await get('/api/admin/albums/export?creatorId=4')
+  must(ex.fields.join() === 'id,title,creator,images,description,tags,status,publishedAt', ex.fields.join())
+  must(ex.rows.length > 0 && ex.rows.every(r => r.creator === 'craft'), '按创作者筛选')
+  const r = (await get('/api/admin/albums/export?q=' + encodeURIComponent('导入图集一'))).rows[0]
+  must(r && r.images === '/media/images/albums/imp-a.png\nhttps://e.com/i2.jpg' && r.tags === '街拍,雨天' && r.status === '上架' && r.creator === 'trip' &&
+    r.description === '第一行\n第二行' && r.publishedAt === '2026-03-04 05:06:07' && r.title === '导入图集一', JSON.stringify(r))
+  const off = (await get('/api/admin/albums/export?status=2')).rows
+  must(off.length > 0 && off.every(x => x.status === '下架'), '下架筛选')
+  must(SCHEMA.albums.fields.map(f => f.key).join() === ex.fields.join() && SCHEMA.albums.fields.filter(f => f.required).map(f => f.key).join() === 'creator,images', 'schema 字段 / 必填')
+  return `${ex.rows.length} 行`
+})
+
 /* ---------------- 导出 → 再导入（更新）= 数据不变 ---------------- */
 
 const snapshot = async type => {
@@ -1166,7 +1511,7 @@ const snapshot = async type => {
   return JSON.stringify(pages)
 }
 
-for (const type of ['videos', 'posts', 'topics', 'creators', 'keywords']) {
+for (const type of ['videos', 'posts', 'topics', 'creators', 'keywords', 'albums']) {
   await t(`导出 → 再导入（${type}）：updated = n，数据不变`, async () => {
     const ex = await get(`/api/admin/${type}/export`)
     must(ex.fields.join() === SCHEMA[type].fields.map(f => f.key).join(), 'fields 应为 schema 顺序')
@@ -1175,12 +1520,15 @@ for (const type of ['videos', 'posts', 'topics', 'creators', 'keywords']) {
     const mediaRows = () => JSON.stringify(dbq('SELECT id, url, fallback, duration_sec FROM post_media ORDER BY id').map(r => [r.id, r.url, r.fallback?.length, r.duration_sec]))
     const mediaBefore = mediaRows()
     const coversBefore = JSON.stringify(dbq('SELECT id, url FROM topic_covers ORDER BY id'))
+    const albumImageRows = () => JSON.stringify(dbq('SELECT id, album_id, url, width, height, sort FROM album_images ORDER BY id'))
+    const albumImagesBefore = albumImageRows()
     const d = await importRows(type, ex.rows.map((r, i) => ({ ...r, _row: i + 2 })), { onDuplicate: 'update' })
     must(d.updated === ex.rows.length && d.failed === 0 && d.created === 0, JSON.stringify({ ...d, results: d.results.filter(r => r.status !== 'updated').slice(0, 3) }))
     must(await snapshot(type) === before, '再导入后数据变了')
     must(JSON.stringify((await get(`/api/admin/${type}/export`)).rows) === JSON.stringify(ex.rows), '再导出结果不同')
     must(mediaRows() === mediaBefore, '帖子媒体行（含主图时长）被改了')
     must(JSON.stringify(dbq('SELECT id, url FROM topic_covers ORDER BY id')) === coversBefore, '专题头图被重写了')
+    must(albumImageRows() === albumImagesBefore, '图集的图片行（含宽高）被重写了')
     return `${ex.rows.length} 行全部 updated`
   })
 }
