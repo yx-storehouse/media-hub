@@ -1,4 +1,4 @@
-import { shallowRef, computed, watch } from 'vue'
+import { shallowRef, computed, watch, effectScope } from 'vue'
 import { getSearchHistory, clearSearchHistory } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 import { toast } from '@/composables/useToast'
@@ -8,6 +8,9 @@ import { toast } from '@/composables/useToast'
  *   登录时：服务端记录（搜索接口第一页顺便记下），这里只负责读、删
  *   未登录：存在本机 localStorage（读写都包 try/catch，隐私模式下存不了也不报错）
  * 登录用户的记录不写进本机，同一台设备退出登录后看不到别人的搜索词。
+ *
+ * 全 App 共用一份列表：搜索页和桌面顶栏的搜索框（DeskSearch）谁搜了一次（note），另一边马上就看得到，
+ * 不用等下一次从服务端重读。
  */
 const KEY = 'reel:search:recent'
 const MAX = 20      // 本机最多存这么多
@@ -34,11 +37,21 @@ function writeLocal(list) {
 
 const withFirst = (list, kw) => [kw, ...list.filter(k => k !== kw)]
 
-export function useRecentSearches() {
+/* ---- 共用的状态（第一次用到时建好，之后一直在：不跟着某个组件卸载） ---- */
+let shared = null
+
+function create() {
   const auth = useAuthStore()
   const list = shallowRef([])
-  /* 登录状态还没确认（启动时带着 token 校验中）为 null：这时不读也不写本机记录，免得把登录用户的词存进本机 */
-  const session = computed(() => (auth.ready ? auth.user?.id ?? 0 : null))
+  /*
+   * 登录状态还没确认（启动时带着 token 校验中，或者连不上服务器、还不知道是谁）为 null：
+   * 这时不读也不写本机记录，免得把登录用户的词存进本机
+   */
+  const session = computed(() => {
+    if (!auth.ready) return null
+    if (auth.user) return auth.user.id
+    return auth.token && !auth.verified ? null : 0
+  })
   /* 这次该用本机记录：确认未登录，或者还在校验但根本没有 token */
   const local = () => session.value === 0 || (session.value === null && !auth.token)
   let seq = 0
@@ -103,8 +116,22 @@ export function useRecentSearches() {
     }
   }
 
-  // 启动时的登录校验完成、在本页登录 / 退出后，换成对应的记录
+  // 启动时的登录校验完成、登录 / 退出后，换成对应的记录（同一个账号只是核对上了，不重读）
   watch(session, load, { immediate: true })
 
   return { list, load, note, remove, clear }
+}
+
+/**
+ * 近期搜索：{ list, load, note, remove, clear }，所有调用方拿到的是同一份。
+ *   list    关键词数组（shallowRef，新的在前，最多 10 个）
+ *   load()  重新读一次（登录时从服务端，未登录从本机）
+ *   note(kw)  搜了一次：马上放到最前面（未登录时顺便存进本机）
+ */
+export function useRecentSearches() {
+  if (!shared) {
+    // 不挂在调用它的组件上：组件卸载了，共用的列表和监听照样在
+    shared = effectScope(true).run(create)
+  }
+  return shared
 }

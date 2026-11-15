@@ -5,6 +5,7 @@ import { getVideos } from '@/api'
 import { toast } from '@/composables/useToast'
 import { isDesktop } from '@/composables/useDesktop'
 import { reducedMotion } from '@/utils/motion'
+import { useReconnect } from '@/composables/useReconnect'
 import { vRise, dur, ease } from './motion'
 import Icon from '@/components/Icon.vue'
 import VideoCard from '@/components/VideoCard.vue'
@@ -132,11 +133,15 @@ function spin() {
   svg.animate([{ transform: 'rotate(0deg)' }, { transform: 'rotate(360deg)' }], { duration: dur('--dur-4'), easing: ease('--ease-out') })
 }
 
+/* 返回的 Promise 新的一批到了（或失败了）才结束：下拉刷新的「正在刷新」等它 */
 function shuffle() {
   spin()
   batchNo.value = nextBatch(batchNo.value)
-  load(true)
+  return load(true)
 }
+
+/* 这一组没取到：断网恢复、服务器恢复后自动再取（composables/useReconnect.js） */
+useReconnect(() => load(), () => failed.value)
 
 /* 推荐页「再点一次首页」时整页换一批 */
 defineExpose({ shuffle })

@@ -14,6 +14,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { rng } from '../lib/random.mjs'
 import { cover, avatar, brandAvatar, docThumb } from '../lib/art.mjs'
 import { seedAlbums } from './seed-albums.mjs'
+import { moveInlineArt } from '../lib/art-store.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const DB_PATH = process.env.DB_PATH || join(here, 'reel.db')
@@ -353,6 +354,9 @@ tx(() => {
   ;[['home', '首页', 'tHome'], ['short', '短视频', 'tShort'], ['live', '直播', 'tLive'], ['community', '社区', 'tCommunity'], ['nearby', '同城', 'tNearby'], ['me', '我的', 'tMe']]
     .forEach(([key, label, icon], i) => insTab.run('main', key, label, icon, 0, i))
 })
+
+/* 生成的风景占位图挪进 art_blobs，行里只留 url(/api/art/…) 短地址（和接口服务启动时做的一样，见 lib/art-store.mjs） */
+moveInlineArt(db)
 
 /* 各表条数，方便一眼确认 */
 const counts = ['users', 'creators', 'topics', 'videos', 'home_sections', 'home_section_items', 'series', 'series_episodes',

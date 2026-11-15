@@ -73,8 +73,9 @@ export const typeInfo = type => TYPES.find(t => t.type === type) || TYPES[0]
 export const isType = type => TYPES.some(t => t.type === type)
 
 /** 结果状态 → 文字 / 样式 */
-export const STATUS_TEXT = { created: '新增', updated: '更新', skipped: '跳过', error: '错误' }
-export const STATUS_CHIP = { created: 'ok', updated: 'solid', skipped: '', error: 'danger' }
+export const STATUS_TEXT = { created: '新增', updated: '更新', unchanged: '无变化', skipped: '跳过', error: '错误' }
+/* 无变化：没写库，用最弱的描边样式 */
+export const STATUS_CHIP = { created: 'ok', updated: 'solid', unchanged: 'outline dim', skipped: '', error: 'danger' }
 
 /*
  * 模板的示例行：服务端字段定义里的示例（如「城市漫游 / citywalk」「trip」「VID-2001」）正好是真实数据，

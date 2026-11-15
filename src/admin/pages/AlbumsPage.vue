@@ -111,14 +111,13 @@ async function save() {
   }
   if (!editor.open || session !== `${editor.isNew}:${editor.id}`) return
   if (s?.uploading) {
+    // 错误写在「图片」下面（找不到这一项时 showFieldError 自己会弹提示框）
     editor.showFieldError('images', `还有 ${s.uploading} 张图片正在上传，传完再保存`)
-    toast(`还有 ${s.uploading} 张图片正在上传，传完再保存`, { type: 'error' })
     return
   }
   if (s?.failed) {
     // 原因写在每张图上；重试没用的（文件太大等）只有「移除」
     editor.showFieldError('images', `有 ${s.failed} 张图片上传失败：${s.retryable ? '点「重试」或移除' : '移除'}后再保存`)
-    toast(`有 ${s.failed} 张图片上传失败`, { type: 'error' })
     return
   }
   await editor.submit()

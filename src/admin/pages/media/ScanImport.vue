@@ -29,7 +29,7 @@ const props = defineProps({
 })
 const emit = defineEmits(['update:open', 'imported'])
 
-const { topicOptions, categoryOptions, regionOptions, qualityOptions, statusOptions } = useMeta()
+const { topicOptions, creatorOptions, categoryOptions, regionOptions, qualityOptions, statusOptions } = useMeta()
 
 const phase = ref('scan') // scan | list | import | probe | done
 const scanError = ref('')
@@ -43,7 +43,8 @@ const page = ref(1)
 const pageSize = ref(100)
 const formError = ref('')
 
-const common = reactive({ topicId: null, category: null, region: null, quality: null, tags: [], status: 1, probe: true })
+/* creatorId 可以不选（视频允许没有创作者）；选了就按 id 写进导入行（导入按 id 找创作者） */
+const common = reactive({ topicId: null, creatorId: null, category: null, region: null, quality: null, tags: [], status: 1, probe: true })
 
 const importState = reactive({ processed: 0, total: 0, created: 0, skipped: 0, failed: 0, errors: [] })
 /* 提取时长和封面：一次一个；vp.cancel() 或组件卸载时正在读的那个立即放弃 */
@@ -132,6 +133,7 @@ function buildRow(f) {
   const row = { title: String(titles[f.path] ?? '').trim(), playbackUrl: f.url }
   if (f.coverUrl) row.coverUrl = f.coverUrl
   if (common.topicId != null && common.topicId !== '') row.topic = String(common.topicId)
+  if (common.creatorId != null && common.creatorId !== '') row.creator = String(common.creatorId)
   if (common.category) row.category = common.category
   if (common.region) row.region = common.region
   if (common.quality) row.quality = common.quality
@@ -338,6 +340,9 @@ function retryScan() {
               <FormField label="专题">
                 <SelectInput v-model="common.topicId" :options="topicOptions" searchable clearable placeholder="不设置" />
               </FormField>
+              <FormField label="创作者" hint="不设置就是「无创作者」，之后可在视频列表里批量「改创作者…」">
+                <SelectInput v-model="common.creatorId" :options="creatorOptions" searchable clearable placeholder="不设置" />
+              </FormField>
               <FormField label="分类">
                 <SelectInput v-model="common.category" :options="categoryOptions" clearable placeholder="不设置" />
               </FormField>
@@ -347,13 +352,13 @@ function retryScan() {
               <FormField label="清晰度">
                 <SelectInput v-model="common.quality" :options="qualityOptions" clearable placeholder="默认（高清）" />
               </FormField>
-              <FormField class="full" label="标签" hint="回车、逗号或空格分隔，自动加 #">
-                <TagsInput v-model="common.tags" hash />
-              </FormField>
               <FormField label="状态" hint="草稿不会出现在前台">
                 <SelectInput v-model="common.status" :options="statusOptions" />
               </FormField>
-              <FormField label="导入后" inline hint="在浏览器里逐个读取视频时长，没有同名图片的截一帧当封面">
+              <FormField class="full" label="标签" hint="回车、逗号或空格分隔，自动加 #">
+                <TagsInput v-model="common.tags" hash />
+              </FormField>
+              <FormField class="full" label="导入后" inline hint="在浏览器里逐个读取视频时长，没有同名图片的截一帧当封面">
                 <SwitchInput v-model="common.probe" label="提取时长和封面" />
               </FormField>
             </div>

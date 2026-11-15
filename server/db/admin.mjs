@@ -7,10 +7,10 @@
  *   - IN 列表用 json_each(?) 传一个 JSON 数组，不受占位符个数限制
  *   - 返回给接口的行已经是 camelCase 的 Admin* 结构（不含十几 KB 的 *_fallback 占位图）
  */
-import { db, tx, parseTags } from './index.mjs'
+import { db, tx, txWait, parseTags } from './index.mjs'
 import { urlKey, urlSpellings } from '../lib/urls.mjs'
 
-export { tx }
+export { tx, txWait }
 
 /* 语句缓存：导入时同一条 SQL 要跑上万次，不必每次重新 prepare */
 const cache = new Map()
@@ -192,15 +192,23 @@ const VIDEO_SORT = {
   likeCount: 'v.like_count', favCount: 'v.fav_count', durationSec: 'v.duration_sec'
 }
 
-/** f 已由 service 校验成正确类型；undefined = 不筛 */
-function videoWhere(f) {
+/**
+ * f 已由 service 校验成正确类型；undefined = 不筛。
+ * 关键词：标题 / 标签 和 编号分成两段只查 id 的子查询，各自整段扫一个覆盖索引（含标题、标签的索引；编号的唯一索引），
+ * 不用逐行读整张视频表（几万条时扫表要几十到几百毫秒，期间整个服务都在等）；纯数字再按 ID 精确匹配。
+ *
+ * 两个开关只影响 SQLite 选哪个索引（结果完全一样）：列前加一元 + 后这一条件就不能走索引，只能边走排序索引边逐行判断。
+ *   qProbe       关键词只按 id 判断是否在子查询结果里：顺着排序索引（含 id）走、凑够一页就停，不用回表
+ *   missingScan  「缺播放地址 / 封面 / 时长」命中很多时：顺着排序索引逐行看，不用把几万条命中的行全取出来再排序
+ */
+function videoWhere(f, { qProbe = false, missingScan = false } = {}) {
   const w = [], a = []
   if (f.q) {
     const like = likeArg(f.q)
-    let c = `v.title ${LIKE} OR v.public_id ${LIKE} OR v.tags ${LIKE}`
+    let sub = `SELECT id FROM videos WHERE title ${LIKE} OR tags ${LIKE} UNION ALL SELECT id FROM videos WHERE public_id ${LIKE}`
     a.push(like, like, like)
-    if (/^\d+$/.test(f.q)) { c += ' OR v.id = ?'; a.push(Number(f.q)) }
-    w.push(`(${c})`)
+    if (/^\d+$/.test(f.q)) { sub += ' UNION ALL SELECT ?'; a.push(Number(f.q)) }
+    w.push(`${qProbe ? '+' : ''}v.id IN (${sub})`)
   }
   if (f.status !== undefined) { w.push('v.status = ?'); a.push(f.status) }
   if (f.topicId === 'none') w.push('v.topic_id IS NULL')
@@ -211,29 +219,65 @@ function videoWhere(f) {
   else if (f.category !== undefined) { w.push('v.category_key = ?'); a.push(f.category) }
   if (f.region === 'none') w.push('v.region IS NULL')
   else if (f.region !== undefined) { w.push('v.region = ?'); a.push(f.region) }
-  if (f.missing === 'playback') w.push("(v.playback_url IS NULL OR v.playback_url = '')")
-  else if (f.missing === 'cover') w.push("(v.cover_url IS NULL OR v.cover_url = '')")
-  else if (f.missing === 'duration') w.push('v.duration_sec = 0')
+  const m = missingScan ? '+' : ''
+  if (f.missing === 'playback') w.push(`(${m}v.playback_url IS NULL OR ${m}v.playback_url = '')`)
+  else if (f.missing === 'cover') w.push(`(${m}v.cover_url IS NULL OR ${m}v.cover_url = '')`)
+  else if (f.missing === 'duration') w.push(`${m}v.duration_sec = 0`)
   if (f.short === 1) w.push('EXISTS (SELECT 1 FROM short_clips sc WHERE sc.video_id = v.id)')
   else if (f.short === 0) w.push('NOT EXISTS (SELECT 1 FROM short_clips sc WHERE sc.video_id = v.id)')
   return { where: w.length ? 'WHERE ' + w.join(' AND ') : '', args: a }
 }
 
-export function listVideos(f, { sort, order, limit, offset }) {
-  const { where, args } = videoWhere(f)
-  const total = get(`SELECT COUNT(*) c FROM videos v ${where}`, ...args).c
+/** 只有关键词、没有别的筛选：关键词可以只按 id 判断（qProbe）；有别的筛选时交给 SQLite 按筛选列的索引找 */
+const onlyKeyword = f => !!f.q && Object.entries(f).every(([k, v]) => k === 'q' || v === undefined)
+
+/** 「缺 xx」命中超过全部视频的 1/4、又是前几十页时，顺着排序索引逐行看更快（深页还是先取出命中的行再排序） */
+const MISSING_SCAN_SHARE = 4
+const MISSING_SCAN_MAX_OFFSET = 2000
+
+/** 排序子句：「列 方向, v.id 同方向」—— 和 (列, id) 索引的顺序一致，正着倒着都能直接顺着索引取 */
+function videoOrder(sort, order) {
   const ob = orderBy(VIDEO_SORT, sort, order, { key: 'publishedAt' })
-  const list = all(`${VIDEO_SELECT} ${where} ORDER BY ${ob}, v.id ${ob.endsWith('ASC') ? 'ASC' : 'DESC'} LIMIT ? OFFSET ?`,
-    ...args, limit, offset).map(toAdminVideo)
-  return { total, list }
+  return `${ob}, v.id ${ob.endsWith('ASC') ? 'ASC' : 'DESC'}`
 }
 
-/** 导出：原始行（带 topic_slug，service 负责转成导入格式） */
-export function exportVideos(f, { sort, order, limit }) {
-  const { where, args } = videoWhere(f)
-  const ob = orderBy(VIDEO_SORT, sort, order, { key: 'publishedAt' })
-  return all(`${VIDEO_SELECT} ${where} ORDER BY ${ob}, v.id DESC LIMIT ?`, ...args, limit)
+/** 按给定 id 的顺序取视频整行（原始行）；已经不存在的 id 跳过 */
+function videoRowsByIds(ids) {
+  if (!ids.length) return []
+  const byId = new Map(all(`${VIDEO_SELECT} WHERE v.id IN ${IN}`, json(ids)).map(r => [r.id, r]))
+  return ids.map(id => byId.get(id)).filter(Boolean)
 }
+
+/**
+ * 列表分两步：先只查这一页的 id（只碰 videos 一张表，排序 / 跳页顺着 (排序列, id) 索引走，深分页也只是在索引上数过去），
+ * 再按这些 id 连表取整行。以前是整行连表后排序，几万条视频时按播放 / 标题排序、翻到很后面要几百毫秒，期间整个服务都在等。
+ * 总数是 0 或页码超出时不再查列表。
+ */
+export function listVideos(f, { sort, order, limit, offset }) {
+  const total = countVideos(f)
+  if (!total || offset >= total) return { total, list: [] }
+  const missingScan = !!f.missing && offset < MISSING_SCAN_MAX_OFFSET &&
+    total * MISSING_SCAN_SHARE > get('SELECT COUNT(*) c FROM videos').c
+  const { where, args } = videoWhere(f, { qProbe: onlyKeyword(f), missingScan })
+  const ids = all(`SELECT v.id FROM videos v ${where} ORDER BY ${videoOrder(sort, order)} LIMIT ? OFFSET ?`, ...args, limit, offset)
+    .map(r => r.id)
+  return { total, list: videoRowsByIds(ids).map(toAdminVideo) }
+}
+
+/** 符合筛选的视频数（导出被截断时也用它告诉前端一共有多少） */
+export function countVideos(f) {
+  const { where, args } = videoWhere(f, { qProbe: onlyKeyword(f) })
+  return get(`SELECT COUNT(*) c FROM videos v ${where}`, ...args).c
+}
+
+/** 导出第一步：排好序的 id，最多 limit 个（顺序和列表一致） */
+export function exportVideoIds(f, { sort, order, limit }) {
+  const { where, args } = videoWhere(f, { qProbe: onlyKeyword(f) })
+  return all(`SELECT v.id FROM videos v ${where} ORDER BY ${videoOrder(sort, order)} LIMIT ?`, ...args, limit).map(r => r.id)
+}
+
+/** 导出第二步：按 id 取原始行（带 topic_slug，service 负责转成导入格式），service 分块调用、块之间让出事件循环 */
+export const exportVideoRows = ids => videoRowsByIds(ids)
 
 export const getVideo = id => toAdminVideo(get(`${VIDEO_SELECT} WHERE v.id = ?`, id))
 /** 编辑时比对用的原始列（不含 cover_fallback 等用不到的大字段） */
@@ -794,4 +838,50 @@ export function videoIdByPlayback(url) {
   const key = urlKey(url)
   if (!key) return null
   return videosByUrlSpellings(urlSpellings(url)).find(v => urlKey(v.url) === key)?.id ?? null
+}
+
+/* ---------------- 素材地址的引用（素材改名 / 移动时一起改） ---------------- */
+
+/*
+ * 存 /media/ 地址的列：[表, 列, 归属列, 归属类型]。归属用来统计「改了几个视频 / 几个图集 …」。
+ * 直播、同城是演示数据，不在其中。
+ */
+const MEDIA_REF_COLUMNS = [
+  ['videos', 'playback_url', 'id', 'videos'], ['videos', 'cover_url', 'id', 'videos'],
+  ['album_images', 'url', 'album_id', 'albums'],
+  ['post_media', 'url', 'post_id', 'posts'], ['post_media', 'thumb_url', 'post_id', 'posts'],
+  ['topic_covers', 'url', 'topic_id', 'topics'],
+  ['creators', 'avatar_url', 'id', 'creators'], ['users', 'avatar_url', 'id', 'users'],
+  ['series_episodes', 'cover_url', 'id', 'episodes']
+]
+export const MEDIA_REF_KINDS = [...new Set(MEDIA_REF_COLUMNS.map(c => c[3]))]
+
+/** 库里确实有的那些列（老库可能缺表 / 缺列，缺的跳过） */
+let refColumns = null
+function mediaRefColumns() {
+  refColumns ??= MEDIA_REF_COLUMNS.filter(([t, c]) => all(`PRAGMA table_info(${t})`).some(x => x.name === c))
+  return refColumns
+}
+
+/**
+ * 地址落在这些区间 [lo, hi) 里的引用：[{ table, col, kind, rid, owner, url }]（同一行可能因为区间重叠出现多次）。
+ * 区间由调用方按地址的几种写法算好；结果是超集，调用方再用 urlKey() 精确比对。
+ * 有索引的列（视频的播放地址 / 封面、图集图片）每个区间一次索引范围查找；其余几张表行数少，直接扫。
+ */
+export function mediaRefsInRanges(ranges) {
+  if (!ranges.length) return []
+  const out = []
+  for (const [t, c, owner, kind] of mediaRefColumns()) {
+    // CROSS JOIN 固定 json_each 在外层：每个区间走一次索引范围查找
+    const rows = all(`SELECT x.rowid AS rid, x.${owner} AS owner, x.${c} AS url FROM json_each(?) j
+                      CROSS JOIN ${t} x ON x.${c} >= json_extract(j.value, '$[0]') AND x.${c} < json_extract(j.value, '$[1]')`, json(ranges))
+    for (const r of rows) out.push({ table: t, col: c, kind, ...r })
+  }
+  return out
+}
+
+/** 改一条引用的地址（表 / 列只能是上面列出的） */
+export function setMediaRef(table, col, rid, url) {
+  if (!MEDIA_REF_COLUMNS.some(([t, c]) => t === table && c === col)) throw new Error(`未知列 ${table}.${col}`)
+  return run(`UPDATE ${table} SET ${col} = ? WHERE rowid = ?`, url, rid).changes
 }

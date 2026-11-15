@@ -19,6 +19,31 @@ export function usageText(e) {
   return parts.length ? `被 ${parts.join('、')}使用` : '未被使用'
 }
 
+/* 改名 / 移动后服务端顺手改了地址的各类数据（refs 的键 → 说法） */
+const REF_TEXT = { videos: '个视频', albums: '个图集', posts: '条帖子', topics: '个专题', creators: '个创作者头像', users: '个账号头像', episodes: '个剧集' }
+/** refs → 「3 个视频、1 个图集」（都是 0 返回 ''） */
+export function refsText(refs) {
+  return Object.entries(refs || {}).filter(([k, n]) => n > 0 && REF_TEXT[k]).map(([k, n]) => n + ' ' + REF_TEXT[k]).join('、')
+}
+
+/** 素材文件名的本地检查（和服务端 server/admin/media.mjs 的 cleanRel 一样的说法）；name 是一段名字，不含 / */
+export function nameProblem(name) {
+  const s = String(name || '')
+  if (!s.trim()) return '请输入名称'
+  if (s === '.' || s === '..') return '名称不能是 . 或 ..（不能用它们跳到别的文件夹）'
+  if (s.includes('..')) return '名称不能包含 ..'
+  if (/[\\:*?"<>|]/.test(s)) return '名称不能包含 \\ : * ? " < > | 这些字符'
+  if (/[\u0000-\u001f\u007f]/.test(s)) return '名称包含非法字符'
+  if (/^[. ]|[. ]$/.test(s)) return '名称不能以点或空格开头 / 结尾'
+  if (new TextEncoder().encode(s).length > 200) return '名称过长（最多 200 字节）'
+  if (/^(con|prn|aux|nul|com\d|lpt\d)(\.|$)/i.test(s)) return `「${s}」是系统保留名称`
+  return ''
+}
+
+/** 以 .thumb.jpg 结尾的是小图（App 网格用）：和原图同名同文件夹，跟着原图走 */
+export const THUMB_SUFFIX = '.thumb.jpg'
+export const isThumbName = name => String(name || '').toLowerCase().endsWith(THUMB_SUFFIX) && String(name).length > THUMB_SUFFIX.length
+
 export const extOf = name => (/\.([^./]+)$/.exec(String(name || '').toLowerCase()) || [])[1] || ''
 export const baseOf = name => String(name || '').replace(/\.[^./]+$/, '')
 export const isAllowed = name => ALLOWED_EXTS.includes(extOf(name))

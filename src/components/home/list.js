@@ -1,4 +1,4 @@
-import { nextTick, onActivated, watch } from 'vue'
+import { onActivated, watch } from 'vue'
 import { isDemoId } from '@/api'
 import { createFeed, PAGE } from '@/components/creator/feed'
 import { scrollBehavior } from '@/utils/motion'
@@ -9,6 +9,7 @@ import { scrollBehavior } from '@/utils/motion'
  *   const feed = createHomeFeed(page => getCategoryVideos(tab, { filter, ...page }))
  *   useAutoMore(scroller, feed)            // 离底部不远时自动 more()
  *   refreshFeed(feed, fetchPage, isStale)  // 重新取第一页，回来后整体替换（不先清空，不闪骨架）
+ *   feedError(feed)                        // 出错时的错误对象（给 LoadState），没出错为 null
  *
  * 这几个接口只返回数组、不给总数：总数记成 Infinity，靠「这一页不足 20 条」判断到底。
  */
@@ -23,6 +24,9 @@ export function createHomeFeed(fetchPage) {
     return res
   })
 }
+
+/** 列表出错时给 LoadState 的 error（createFeed 的 error 就是最近一次的错误对象）；没出错为 null */
+export const feedError = feed => feed.error || null
 
 /* 离底部还剩这么多像素时就取下一页（一屏多一点），滚得快也不容易看到底部的「加载中」 */
 const PRELOAD = 800
@@ -43,9 +47,15 @@ export function useAutoMore(scroller, feed) {
     old?.removeEventListener('scroll', check)
     el?.addEventListener('scroll', check, { passive: true })
   }, { immediate: true, flush: 'post' })
-  watch(() => feed.loading, busy => { if (!busy) nextTick(check) })
-  onActivated(() => nextTick(check))
+  // 一页刚挂上时不当场量（读 scrollHeight 会在挂载的这一下里逼浏览器把整个列表排一遍版）：等这一帧画出来再看
+  watch(() => feed.loading, busy => { if (!busy) afterPaint(check) })
+  onActivated(() => afterPaint(check))
   return check
+}
+
+/** 这一帧画出来以后再做（排版已经算好，这时读位置不会额外排版，也不拖慢新内容第一次出现） */
+export function afterPaint(fn) {
+  requestAnimationFrame(() => setTimeout(fn))
 }
 
 /**

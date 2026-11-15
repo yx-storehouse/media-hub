@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { formatCount } from '@/utils/format'
 import { quietArt } from '@/utils/art'
 import Cover from '@/components/Cover.vue'
@@ -55,9 +55,38 @@ function parallax(top) {
 }
 defineExpose({ parallax })
 
+/*
+ * 头图一格用小图还是原图：一格要的宽度（设备像素）不超过 SHARP_W 就用接口给的小图（cover.thumb，长边约 480、短边至少 360）——
+ * 手机上一格一百多 CSS 像素，小图足够清楚，原图（手机照片动辄几 MB）白白多下载；
+ * 桌面很宽的窗口、高分屏上一格要五六百像素以上，小图会发虚，用原图。
+ * 横幅的宽度用 ResizeObserver 量（不在挂载时同步读布局）；数据比第一次量到还早回来时（本机、局域网很快）当场读一次宽度，
+ * 不然会先按小图下载、马上又换原图，白下一张。
+ */
+const SHARP_W = 420
+const bannerEl = ref(null)
+const bannerW = ref(0)
+let ro = null
+onMounted(() => {
+  if (typeof ResizeObserver === 'undefined' || !bannerEl.value) return
+  ro = new ResizeObserver(entries => {
+    const w = Math.round(entries[0]?.contentRect?.width || 0)
+    if (w && w !== bannerW.value) bannerW.value = w
+  })
+  ro.observe(bannerEl.value)
+})
+onBeforeUnmount(() => { ro?.disconnect(); ro = null })
+
 /* 头图里没有生成占位图的（图集的封面、后台上传的作品）：垫一张按地址算的灰色渐变，图来不了时不是一块死黑 */
-const banner = computed(() => (props.creator?.banner || []).filter(Boolean).slice(0, 3)
-  .map(c => (c.src && !c.fallback ? { ...c, fallback: quietArt(c.src) } : c)))
+const banner = computed(() => {
+  const list = (props.creator?.banner || []).filter(Boolean).slice(0, 3)
+  const width = list.length ? bannerW.value || bannerEl.value?.offsetWidth || 0 : 0
+  const need = list.length ? (width / list.length) * (window.devicePixelRatio || 1) : 0
+  const sharp = need > SHARP_W
+  return list.map(c => ({
+    src: (!sharp && c.thumb) || c.src || null,
+    fallback: c.fallback || (c.src ? quietArt(c.src) : null)
+  }))
+})
 
 /* 没有作品图时的头图：同一个创作者每次都是同一张（角度、光斑位置由 id 决定） */
 const generated = computed(() => quietArt(props.creator?.id))
@@ -82,7 +111,7 @@ const stats = computed(() => {
 
 <template>
   <header class="cr-hd" :aria-busy="!creator">
-    <div class="cr-banner" :class="{ sk: !creator }">
+    <div ref="bannerEl" class="cr-banner" :class="{ sk: !creator }">
       <!-- 头图单独一层：视差、回弹放大都只动这一层 -->
       <div ref="bg" class="cr-bg" :style="creator && !banner.length ? { backgroundImage: generated } : undefined">
         <div v-if="banner.length" v-rise="calm ? false : { y: 0, scale: 1.06 }" class="tiles">
@@ -117,7 +146,10 @@ const stats = computed(() => {
       <p v-if="creator.bio" class="cr-bio">{{ creator.bio }}</p>
     </template>
 
-    <!-- 加载中：头像、名字、数据行的骨架 -->
+    <!--
+      加载中：头像、名字、数据行、一行简介的骨架，和最常见的真头部一样高，数据回来时下面的标签栏、网格不往下跳。
+      手机上数据行一般是两行（@名字 · 粉丝 · 视频 · 帖子 · 最后更新，窄屏放不下一行），多一条短的 sk-s2；桌面上一行就够（藏起来）
+    -->
     <template v-else>
       <div class="cr-row" aria-hidden="true">
         <div class="cr-av sk" />
@@ -125,8 +157,8 @@ const stats = computed(() => {
       </div>
       <div class="sk sk-n" />
       <div class="sk sk-s" />
-      <!-- 桌面布局多一条简介：骨架和真头部一样高，数据回来时下面的标签栏、网格不往下跳 -->
-      <div v-if="isDesktop" class="sk sk-b" />
+      <div class="sk sk-s2" />
+      <div class="sk sk-b" />
     </template>
   </header>
 </template>
@@ -192,8 +224,15 @@ const stats = computed(() => {
 .cr-banner.sk::after { display: none; }
 .cr-av.sk { box-shadow: 0 0 0 4px var(--bg); }
 .cr-follow.sk { width: 84px; }
+/*
+ * 四条骨架各自落在真头部那一行文字的位置上，总高和「名字 + 两行数据 + 一行简介」一样（名字 10 + 30、数据 5 + 21 × 2、简介 8 + 21）：
+ * 名字条 22px 在 30px 那一行里居中；数据、简介条 13px 在 21px 的行里居中。
+ * 只用上外边距（相邻的上下外边距会合并，不能拆成上下两半）；最后一条的下外边距把简介那一行补满
+ */
 .sk-n { width: 132px; height: 22px; margin: 14px 16px 0; border-radius: 6px; }
-.sk-s { width: 220px; max-width: calc(100% - 32px); height: 13px; margin: 12px 16px 0; border-radius: 6px; }
+.sk-s { width: 220px; max-width: calc(100% - 32px); height: 13px; margin: 13px 16px 0; border-radius: 6px; }
+.sk-s2 { width: 120px; max-width: calc(100% - 32px); height: 13px; margin: 8px 16px 0; border-radius: 6px; }
+.sk-b { width: 200px; max-width: calc(100% - 32px); height: 13px; margin: 16px 16px 4px; border-radius: 6px; }
 @keyframes sk { 50% { opacity: .5; } }
 @media (prefers-reduced-motion: reduce) {
   .sk { animation: none; }
@@ -267,6 +306,8 @@ const stats = computed(() => {
   /* 三条骨架各占的高度（含上下边距）和真的名字 32、数据行 6 + 22、一行简介 8 + 22 一样，条竖直落在那一行文字的位置上 */
   .sk-n { grid-area: name; width: 180px; height: 24px; margin: 4px 0; }
   .sk-s { grid-area: stats; width: 320px; height: 14px; margin: 10px 0 4px; }
+  /* 桌面上数据行一行就放得下：没有第二条 */
+  .sk-s2 { display: none; }
   .sk-b { grid-area: bio; width: 360px; max-width: 100%; height: 14px; margin: 12px 0 4px; }
 }
 @media (min-width: 1024px) and (hover: hover) {

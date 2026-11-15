@@ -5,12 +5,15 @@ import AppLogo from '@/components/AppLogo.vue'
 import Icon from '@/components/Icon.vue'
 import DeskSearch from './DeskSearch.vue'
 import DeskAccount from './DeskAccount.vue'
+import { focusMain } from '@/composables/useMainFocus'
 
 /*
  * 桌面布局的顶栏（只在桌面布局时由 App.vue 渲染）：横跨整个窗口，高 --desk-top（56px），换页时不动。
  *   左：☰（左侧导航展开 / 收起）、Logo（回首页，和点左侧「首页」一样）
  *   中：搜索框（窗口正中，最宽约 560px，DeskSearch.vue）
  *   右：登录按钮 / 头像菜单（DeskAccount.vue）
+ * 最前面还有一个「跳到主要内容」：平时看不见，键盘 Tab 的第一下落到它上面才出现，回车把焦点交给当前页面的内容
+ * （不用把顶栏和左侧导航十几个按钮挨个 Tab 过去），见 composables/useMainFocus.js。
  */
 const { hrefOf, open } = useDeskNav()
 const HOME = { tab: 'home' }
@@ -18,6 +21,7 @@ const HOME = { tab: 'home' }
 
 <template>
   <header class="dtop">
+    <button type="button" class="dt-skip" @click="focusMain">跳到主要内容</button>
     <div class="dt-l">
       <button
         type="button"
@@ -57,6 +61,22 @@ const HOME = { tab: 'home' }
   user-select: none;
 }
 .dt-l { display: flex; align-items: center; gap: 12px; min-width: 0; }
+/* 「跳到主要内容」：没聚焦时移出屏幕（读屏软件照样读得到）；键盘聚焦时浮在顶栏左上角 */
+.dt-skip {
+  position: absolute;
+  top: 8px;
+  left: 16px;
+  z-index: 1;
+  height: 40px;
+  padding: 0 16px;
+  border-radius: 10px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 14px;
+  font-weight: 600;
+  transform: translate3d(0, -64px, 0);
+}
+.dt-skip:focus { transform: none; }
 /* ☰ 的中心和图标栏的图标对齐（图标栏 72px 宽，中心在 36px） */
 .dt-menu {
   display: grid;

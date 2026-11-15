@@ -7,31 +7,51 @@ import { useScrollEdge } from '@/components/motion/scrollEdge'
 import { isDesktop } from '@/composables/useDesktop'
 import Cover from '@/components/Cover.vue'
 import Icon from '@/components/Icon.vue'
+import LoadState from '@/components/common/LoadState.vue'
 
 defineOptions({ name: 'NearbyView' })
 
-/* 筛选项由接口给出：[{ label, category, sort_key }] */
-const filters = shallowRef([])
+/*
+ * 同城（演示内容）：筛选项 + 地点列表。
+ * 取不到时和别的页面一样显示「出错说明 + 重试」（LoadState）：联网、切回这一页、页面看得见时隔一会儿都会自己再取一次；
+ * 第一次取的时候满 0.25 秒还没回来才淡入骨架。
+ */
+
+/* 筛选项由接口给出：[{ label, category, sort_key }]；null = 还没取到 */
+const filters = shallowRef(null)
 const active = ref(0)
-const items = shallowRef([])
+/* 地点列表；null = 还没取到（骨架） */
+const items = shallowRef(null)
+/* 最近一次取失败的错误（筛选项或列表）；取到了清掉 */
+const error = shallowRef(null)
 const scroller = ref(null)
 const chipRow = ref(null)
 useKeepScroll(scroller, chipRow)
 
-async function loadItems() {
+/* 只认最后一次：换了筛选、重试之后，之前还没回来的结果不要 */
+let loadSeq = 0
+async function load() {
+  const seq = ++loadSeq
   const filter = active.value
-  const list = await getNearby({ filter })
-  if (filter === active.value) items.value = list // ignore answers for a filter the user already left
+  try {
+    // 筛选项取到过就不再取；列表取当前选中的那一项
+    const [f, list] = await Promise.all([filters.value || getNearbyFilters(), getNearby({ filter })])
+    if (seq !== loadSeq) return
+    filters.value = f || []
+    items.value = list || []
+    error.value = null
+  } catch (e) {
+    if (seq === loadSeq) error.value = e
+  }
 }
 
 function selectFilter(i) {
   if (i === active.value) return
   active.value = i
-  loadItems()
+  load()
 }
 
-getNearbyFilters().then(list => { filters.value = list })
-loadItems()
+load()
 
 /*
  * 桌面布局：筛选行平时没有底线，卡片从它下面滚过去时才出现细线和淡阴影（和社区、直播的标签行一样，
@@ -51,7 +71,7 @@ watch(isDesktop, () => nextTick(edge.refresh))
     <!-- d-wrap：桌面上筛选项折行显示，不用横着滚 -->
     <div ref="chipRow" class="chips hs d-wrap" :class="{ 'm-edge': isDesktop }">
       <button
-        v-for="(f, i) in filters"
+        v-for="(f, i) in filters || []"
         :key="f.label"
         class="chip"
         :class="{ on: i === active }"
@@ -60,24 +80,41 @@ watch(isDesktop, () => nextTick(edge.refresh))
       >
         {{ f.label }}
       </button>
+      <!-- 筛选项还没回来：同样大小的灰块占住这一行（满 0.25 秒才淡入），回来时下面的列表不往下跳 -->
+      <template v-if="!filters && !error">
+        <span v-for="i in 6" :key="'sk' + i" class="chip nb-late sk" aria-hidden="true" />
+      </template>
     </div>
 
-    <div ref="scroller" class="scroll">
-      <!-- 手机上是一列，桌面布局（≥ 1024px）是两三列的卡片网格 -->
-      <div class="nb-list">
-        <div v-for="item in items" :key="item.id" v-press class="nb-item" @click="toast('详情页即将上线')">
-          <Cover class="cv" v-bind="item.cover" />
-          <div class="bd">
-            <h3>{{ item.title }}</h3>
-            <div class="tags">
-              <span v-for="tag in item.tags" :key="tag">{{ tag }}</span>
-            </div>
-            <div class="ft">
-              <span><Icon name="tNearby" class="pin" />{{ item.distance }}</span>
-              <b>{{ item.price }}</b>
+    <div ref="scroller" class="scroll" :aria-busy="!items && !error">
+      <!-- 取不到：统一的说法 +「重试」，联网 / 切回来 / 隔一会儿会自己重试 -->
+      <LoadState v-if="error" :error="error" :retry="load" />
+      <div v-else class="m-swap">
+        <Transition name="m-skel">
+          <!-- 第一次取：满 0.25 秒还没回来才淡入骨架（和真的一行 / 一张卡片一样大） -->
+          <div v-if="!items" class="nb-list nb-late" aria-hidden="true">
+            <div v-for="i in 6" :key="i" class="nb-item nb-sk">
+              <div class="cv sk" />
+              <div class="bd"><div class="sk l1" /><div class="sk l2" /><div class="sk l3" /></div>
             </div>
           </div>
-        </div>
+          <!-- 手机上是一列，桌面布局（≥ 1024px）是两三列的卡片网格 -->
+          <div v-else class="nb-list">
+            <div v-for="item in items" :key="item.id" v-press class="nb-item" @click="toast('详情页即将上线')">
+              <Cover class="cv" v-bind="item.cover" />
+              <div class="bd">
+                <h3>{{ item.title }}</h3>
+                <div class="tags">
+                  <span v-for="tag in item.tags" :key="tag">{{ tag }}</span>
+                </div>
+                <div class="ft">
+                  <span><Icon name="tNearby" class="pin" />{{ item.distance }}</span>
+                  <b>{{ item.price }}</b>
+                </div>
+              </div>
+            </div>
+          </div>
+        </Transition>
       </div>
       <div class="pad-b" />
     </div>
@@ -117,6 +154,30 @@ watch(isDesktop, () => nextTick(edge.refresh))
 }
 
 /*
+ * ---- 骨架 ----
+ * 筛选项：和真的胶囊一样高、两个字那么宽；列表：和真的一行一样大（方图 + 标题、标签、距离三条）。
+ * nb-late：满 0.25 秒还没换成内容才淡入（本地接口几十毫秒就回来，直接从空白换成内容，不先闪一下骨架）
+ */
+.sk { background: #161616; animation: sk 1.2s ease-in-out infinite; }
+.chip.sk { width: 56px; box-shadow: none; }
+/* 骨架不接鼠标、手指（桌面上不出悬停底色） */
+.nb-late { pointer-events: none; }
+/* 方块和真的封面同一套尺寸（上面的 .nb-item .cv：112px 正方形，老引擎靠 ::before 撑高） */
+.nb-sk .cv { border-radius: 8px; }
+.nb-sk .l1 { width: 86%; height: 14px; margin-top: 3px; border-radius: 6px; }
+.nb-sk .l2 { width: 46%; height: 12px; margin-top: 12px; border-radius: 4px; }
+.nb-sk .l3 { width: 30%; height: 12px; margin-top: auto; margin-bottom: 2px; border-radius: 6px; }
+.nb-late { animation: nb-late var(--dur-2) var(--ease-out) .25s backwards; }
+.nb-late .sk { animation: sk 1.2s ease-in-out calc(.25s + var(--dur-2)) infinite; }
+.chip.nb-late.sk { animation: nb-late var(--dur-2) var(--ease-out) .25s backwards, sk 1.2s ease-in-out calc(.25s + var(--dur-2)) infinite; }
+@keyframes nb-late { from { opacity: 0; } }
+@keyframes sk { 50% { opacity: .5; } }
+@media (prefers-reduced-motion: reduce) {
+  .sk, .nb-late .sk { animation: none; }
+  .nb-late, .chip.nb-late.sk { animation: nb-late 1ms linear .25s backwards; }
+}
+
+/*
  * ---- 桌面布局（≥ 1024px）----
  * 城市 + 搜索一行、筛选项一行，都和下面的卡片对齐在内容边上（最宽 --desk-max、居中）；筛选行下面平时没有线，滚动时才出现；
  * 地点是横向的卡片（方图 + 标题、标签、距离 / 价格），按 420px 自动排列数：一般两列，很宽的窗口三列。
@@ -148,6 +209,12 @@ watch(isDesktop, () => nextTick(edge.refresh))
   .ft b { font-size: 16px; }
   .ft .pin { width: 13px; height: 13px; }
   .nearby .pad-b { height: 32px; }
+  /* 骨架：三条和桌面卡片的标题（16 / 24）、标签（22）、价格行对齐 */
+  .chip.sk { width: 60px; }
+  .nb-sk .cv { border-radius: 10px; }
+  .nb-sk .l1 { height: 16px; margin-top: 4px; }
+  .nb-sk .l2 { height: 14px; margin-top: 16px; }
+  .nb-sk .l3 { height: 14px; margin-bottom: 4px; }
 }
 @media (min-width: 1024px) and (hover: hover) {
   /* 悬停：底色亮一档、再描一圈很淡的边（生成的占位图不会放大，光靠底色看不出来）；底色停在标签底色（#1e1e1e）下面，标签不融进去 */

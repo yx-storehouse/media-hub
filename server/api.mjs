@@ -66,21 +66,34 @@ export function getRecommendSections() {
   return Promise.resolve(sections)
 }
 
-/** 分区某个批次的视频：batch 传给下一次「换一批」 */
+/**
+ * 分区某个批次的视频：batch 传给下一次「换一批」。
+ * size 1～60（分区每批最多 60 条，默认 4），batch 从 0 起（非法值按默认）。
+ */
 export function getVideos(sectionId, size = 4, batch = 0, userId = null) {
-  return Promise.resolve(q.attachVideoState(q.sectionVideos(sectionId, size, batch), userId))
+  const list = q.sectionVideos(sectionId, intIn(size, 1, 60, 4), intIn(batch, 0, MAX_OFFSET, 0))
+  return Promise.resolve(q.attachVideoState(list, userId))
 }
 
-/** 「最新」筛选：regions[0] 是「全部」，每个地区带 7 天的 counts，count = counts[date] */
+/**
+ * 「最新」筛选：regions[0] 是「全部」，每个地区带 7 天的 counts，count = counts[date]；
+ * latestAt 是最近一次上新的时间（7 天里一条都没有时 App 用 date=recent 兜底）。
+ */
 export const getLatestFilters = (opts = {}) => Promise.resolve(q.latestFilters(opts))
-export const getLatestVideos = (opts = {}, userId = null) => Promise.resolve(q.attachVideoState(q.latestVideos(opts), userId))
+/** 「最新」的视频：date 0～6（几天前）或 'recent'（不限日期的最近上新），region 见 db/index.mjs；分页同 pageOf */
+export const getLatestVideos = (opts = {}, userId = null) =>
+  Promise.resolve(q.attachVideoState(q.latestVideos({ date: q.latestDateOf(opts.date), region: opts.region, ...pageOf(opts) }), userId))
 export const getCategoryFilters = tab => Promise.resolve(q.categoryFilters(tab))
-export const getCategoryVideos = (tab, opts = {}, userId = null) => Promise.resolve(q.attachVideoState(q.categoryVideos(tab, opts), userId))
+/** 分类视频：filter 是筛选项下标（0 起），分页同 pageOf */
+export const getCategoryVideos = (tab, opts = {}, userId = null) =>
+  Promise.resolve(q.attachVideoState(q.categoryVideos(tab, { filter: intIn(opts.filter, 0, 1000, 0), ...pageOf(opts) }), userId))
 
 /* ---------------- 搜索 ---------------- */
 
-export const getHotWords = (page = 0) => Promise.resolve(q.hotWords(page))
-export const getCreators = (limit = 5) => Promise.resolve(q.creators(limit).map(c => ({
+/** 热门搜索词（筛选有缓存，见 db/index.mjs 的 hotWords） */
+export const getHotWords = (page = 0) => q.hotWords(page)
+/** 热门创作者：limit 1～50（默认 5） */
+export const getCreators = (limit = 5) => Promise.resolve(q.creators(intIn(limit, 1, 50, 5)).map(c => ({
   id: c.id,
   handle: c.handle,
   name: c.name,
@@ -90,15 +103,18 @@ export const getCreators = (limit = 5) => Promise.resolve(q.creators(limit).map(
 })))
 /** 旧版「近期搜索」（视频卡片），已弃用：App 改用 getSearchHistory 的关键词列表后删除 */
 export const getRecentSearches = (userId = null, { limit = 5, offset = 0 } = {}) =>
-  Promise.resolve(userId ? q.searchHistory(userId, { limit, offset }) : [])
+  Promise.resolve(userId ? q.searchHistory(userId, pageOf({ limit: limit ?? 5, offset })) : [])
 export function searchVideos(keyword, opts = {}, userId = null) {
   const { total, list } = q.searchVideos(keyword, opts)
   return Promise.resolve({ total, list: q.attachVideoState(list, userId) })
 }
 
-/** 登录用户搜第一页时记一次关键词（翻页不重复记）；没有结果也记，近期搜索里能看到搜过什么 */
+/**
+ * 登录用户搜第一页时记一次关键词（翻页不重复记）；没有结果也记，近期搜索里能看到搜过什么。
+ * 是 GET 里顺带的写：别的进程正拿着写锁时就不记了，搜索本身照常返回。
+ */
 function noteSearch(userId, keyword, opts, firstVideoId = null) {
-  if (userId && !(Number(opts.offset) > 0)) q.addSearchHistory(userId, keyword, firstVideoId)
+  if (userId && !(Number(opts.offset) > 0)) q.bestEffortWrite(() => q.addSearchHistory(userId, keyword, firstVideoId))
 }
 
 /** 搜帖子（标题 + 话题标签）→ { total, list }，每条和社区列表一样（media、time、faved） */
@@ -156,9 +172,10 @@ export function getTopic(id, userId = null) {
   })
 }
 
+/** 专题视频：sort 是 topicSorts() 的下标（认不出按 0），分页同 pageOf；每条带 hasSrc（自动连播跳过没有片源的） */
 export function getTopicVideos(id, sort = 0, opts = {}, userId = null) {
   if (!q.topic(id)) inputError('专题不存在或已下架')
-  const { total, list } = q.topicVideos(id, sort, opts)
+  const { total, list } = q.topicVideos(id, enumIn(sort, 4, 0), pageOf(opts))
   return Promise.resolve({ total, list: q.attachVideoState(list, userId) })
 }
 export const getLibrary = () => Promise.resolve(q.library())
@@ -175,8 +192,9 @@ export function getVideo(id, userId = null) {
   return Promise.resolve(v)
 }
 
+/** 相似推荐：batch 从 0 起（换一批），limit 1～20（默认 6）；有片源（hasSrc）的排在前面 */
 export const getRelatedVideos = (id, opts = {}, userId = null) =>
-  Promise.resolve(q.attachVideoState(q.relatedVideos(id, opts), userId))
+  Promise.resolve(q.attachVideoState(q.relatedVideos(id, { batch: intIn(opts.batch, 0, MAX_OFFSET, 0), limit: intIn(opts.limit, 1, 20, 6) }), userId))
 
 /* ---------------- 短视频 ---------------- */
 
@@ -195,8 +213,9 @@ export function getShorts(opts = {}, userId = null) {
 /* ---------------- 社区 ---------------- */
 
 export const getCommunityTabs = () => Promise.resolve(q.communityTabs())
+/** 社区列表：tab 0 最新 / 1 热门 / 2 关注 / 3 收藏（认不出按 0），分页同 pageOf */
 export function getPosts(tab = 0, opts = {}, userId = null) {
-  const list = q.posts(tab, { ...opts, userId })
+  const list = q.posts(enumIn(tab, 3, 0), { ...pageOf(opts), userId })
   for (const p of list) p.time = q.relativeTime(p.publishedAt)   // 前端展示「44分钟前」
   return Promise.resolve(q.attachPostState(list, userId))
 }
@@ -251,13 +270,27 @@ function requireCreator(raw) {
 }
 /* offset 上限：再大也只是翻不到数据；不封顶的话 1e20、Infinity 超出 SQLite 整数范围会报错（500） */
 const MAX_OFFSET = 1e9
-/** 列表分页：limit 1-50（默认 20），offset 0 ~ MAX_OFFSET（不是数字、负数按 0） */
+/**
+ * 列表分页：limit 1-50（默认 20），offset 0 ~ MAX_OFFSET（不是数字、负数按 0）。
+ * 所有公开列表都走这里：以前有几条路由直接用 +(q.limit || 20)，?limit=-1 就能一次拉走整张表。
+ */
 const pageOf = ({ limit, offset } = {}) => {
   const o = Math.floor(Number(offset))
   return {
     limit: Math.min(Math.max(Math.floor(Number(limit)) || 20, 1), 50),
     offset: o > 0 ? Math.min(o, MAX_OFFSET) : 0
   }
+}
+/** 整数参数：取整后夹在 [min, max] 里；不是数字按 def */
+function intIn(v, min, max, def) {
+  if (v == null || v === '') return def
+  const n = Math.floor(Number(v))
+  return Number.isFinite(n) ? Math.min(Math.max(n, min), max) : def
+}
+/** 下标类参数（tab、排序）：0 ~ max 的整数，超出范围或不是数字按 def */
+function enumIn(v, max, def) {
+  const n = v == null || v === '' ? def : Number(v)
+  return Number.isInteger(n) && n >= 0 && n <= max ? n : def
 }
 
 /** 主页头部（公开）；登录时回填 following。不存在或已停用：400「创作者不存在」 */
@@ -312,10 +345,15 @@ export function getAlbum(rawId, userId = null) {
 
 /* ---------------- 直播 / 同城 ---------------- */
 
+/* 直播 / 同城是演示内容，参数照样校验：tab / filter 是下标（认不出按 0），分页同 pageOf */
 export const getLiveTabs = () => Promise.resolve(q.liveTabs())
-export const getLives = opts => Promise.resolve(q.lives(opts))
+export const getLives = (opts = {}) => Promise.resolve(q.lives({ tab: enumIn(opts.tab, 4, 0), ...pageOf(opts) }))
 export const getNearbyFilters = () => Promise.resolve(q.nearbyFilters())
-export const getNearby = opts => Promise.resolve(q.nearby(opts))
+export const getNearby = (opts = {}) => Promise.resolve(q.nearby({
+  filter: intIn(opts.filter, 0, 1000, 0),
+  city: typeof opts.city === 'string' && opts.city.trim() ? opts.city.trim().slice(0, 50) : null,
+  ...pageOf(opts)
+}))
 
 /* ---------------- 我的 ---------------- */
 

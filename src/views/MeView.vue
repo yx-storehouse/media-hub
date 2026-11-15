@@ -2,13 +2,16 @@
 import { ref, reactive, shallowRef, computed, watch, nextTick, onMounted, onActivated, onDeactivated, useTemplateRef } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { getProfile } from '@/api'
+import { ApiError, errorText, isNetworkError, MSG } from '@/api/http'
 import { useAuthStore } from '@/stores/auth'
 import { toast } from '@/composables/useToast'
 import { useKeepScroll } from '@/composables/useKeepScroll'
 import { useBackDismiss } from '@/composables/useBackDismiss'
+import { useReconnect, isOffline } from '@/composables/useReconnect'
 import Cover from '@/components/Cover.vue'
 import Icon from '@/components/Icon.vue'
 import ConfirmSheet from '@/components/me/ConfirmSheet.vue'
+import AboutSheet from '@/components/me/AboutSheet.vue'
 import { countUp } from '@/components/home/motion'
 import { inApp, openServerSettings, hasAndroidApk, APK_URL } from '@/utils/shell'
 import { isDesktop } from '@/composables/useDesktop'
@@ -16,13 +19,15 @@ import { trapTab } from '@/components/desk/modal'
 
 defineOptions({ name: 'MeView' })
 
-/* 菜单项；没有 to 的表示功能尚未开放 */
+/*
+ * 菜单项：都是做好了的功能（没做的入口不放：点了只提示「即将上线」的格子不如没有）。
+ *   to：进对应页面（login 的要先登录）；about：打开「关于 Reel」（版本、服务器地址）
+ * 片库在手机上只有首页右上角一个入口、桌面上在左侧导航最下面，这里也放一个（和观看历史放在一起）
+ */
 const CELLS = [
-  { icon: 'iHistory', label: '观看历史', to: '/history' },
-  { icon: 'iDownload', label: '离线缓存' },
-  { icon: 'iMsg', label: '消息通知' },
-  { icon: 'iHelp', label: '意见反馈' },
-  { icon: 'iInfo', label: '关于我们' }
+  { icon: 'iHistory', label: '观看历史', to: '/history', login: true },
+  { icon: 'library', label: '片库', to: '/library' },
+  { icon: 'iInfo', label: '关于 Reel', about: true }
 ]
 
 /* 统计行的三格：接口还没回来 / 未登录时也占住位置，点了先登录，登录后进对应页面 */
@@ -36,7 +41,9 @@ const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 const profile = shallowRef(null)
-const failed = ref(false)
+/* 取「我的」数据失败的错误（还没有数字可显示时才记）：页面照常显示，只在统计下面说一句、带「重试」，并自动重试 */
+const loadErr = shallowRef(null)
+const retrying = ref(false)
 const scroller = useTemplateRef('scroller')
 useKeepScroll(scroller)
 
@@ -66,6 +73,29 @@ const vCount = {
 /* 桌面布局：登录了但没有头像时，和顶栏右上角一样显示名字的第一个字 */
 const initial = computed(() => [...(auth.displayName || '?').trim()][0] || '?')
 
+/* 头像：「我的」接口的，还没取到（或取失败）时用登录信息里的（同一张），不会先空一下再换 */
+const avatar = computed(() => {
+  const a = profile.value?.avatar || auth.user?.avatar
+  return a?.src || a?.fallback ? a : null
+})
+
+/*
+ * 有令牌，但服务器暂时连不上、本机又没有缓存的账号信息（老版本登录的）：不显示「未登录」，
+ * 说明登录状态稍后会自己恢复（auth store 隔一会儿、联网时、回到前台时会再核对）
+ */
+const restoring = computed(() => !auth.loggedIn && auth.restoring)
+
+/* 连不上、超时、服务器出错这一类才自动重试、断网时换说法（4xx 是接口正常的答复，重试也一样） */
+const recoverable = e => !!e && (isNetworkError(e) || !(e instanceof ApiError))
+
+/* 统计下面那一句出错说明：断网时说「连上网后会自动重新加载」 */
+const loadErrText = computed(() => {
+  const e = loadErr.value
+  if (!e) return ''
+  if (isOffline.value && recoverable(e)) return MSG.offline
+  return errorText(e)
+})
+
 const stats = computed(() => {
   const got = profile.value?.stats || []
   return STAT_SLOTS.map(slot => {
@@ -74,20 +104,38 @@ const stats = computed(() => {
   })
 })
 
-/* silent：切回本页时的静默刷新，失败就保留原来的数字 */
+/*
+ * 取头像、统计数字。失败了页面照常显示（头部用登录信息，统计是「-」），统计下面说一句并带「重试」；
+ * 连不上 / 服务器出错时自动重试（联网时、页面看得见时隔一会儿，见 useReconnect）。
+ * silent：切回本页时的静默刷新，失败就保留原来的数字（还没有数字时照样说明）
+ */
 let loadSeq = 0
 async function load({ silent = false } = {}) {
   const token = ++loadSeq
-  if (!auth.loggedIn) { profile.value = null; failed.value = false; return }
+  if (!auth.loggedIn) { profile.value = null; loadErr.value = null; return }
   try {
     const p = await getProfile()
     if (token !== loadSeq) return
     profile.value = p
-    failed.value = false
-  } catch {
-    if (token === loadSeq && !silent) failed.value = true
+    loadErr.value = null
+  } catch (e) {
+    // 登录过期：登录框已经弹出来了（重新登录后这一页会跟着刷新）；取消的请求不用管
+    if (token !== loadSeq || e?.code === 'unauthorized' || e?.name === 'AbortError') return
+    if (!silent || !profile.value) loadErr.value = e
   }
 }
+
+/* 「重试」按钮：重试期间按钮变灰，不重复发 */
+async function retry() {
+  if (retrying.value) return
+  retrying.value = true
+  try {
+    await load()
+  } finally {
+    retrying.value = false
+  }
+}
+useReconnect(retry, () => auth.loggedIn && recoverable(loadErr.value))
 
 /* 需要登录的入口：未登录先弹登录框，登录后直接进去 */
 function go(to) {
@@ -95,9 +143,12 @@ function go(to) {
   router.push(to)
 }
 
+const aboutOpen = ref(false)
+
 function open(cell) {
-  if (cell.to) go(cell.to)
-  else toast('功能即将上线')
+  if (cell.about) aboutOpen.value = true
+  else if (cell.login) go(cell.to)
+  else router.push(cell.to)
 }
 
 /* ---------- App 相关：App 里可以换服务器；安卓浏览器里服务器上有安装包时可以下载 App ---------- */
@@ -210,7 +261,7 @@ async function submitPwd() {
       errs.old = e.message
       refocus = 'old'
     } else {
-      formErr.value = e?.message || '修改失败，请稍后重试'
+      formErr.value = errorText(e, '修改失败，请稍后重试')
     }
   } finally {
     changing.value = false
@@ -232,29 +283,35 @@ onActivated(() => {
 
 <template>
   <div class="page me">
-    <div v-if="failed" class="empty">
-      加载失败，请稍后重试
-      <button class="retry" @click="load()">重试</button>
-    </div>
-
-    <div v-else ref="scroller" class="scroll">
+    <!-- 「我的」数据取不到时页面照常显示（头部用登录信息、统计是「-」，统计下面说明并能重试），菜单、退出登录都在 -->
+    <div ref="scroller" class="scroll">
       <!--
         桌面布局（≥ 1024px）：整页是居中的一栏（.desk-col，内容 720px）；头像、名字和下面三格统计拼成一张账号卡片。
         手机上这一层没有任何样式（不影响原来的排版）
       -->
       <div class="me-col desk-col">
+        <!-- 有令牌但服务器暂时连不上、本机没有账号信息：不说「未登录」，登录状态稍后自己恢复（也可以点「重试」马上再核对） -->
+        <div v-if="restoring" class="me-top" role="status">
+          <div class="me-av guest"><Icon name="tMe" /></div>
+          <div class="me-who">
+            <div class="me-nm">暂时连不上</div>
+            <div class="me-id">登录状态稍后恢复</div>
+          </div>
+          <button type="button" class="me-login soft hit-44y m-press" @click="auth.verify()">重试</button>
+        </div>
+
         <!-- 未登录：一个入口，点开登录弹层 -->
-        <div v-if="!auth.loggedIn" class="me-top">
+        <div v-else-if="!auth.loggedIn" class="me-top">
           <div class="me-av guest"><Icon name="tMe" /></div>
           <div>
             <div class="me-nm">未登录</div>
             <div class="me-id">登录后可收藏、同步观看记录</div>
           </div>
-          <button class="me-login m-press" @click="auth.requireLogin()">登录</button>
+          <button type="button" class="me-login hit-44y m-press" @click="auth.requireLogin()">登录</button>
         </div>
 
         <div v-else class="me-top">
-          <Cover v-if="profile?.avatar?.src || profile?.avatar?.fallback" class="me-av" v-bind="profile.avatar" eager />
+          <Cover v-if="avatar" class="me-av" v-bind="avatar" eager />
           <div v-else-if="isDesktop" class="me-av ini" aria-hidden="true">{{ initial }}</div>
           <div v-else class="me-av guest"><Icon name="tMe" /></div>
           <div class="me-who">
@@ -280,8 +337,14 @@ onActivated(() => {
           </template>
         </nav>
 
+        <!-- 统计数字取不到：说一句（统一的说法，见 api/http.js）+「重试」；连不上 / 服务器出错时还会自己重试 -->
+        <div v-if="loadErr && auth.loggedIn" class="me-err" role="alert">
+          <span>{{ loadErrText }}</span>
+          <button type="button" class="me-retry hit-44y" :disabled="retrying" @click="retry">重试</button>
+        </div>
+
         <div class="me-list">
-          <button v-for="c in CELLS" :key="c.label" class="m-hold me-cell" @click="open(c)">
+          <button v-for="c in CELLS" :key="c.label" type="button" class="m-hold me-cell" :aria-haspopup="c.about ? 'dialog' : undefined" @click="open(c)">
             <Icon :name="c.icon" />
             <span>{{ c.label }}</span>
             <Icon name="chevR" class="go" />
@@ -327,10 +390,11 @@ onActivated(() => {
               <Icon name="chevR" class="go" />
             </button>
           </div>
-          <div class="me-list">
-            <button class="m-hold me-cell me-out" @click="askLogout = true">退出登录</button>
-          </div>
         </template>
+        <!-- 服务器连不上时也能在本机退出登录（令牌只在本机清掉，见 auth.logout） -->
+        <div v-if="auth.loggedIn || restoring" class="me-list">
+          <button class="m-hold me-cell me-out" @click="askLogout = true">退出登录</button>
+        </div>
       </div>
       <div class="pad-b" />
     </div>
@@ -343,6 +407,9 @@ onActivated(() => {
       danger
       @confirm="signOut"
     />
+
+    <!-- 关于 Reel：版本、服务器地址（components/me/AboutSheet.vue） -->
+    <AboutSheet v-model:open="aboutOpen" />
 
     <!-- 改密码：独立的小弹层；每个框上面有常驻的标签，出错提示就在出错的框下面 -->
     <Teleport to="#app">
@@ -410,7 +477,10 @@ onActivated(() => {
 .me-id { display: flex; align-items: center; gap: 8px; color: var(--t2); font-size: 12px; line-height: 18px; }
 .me-id em { height: 16px; padding: 0 6px; border-radius: 8px; background: #1e1e1e; font-size: 10.5px; font-style: normal; line-height: 16px; }
 .me-id em.role { background: var(--accent); color: var(--on-accent); font-weight: 600; }
-.me-login { flex: none; height: 30px; margin-left: auto; padding: 0 16px; border-radius: 15px; background: var(--accent); color: var(--on-accent); font-size: 13px; font-weight: 700; }
+/* 按钮 30px 高：hit-44y 把能点的范围上下撑到 44px（外观不变） */
+.me-login { position: relative; flex: none; height: 30px; margin-left: auto; padding: 0 16px; border-radius: 15px; background: var(--accent); color: var(--on-accent); font-size: 13px; font-weight: 700; }
+/* 登录状态恢复中的「重试」：次要按钮（灰底白字），不和「登录」混 */
+.me-login.soft { background: var(--chip); color: var(--t1); font-weight: 600; }
 
 /* 每一格一样宽，格数跟着接口走 */
 .me-stat { display: grid; grid-auto-columns: 1fr; grid-auto-flow: column; margin: 20px 14px 0; padding: 6px 0; border-radius: 12px; background: var(--panel); }
@@ -420,6 +490,15 @@ onActivated(() => {
 .me-stat b { display: block; font-size: 17px; font-weight: 700; line-height: 22px; font-variant-numeric: tabular-nums; }
 .me-stat span { color: var(--t2); font-size: 12px; }
 .me-stat :focus-visible { outline-offset: -2px; }
+
+/*
+ * 统计数字取不到时：统计下面一行小字 +「重试」（和出错页的重试按钮同一个样子）。
+ * 上下各留 14px：按钮的点按范围（hit-44y，上下各撑 7px）正好撑到间距的一半，不压到统计格和下面的菜单
+ */
+.me-err { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 6px 12px; margin: 14px 14px 0; color: var(--t2); font-size: 12.5px; line-height: 18px; text-align: center; }
+.me-retry { position: relative; flex: none; height: 30px; padding: 0 16px; border-radius: 15px; background: var(--chip); color: var(--t1); font-size: 13px; transition: opacity var(--dur-1) var(--ease-out); }
+/* 重试中变灰：满 0.25 秒还没结果才变（自动重试很快失败时按钮不闪） */
+.me-retry:disabled { opacity: .5; transition-delay: .25s; }
 
 .me-list { margin: 14px 14px 0; border-radius: 12px; background: var(--panel); overflow: hidden; }
 .me-cell { display: flex; align-items: center; gap: 12px; width: 100%; height: 50px; padding: 0 14px; border-bottom: 1px solid var(--line); font-size: 14px; text-align: left; transition: background-color var(--dur-2) var(--ease-out); }
@@ -442,7 +521,7 @@ onActivated(() => {
 .pf-box:focus-within { box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .18); }
 .pf.bad .pf-box { box-shadow: inset 0 0 0 1px rgba(255, 128, 128, .55); }
 .pf-box input { flex: 1; min-width: 0; height: 100%; padding: 0 0 0 14px; border: 0; background: none; color: var(--t1); font-size: 15px; }
-.pf-box input::placeholder { color: #6e6e6e; }
+.pf-box input::placeholder { color: var(--t-ph); }
 .pf-box input:disabled { opacity: .6; }
 .pf-eye { flex: none; height: 100%; padding: 0 14px; color: var(--t2); font-size: 13px; }
 .pf-eye[aria-pressed="true"] { color: var(--t1); }
@@ -469,6 +548,8 @@ onActivated(() => {
   .me-id { margin-top: 2px; font-size: 13px; line-height: 20px; }
   .me-id em { height: 20px; padding: 0 8px; border-radius: 10px; font-size: 12px; line-height: 20px; }
   .me-login { height: 36px; padding: 0 24px; border-radius: 18px; font-size: 14px; }
+  /* 卡片底色（--panel）上 --chip 几乎看不出来：次要按钮用亮一档的灰底（同确认对话框的「取消」） */
+  .me-login.soft { background: #222; }
 
   /* 统计三格接在账号卡片下面（同一张卡片，中间一道细线） */
   .me-stat { column-gap: 8px; margin: 0; padding: 12px; border-top: 1px solid var(--line); border-radius: 0 0 16px 16px; }
@@ -480,6 +561,8 @@ onActivated(() => {
   .me-cell { gap: 14px; height: 52px; padding: 0 20px; }
   .me-cell .go { width: 16px; height: 16px; }
   .me-sub { font-size: 13px; }
+  .me-err { margin: 16px 0 0; font-size: 13px; line-height: 20px; }
+  .me-retry { height: 32px; padding: 0 18px; border-radius: 16px; }
 
   /* 改密码对话框：底边距和其他对话框一致（手机上要让出底部安全区） */
   .pwd { padding-bottom: 24px; }
@@ -495,6 +578,10 @@ onActivated(() => {
   .me-out:hover { color: var(--t1); }
   .me-login { transition: opacity var(--dur-2) var(--ease-out); }
   .me-login:hover { opacity: .88; }
+  .me-login.soft { transition: background-color var(--dur-2) var(--ease-out); }
+  .me-login.soft:hover { opacity: 1; background: #2a2a2a; }
+  .me-retry { transition: background-color var(--dur-2) var(--ease-out), opacity var(--dur-1) var(--ease-out); }
+  .me-retry:not(:disabled):hover { background: #1f1f1f; }
   .pf-eye { transition: color var(--dur-2) var(--ease-out); }
   .pf-eye:hover { color: var(--t1); }
   .pwd-btn:not(:disabled):hover { opacity: .88; }

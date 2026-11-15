@@ -46,17 +46,17 @@ const { query, rows, total, loading, loaded, error, selected, reload, sortModel,
 const seen = new Map()
 watch(rows, list => { for (const r of list) seen.set(r.id, r) }, { immediate: true })
 
-/* ② 表格列：合计要放得进 1280×800 的内容区（约 1010px）；视频数 / 帖子数 / 图集数可以点，跳到他的视频 / 帖子 / 图集 */
+/* ② 表格列：合计要放得进 1280×800 的内容区（约 1010px，出现竖向滚动条时 1000px），固定列宽合计控制在 990 以内；视频数 / 帖子数 / 图集数可以点，跳到他的视频 / 帖子 / 图集 */
 const columns = [
   { key: 'id', label: 'ID', width: 64, sortable: true, class: 'dim' },
   { key: 'avatarUrl', label: '头像', width: 60 },
-  { key: 'name', label: '名称', minWidth: 160, sortable: true, firstOrder: 'asc' },
+  { key: 'name', label: '名称', minWidth: 140, sortable: true, firstOrder: 'asc' },
   { key: 'isOfficial', label: '官方', width: 60, align: 'center' },
-  { key: 'videoCount', label: '视频数', width: 84, align: 'right', sortable: true },
+  { key: 'videoCount', label: '视频数', width: 76, align: 'right', sortable: true },
   { key: 'postCount', label: '帖子数', width: 72, align: 'right' },
-  { key: 'albumCount', label: '图集数', width: 84, align: 'right', sortable: true },
+  { key: 'albumCount', label: '图集数', width: 76, align: 'right', sortable: true },
   { key: 'followerCount', label: '粉丝', width: 76, align: 'right', sortable: true },
-  { key: 'status', label: '状态', width: 88 },
+  { key: 'status', label: '状态', width: 76 },
   { key: 'createdAt', label: '创建时间', width: 104 }
 ]
 

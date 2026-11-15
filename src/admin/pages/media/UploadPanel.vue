@@ -7,6 +7,7 @@ import { fmtSize, fmtNum } from '../../utils/format'
 /*
  * 上传队列面板：每个文件的名称、大小、进度、速度、状态和取消 / 重试。
  * 只渲染最近的 200 个（一次拖进几千个文件时界面不卡），统计数字按全部文件算。
+ * 大图上传前先缩小（长边到 2048，长图按短边保 1080，见 utils/imagePrep.js）：大小显示实际传的，完成后注明缩到了多大。
  */
 const props = defineProps({
   queue: { type: Object, required: true }
@@ -58,7 +59,7 @@ const renamed = it => it.state === 'done' && it.result && it.result.path !== it.
         <div class="up-main">
           <div class="row up-line">
             <span class="up-name ellipsis" :title="it.path">{{ it.name }}</span>
-            <span class="dim small num nowrap">{{ fmtSize(it.size) }}</span>
+            <span class="dim small num nowrap" :title="it.resized ? `原图 ${fmtSize(it.resized.from)}，上传前缩到 ${it.resized.width}×${it.resized.height}` : undefined">{{ fmtSize(it.size) }}</span>
           </div>
           <div v-if="it.state === 'up' || it.state === 'wait'" class="row up-line">
             <div class="progress grow"><i :style="{ width: it.percent + '%' }" /></div>
@@ -69,7 +70,7 @@ const renamed = it => it.state === 'done' && it.result && it.result.path !== it.
           </div>
           <div v-else class="small up-msg" :class="{ 'danger-text': it.state === 'fail' }">
             <template v-if="it.state === 'done'">
-              {{ STATE.done }}<template v-if="renamed(it)">，有同名文件，已存为「{{ it.result.path }}」</template>
+              {{ STATE.done }}<template v-if="it.resized">，已缩到 {{ it.resized.width }}×{{ it.resized.height }}（原图 {{ fmtSize(it.resized.from) }}）</template><template v-if="renamed(it)">，有同名文件，已存为「{{ it.result.path }}」</template>
             </template>
             <template v-else>{{ STATE[it.state] }}<template v-if="it.error && it.state === 'fail'">：{{ it.error }}</template></template>
           </div>

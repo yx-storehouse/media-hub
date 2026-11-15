@@ -3,7 +3,7 @@ import { ref, reactive, shallowRef, computed, watch, nextTick, onMounted, onBefo
 import { useRouter } from 'vue-router'
 import { getMyFollows, getCreator, toggleFollow } from '@/api'
 import { useAuthStore } from '@/stores/auth'
-import { toast } from '@/composables/useToast'
+import { toast, toastError } from '@/composables/useToast'
 import { formatCount } from '@/utils/format'
 import { createFeed } from '@/components/creator/feed'
 import { useAutoMore } from '@/components/home/list'
@@ -15,6 +15,7 @@ import ListFoot from '@/components/home/ListFoot.vue'
 import ConfirmSheet from '@/components/me/ConfirmSheet.vue'
 import FollowBtn from '@/components/creator/FollowBtn.vue'
 import RollNum from '@/components/video/RollNum.vue'
+import LoadState from '@/components/common/LoadState.vue'
 import { haptic } from '@/utils/motion'
 import { cameBack, vRise } from '@/components/home/motion'
 
@@ -82,7 +83,8 @@ async function setFollow(c, on) {
     toast(active ? '已关注' : '已取消关注')
   } catch (e) {
     changed.set(c.id, before)
-    toast(e?.status === 400 && e.message ? e.message : '操作失败，请稍后重试')
+    // 统一的说法；登录过期时不提示（登录框已经弹出来了，重新登录后会自动补做）
+    toastError(e)
   } finally {
     busy.delete(c.id)
   }
@@ -153,10 +155,8 @@ onBeforeUnmount(() => {
       <button type="button" class="retry" @click="auth.requireLogin()">去登录</button>
     </div>
 
-    <div v-else-if="feed.total === null" class="empty">
-      加载失败，请检查网络
-      <button type="button" class="retry" @click="feed.more()">重试</button>
-    </div>
+    <!-- 第一页取不到：统一的说法 +「重试」，联网 / 隔一会儿会自己重试 -->
+    <LoadState v-else-if="feed.total === null" :error="feed.error" :retry="feed.more" />
 
     <div v-else-if="!feed.list.length" v-rise.self class="empty">
       <Icon name="tMe" class="em-ic" />
@@ -221,7 +221,7 @@ onBeforeUnmount(() => {
 .fl-nm > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fl-nm .vf svg { width: 15px; height: 15px; }
 .fl-meta { overflow: hidden; color: var(--t2); font-size: 12px; line-height: 18px; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
-.fl-bio { overflow: hidden; color: #6e6e6e; font-size: 12px; line-height: 18px; text-overflow: ellipsis; white-space: nowrap; }
+.fl-bio { overflow: hidden; color: var(--t-sub); font-size: 12px; line-height: 18px; text-overflow: ellipsis; white-space: nowrap; }
 
 /* 关注按钮（FollowBtn）：两种文字叠在一格里，宽度不跳 */
 .fl-btn {
@@ -240,7 +240,7 @@ onBeforeUnmount(() => {
 .fl-btn.on { background: var(--chip); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .12); color: var(--t2); }
 
 .em-ic { width: 34px; height: 34px; margin: 0 auto 12px; color: #4a4a4a; stroke-width: 1.6; }
-.em-sub { margin-top: 6px; color: #6e6e6e; font-size: 12px; }
+.em-sub { margin-top: 6px; color: var(--t-sub); font-size: 12px; }
 
 /* ---- 骨架 ---- */
 .sk-row { padding: 11px 14px; gap: 12px; }

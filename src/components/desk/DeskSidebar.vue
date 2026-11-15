@@ -108,7 +108,11 @@ const iconOf = item => (shownId.value === item.id && item.iconOn ? item.iconOn :
 /* 键盘焦点：收在格子里（全局的外描边会被裁掉） */
 .ds-i:focus-visible { outline-offset: -2px; }
 
+/*
+ * 悬停比选中弱得多：只有一层很淡的底（#121212 左右）和亮一点的字，选中的那一项是更亮的底 + 白字 + 粗体 + 实心图标，
+ * 鼠标停在别的项上时不会看起来像有两个当前页
+ */
 @media (hover: hover) {
-  .ds-i:not(.on):hover { background: var(--chip); color: var(--t3); }
+  .ds-i:not(.on):hover { background: rgba(255, 255, 255, .03); color: var(--t3); }
 }
 </style>

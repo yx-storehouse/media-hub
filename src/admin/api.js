@@ -3,14 +3,16 @@
  *
  * 约定：
  *   列表   listX(query, { signal }) → { total, page, pageSize, list }
- *   导出   exportX(query) / exportRows(type, query) → { fields, rows }（导入格式的字符串值）
+ *   导出   exportX(query) / exportRows(type, query) → { fields, rows, total, truncated, limit }（导入格式的字符串值；
+ *          最多 limit 行（默认 5 万），超出时 truncated = true、total = 符合筛选的总数）
  *   增删改 getX(id) / createX(body) / updateX(id, partialBody) / deleteX(id)
  *   批量   batchX(ids, action, value) → { affected }
- *   导入   importRows(type, rows, options, dryRun) → { total, created, updated, skipped, failed, results, autoCreated }
+ *   导入   importRows(type, rows, options, dryRun) → { total, created, updated, unchanged, skipped, failed, results, autoCreated }
+ *          （「更新已有」时和库里一样的行算 unchanged，不写库；updated 的行带 changed: [字段 key]）
  * 出错一律抛 ApiError（message 是给人看的中文，field 是出错字段），页面里 toastError(e) 即可。
  */
 import { reactive } from 'vue'
-import { get, post, patch, put, del, ApiError } from '@/api/http'
+import { get, post, patch, put, del, ApiError, MSG } from '@/api/http'
 import { session, handleUnauthorized } from './auth'
 
 const A = '/api/admin'
@@ -144,11 +146,25 @@ export const setUserRole = (id, role) => post(`${A}/users/${id}/role`, { role })
 export const deleteUser = id => del(`${A}/users/${id}`)
 
 /* ---------------- 素材文件 ---------------- */
-/** → { dir, parent, entries: [{ name, path, type, size, mtime, url, usedBy, usedByAlbums }] }（usedBy 只数视频，usedByAlbums 只数图集） */
+/**
+ * → { dir, parent, entries: [{ name, path, type, size, mtime, url, usedBy, usedByAlbums, items?, thumb?, isThumb? }] }
+ * usedBy 只数视频，usedByAlbums 只数图集；文件夹带 items（里面能看到的项数）；图片带 thumb（小图地址或 null）；
+ * 原图已经不在的小图（<原图文件名>.thumb.jpg）带 isThumb: true（有原图的小图不单独列出）
+ */
 export const listMedia = (dir = '', { signal } = {}) => get(`${A}/media`, { dir }, { signal })
+/** 已经存在时 400（field: path） */
 export const createFolder = path => post(`${A}/media/folder`, { path })
 /** 被视频 / 图集引用的文件需要 force=true 才能删 */
 export const deleteMedia = (path, force = false) => del(`${A}/media`, { query: { path, force: force ? 1 : 0 } })
+/**
+ * 批量删除（1～1000 项）→ { deleted: [path], failed: [{ path, message }] }。
+ * 没带 force 时只要有一个文件正被使用，整批不删，400（field: usedBy，message 列出是哪几个）
+ */
+export const deleteMediaMany = (paths, force = false) => post(`${A}/media/delete`, force ? { paths, force: true } : { paths }, LONG)
+/** 改名（name 只是新名字，不能带 /）→ { from, to, url, type, refs }；库里引用它的地址一起改 */
+export const renameMedia = (path, name) => post(`${A}/media/rename`, { path, name })
+/** 移到另一个已有文件夹（to = '' 是根目录）→ { moved: [{ from, to, url, type }], failed: [{ path, message }], refs } */
+export const moveMedia = (paths, to) => post(`${A}/media/move`, { paths, to }, LONG)
 /** → { files: [{ path, url, name, title, size, mtime, coverUrl, imported, videoId }] } */
 export const scanMedia = (dir = '', recursive = true) => post(`${A}/media/scan`, { dir, recursive }, { timeout: 60000 })
 
@@ -158,14 +174,38 @@ export const scanMedia = (dir = '', recursive = true) => post(`${A}/media/scan`,
  * @param {File|Blob} file
  * @param {{ overwrite?: boolean, onProgress?: (p: { loaded, total, percent }) => void, signal?: AbortSignal }} [opts]
  * @returns {Promise<{ path, url, size }>}  失败抛 ApiError；取消抛 AbortError
+ * 登录过期（401）：和其他接口一样弹「登录已过期」对话框，重新登录后用新令牌从头再传一次（只重传一次）。
  */
-export function uploadFile(path, file, { overwrite = false, onProgress, signal } = {}) {
+export async function uploadFile(path, file, opts = {}) {
+  const token = session.token
+  try {
+    return await sendFile(path, file, token, opts)
+  } catch (e) {
+    if (e?.code !== 'unauthorized' || !token || opts.signal?.aborted) throw e
+    const next = await waitOrAbort(Promise.resolve(handleUnauthorized(token, { wait: true })), opts.signal)
+    if (!next || next === token) throw e
+    return sendFile(path, file, next, opts)
+  }
+}
+
+/* 等重新登录的时候上传被取消了：不再等 */
+function waitOrAbort(p, signal) {
+  if (!signal) return p
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(new DOMException('已取消', 'AbortError'))
+    if (signal.aborted) return onAbort()
+    signal.addEventListener('abort', onAbort, { once: true })
+    p.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort))
+  })
+}
+
+function sendFile(path, file, token, { overwrite = false, onProgress, signal } = {}) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(new DOMException('已取消', 'AbortError'))
     const xhr = new XMLHttpRequest()
     const qs = new URLSearchParams({ path, overwrite: overwrite ? '1' : '0' })
     xhr.open('PUT', `${BASE}${A}/media/upload?${qs}`)
-    if (session.token) xhr.setRequestHeader('authorization', 'Bearer ' + session.token)
+    if (token) xhr.setRequestHeader('authorization', 'Bearer ' + token)
     xhr.setRequestHeader('content-type', file.type || 'application/octet-stream')
 
     const onAbort = () => xhr.abort()
@@ -179,8 +219,7 @@ export function uploadFile(path, file, { overwrite = false, onProgress, signal }
     xhr.onload = () => {
       done()
       if (xhr.status === 401) {
-        handleUnauthorized()
-        return reject(new ApiError('请先登录', { status: 401, code: 'unauthorized' }))
+        return reject(new ApiError(token ? MSG.login : '请先登录', { status: 401, code: 'unauthorized' }))
       }
       let json = null
       try { json = JSON.parse(xhr.responseText) } catch { /* 下面统一报错 */ }
@@ -189,7 +228,8 @@ export function uploadFile(path, file, { overwrite = false, onProgress, signal }
         if (overwrite && json.data?.url) mediaVersions[json.data.url] = Date.now()
         return resolve(json.data)
       }
-      const msg = json?.message || (xhr.status === 413 ? '文件太大，超过服务器允许的上限' : `上传失败（HTTP ${xhr.status}）`)
+      // 5xx / 网关页面：统一说法（和 http.js 一样）；4xx 用接口的说明
+      const msg = xhr.status >= 500 ? MSG.server : json?.message || (xhr.status === 413 ? '文件太大，超过服务器允许的上限' : `上传失败（HTTP ${xhr.status}）`)
       reject(new ApiError(msg, { status: xhr.status, code: json?.code ?? 'bad_response', field: json?.field }))
     }
     xhr.onerror = () => { done(); reject(new ApiError('网络连接失败，上传中断', { code: 'network' })) }

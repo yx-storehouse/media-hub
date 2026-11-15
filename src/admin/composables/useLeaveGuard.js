@@ -9,10 +9,15 @@
  *
  * 选项：title（默认「放弃修改？」）、message、confirmText（默认「离开」）。
  * 在路由页面或它的子组件的 setup 里调用（组件卸载时自动解除）；同一路由内只改查询参数不会触发 ①。
+ * hasUnsavedChanges()：现在页面上有没有未保存的修改（发版后要整页刷新前用它判断，见 main.js；登录失效时也用它）。
  */
 import { watch, toValue, onBeforeUnmount } from 'vue'
 import { onBeforeRouteLeave } from 'vue-router'
 import { confirmDialog } from '../components/confirm'
+
+/* 当前挂着的所有守卫的 dirty 判断 */
+const guards = new Set()
+export const hasUnsavedChanges = () => [...guards].some(fn => fn())
 
 export function useLeaveGuard(isDirty, { title = '放弃修改？', message = '有未保存的修改，确定离开这个页面？', confirmText = '离开' } = {}) {
   const dirty = () => !!toValue(isDirty)
@@ -32,7 +37,8 @@ export function useLeaveGuard(isDirty, { title = '放弃修改？', message = '�
   }
   const listen = on => (on ? window.addEventListener('beforeunload', onUnload) : window.removeEventListener('beforeunload', onUnload))
   watch(dirty, v => { if (v) skip = false; listen(v) }, { immediate: true })
-  onBeforeUnmount(() => listen(false))
+  guards.add(dirty)
+  onBeforeUnmount(() => { listen(false); guards.delete(dirty) })
 
   return {
     /** 下一次离开（或刷新）不再确认，用于保存后程序跳转 */

@@ -4,6 +4,8 @@ import { getCategoryFilters, getCategoryVideos } from '@/api'
 import VideoCard from '@/components/VideoCard.vue'
 import SkeletonGrid from '@/components/home/SkeletonGrid.vue'
 import ListFoot from '@/components/home/ListFoot.vue'
+import WinList from '@/components/home/WinList'
+import LoadState from '@/components/common/LoadState.vue'
 import ContentSwap from '@/components/home/ContentSwap'
 import { createHomeFeed, useAutoMore, refreshFeed, toTopOrRefresh } from '@/components/home/list'
 import { useKeepScroll } from '@/composables/useKeepScroll'
@@ -18,6 +20,8 @@ const props = defineProps({
 /* 筛选项由接口给出：[{ label, sort_key }]；null = 还没拿到 */
 const filters = shallowRef(null)
 const filtersFailed = ref(false)
+/* 筛选项取失败时的错误（出错提示说清楚原因） */
+const filtersErr = shallowRef(null)
 const active = ref(0)
 
 const fetchPage = (filter, page) => getCategoryVideos(props.tab, { filter, ...page })
@@ -38,16 +42,19 @@ async function loadFilters() {
   filtersFailed.value = false
   try {
     filters.value = await getCategoryFilters(props.tab)
-  } catch {
+    filtersErr.value = null
+  } catch (e) {
+    filtersErr.value = e
     filtersFailed.value = true
   }
 }
 
-/** 首次进入和整页重试：筛选项和第一页视频同时请求，哪个失败重取哪个 */
+/** 首次进入和整页重试：筛选项和第一页视频同时请求，哪个失败重取哪个（返回的 Promise 两个都完了才结束） */
 function load() {
-  if (!filters.value) loadFilters()
-  if (feed.total === null) feed.more()
+  return Promise.all([!filters.value && loadFilters(), feed.total === null && feed.more()])
 }
+/* 整页出错：筛选项或第一页没取到（断网、服务器出错时 LoadState 会自动重试） */
+const pageError = () => (filtersFailed.value ? filtersErr.value || true : feed.total === null ? feed.error || null : null)
 
 function select(i) {
   if (i === active.value) return
@@ -66,7 +73,8 @@ async function refresh() {
   } catch { /* 刷新失败：保留现在的列表 */ }
 }
 
-defineExpose({ retap: () => toTopOrRefresh(scroller.value, refresh) })
+/* retap：再点一次底部「首页」；refresh：下拉刷新（HomeView 的手势，这时一定在顶上） */
+defineExpose({ retap: () => toTopOrRefresh(scroller.value, refresh), refresh })
 
 load()
 </script>
@@ -74,10 +82,7 @@ load()
 <template>
   <div>
     <div ref="scroller" class="scroll">
-      <div v-if="filtersFailed || (feed.error && feed.total === null)" class="empty">
-        加载失败，请稍后重试
-        <button type="button" class="retry" @click="load()">重试</button>
-      </div>
+      <LoadState v-if="pageError()" :error="pageError()" :retry="load" />
       <template v-else>
         <div ref="chipRow" class="chips">
           <span ref="chipBar" class="m-bar cbar" aria-hidden="true" />
@@ -104,8 +109,9 @@ load()
           <SkeletonGrid v-if="feed.total === null" :count="10" gap="g16" fill />
           <div v-else-if="!feed.list.length" v-rise.self class="empty">这里还没有视频</div>
           <div v-else :key="batch">
+            <!-- 很长时只渲染视口附近的卡片（WinList） -->
             <div v-rise class="grid g16">
-              <VideoCard v-for="v in feed.list" :key="v.id" :video="v" />
+              <WinList v-slot="{ item: v }" :items="feed.list"><VideoCard :video="v" /></WinList>
             </div>
             <ListFoot :feed="feed" />
           </div>

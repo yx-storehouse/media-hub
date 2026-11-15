@@ -2,6 +2,7 @@
 import { ref, computed, watch, nextTick, provide, onBeforeUnmount, useId } from 'vue'
 import AIcon from './AIcon.vue'
 import { confirmDialog } from './confirm'
+import { setRightInset } from './toast'
 import { pushLayer, popLayer, isTopLayer, layerZ, trapTab, focusInto, restoreFocus } from './layers'
 import { UPLOAD_GUARD } from '../composables/useUploader'
 
@@ -65,15 +66,35 @@ function onKey(e) {
   else if (e.key === 'Tab') trapTab(e, panel.value)
 }
 
+/* 抽屉的实际宽度登记给提示条：提示条放到抽屉左边，不盖住抽屉里的控件 */
+const insetKey = Symbol('drawer')
+let ro = null
+function trackWidth(on) {
+  ro?.disconnect()
+  ro = null
+  if (!on) { setRightInset(insetKey, 0); return }
+  nextTick(() => {
+    const el = panel.value
+    if (!el || !layer) return
+    setRightInset(insetKey, el.offsetWidth)
+    if (typeof ResizeObserver === 'function') {
+      ro = new ResizeObserver(() => { if (layer) setRightInset(insetKey, el.offsetWidth) })
+      ro.observe(el)
+    }
+  })
+}
+
 function setup(on) {
   if (on && !layer) {
     opener = document.activeElement
     layer = pushLayer()
     document.addEventListener('keydown', onKey)
     nextTick(() => focusInto(panel.value))
+    trackWidth(true)
   } else if (!on && layer) {
     popLayer(layer)
     layer = 0
+    trackWidth(false)
     document.removeEventListener('keydown', onKey)
     const el = opener
     opener = null

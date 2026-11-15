@@ -6,6 +6,8 @@ import { pushLayer, popLayer, isTopLayer, layerZ, trapTab, focusInto, restoreFoc
 /*
  * 居中对话框：<AModal v-model:open="show" title="标题"> 内容 <template #footer>按钮</template> </AModal>
  * Esc / 点遮罩 / 右上角 × 关闭（persistent 时点遮罩不关）；打开时焦点移入，关闭后还给打开它的按钮。
+ * beforeClose：用户要关（Esc / × / 遮罩 / ref.close()）之前调用，返回 false（或 resolve 成 false）就不关，
+ * 用来「放弃已选的 N 个？」这类确认；程序直接把 open 改成 false 不经过它。
  */
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -16,7 +18,9 @@ const props = defineProps({
   /** 显示右上角关闭按钮 */
   closable: { type: Boolean, default: true },
   /** 内容区不留内边距（列表、网格自己控制） */
-  flush: { type: Boolean, default: false }
+  flush: { type: Boolean, default: false },
+  /** () => boolean | Promise<boolean>：返回 false 不关闭 */
+  beforeClose: { type: Function, default: null }
 })
 const emit = defineEmits(['update:open', 'close'])
 
@@ -35,7 +39,15 @@ function onKey(e) {
   else if (e.key === 'Tab') trapTab(e, panel.value)
 }
 
-function close() {
+let closing = false
+async function close() {
+  if (closing) return
+  if (props.beforeClose) {
+    closing = true
+    let ok = false
+    try { ok = (await props.beforeClose()) !== false } finally { closing = false }
+    if (!ok || !props.open) return
+  }
   emit('update:open', false)
   emit('close')
 }

@@ -18,6 +18,8 @@ import { trapTab } from '@/components/desk/modal'
  * 再点登录时上一条错误先留着（变淡），等新的结果出来再换：弹层高度不会在请求中先缩回去、出错时再跳上来。
  * 桌面布局（≥ 1024px）：窗口正中的对话框（样式和 BottomSheet 共用），右上角有关闭按钮，Tab 只在框里循环，
  * 关掉后焦点回到打开它的按钮；下拉关闭只在触屏上有。
+ * 令牌过期（在别处退出、改了密码、管理员重置 / 停用、30 天到期）时由接口层打开（auth.loginReason 为 'expired'）：
+ * 标题下面说明「登录已过期，请重新登录」；重新登录后刚才那一下操作会自动补做（见 api/http.js 的 relogin）。
  */
 const auth = useAuthStore()
 const open = computed(() => auth.loginOpen)
@@ -178,6 +180,7 @@ const deskOn = { keydown: e => trapTab(e, sheetEl.value) }
       >
         <div class="grab" />
         <h4 id="login-title">登录</h4>
+        <p v-if="auth.loginReason === 'expired'" class="why">登录已过期，请重新登录</p>
 
         <form ref="formEl" class="form" :class="{ busy }" @submit.prevent="submit">
           <label class="field">
@@ -228,6 +231,7 @@ const deskOn = { keydown: e => trapTab(e, sheetEl.value) }
 
 <style scoped>
 .login { padding-bottom: calc(22px + var(--safe-b)); }
+.why { margin: -6px 0 12px; color: var(--t2); font-size: 13px; line-height: 18px; }
 .form { display: flex; flex-direction: column; gap: 10px; }
 .field {
   display: flex;
@@ -248,7 +252,7 @@ const deskOn = { keydown: e => trapTab(e, sheetEl.value) }
   color: var(--t1);
   font-size: 15px;
 }
-.field input::placeholder { color: #6e6e6e; }
+.field input::placeholder { color: var(--t-ph); }
 .field input:disabled { opacity: .6; }
 
 .err { color: #ff8080; font-size: 12.5px; line-height: 18px; transition: opacity var(--dur-2) var(--ease-out); animation: m-rise var(--dur-2) var(--ease-out); --rise: -4px; }

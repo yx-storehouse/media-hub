@@ -7,6 +7,7 @@ import { useScrollEdge } from '@/components/motion/scrollEdge'
 import { isDesktop } from '@/composables/useDesktop'
 import Cover from '@/components/Cover.vue'
 import Icon from '@/components/Icon.vue'
+import LoadState from '@/components/common/LoadState.vue'
 
 defineOptions({ name: 'LiveView' })
 
@@ -16,7 +17,8 @@ const lives = shallowRef([])
 const scroller = ref(null)
 useKeepScroll(scroller)
 
-const failed = ref(false)
+/* 最近一次取直播列表失败的错误：显示统一的说法 +「重试」，联网 / 切回来 / 隔一会儿会自己重试（LoadState） */
+const error = shallowRef(null)
 
 async function loadLives() {
   const tab = active.value
@@ -24,10 +26,20 @@ async function loadLives() {
     const list = await getLives({ tab })
     if (tab !== active.value) return   // 用户已经切到别的 tab，丢弃这次结果
     lives.value = list
-    failed.value = false
-  } catch {
-    if (tab === active.value) failed.value = true
+    error.value = null
+  } catch (e) {
+    if (tab === active.value) error.value = e
   }
+}
+
+/* 分类标签取不到：先不显示标签（列表照常），下次重试时一起再取 */
+function loadTabs() {
+  return getLiveTabs().then(list => { tabs.value = list || [] }).catch(() => {})
+}
+
+function retry() {
+  if (!tabs.value.length) loadTabs()
+  return loadLives()
 }
 
 function selectTab(i) {
@@ -36,7 +48,7 @@ function selectTab(i) {
   loadLives()
 }
 
-getLiveTabs().then(list => { tabs.value = list }).catch(() => {})
+loadTabs()
 loadLives()
 
 /*
@@ -69,10 +81,7 @@ watch(isDesktop, () => nextTick(edge.refresh))
     </header>
 
     <div ref="scroller" class="scroll">
-      <div v-if="failed" class="empty">
-        加载失败，请稍后重试
-        <button class="retry" @click="loadLives()">重试</button>
-      </div>
+      <LoadState v-if="error" :error="error" :retry="retry" />
       <div v-else class="lv-grid">
         <div v-for="item in lives" :key="item.id" v-press class="lv" @click="toast('主播暂未开播，敬请期待')">
           <Cover class="cv" v-bind="item.cover">

@@ -19,6 +19,7 @@ import { fmtSize } from '../utils/format'
  *   <MediaPicker v-model:open="show" accept="image" start-dir="covers" @select="f => form.coverUrl = f.url" />
  * accept：image | video | any（不匹配的文件置灰不可选）。可以直接上传到当前文件夹，上传完自动选中。
  * 连续点文件夹时只认最后一次（之前的请求取消）；上传中关掉对话框 = 取消上传。
+ * 原图已经不在的小图（isThumb，<原图文件名>.thumb.jpg）不列出：它们不该被选来当封面 / 图集图片；图片格子用小图显示。
  */
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -56,7 +57,7 @@ async function load(d = dir.value, { fallback = true } = {}) {
     const res = await listMedia(d, { signal: ctrl.signal })
     if (my !== seq) return
     dir.value = res?.dir ?? d
-    entries.value = res?.entries || []
+    entries.value = (res?.entries || []).filter(e => !e.isThumb)
     lastDir[props.accept] = dir.value
   } catch (e) {
     if (my !== seq || e?.name === 'AbortError') return
@@ -154,7 +155,7 @@ const acceptLabel = computed(() => ({ image: '图片', video: '视频', any: '�
               :title="e.name"
               @click="enter(e)"
             >
-              <Thumb v-if="e.type === 'image'" :src="e.url" :ratio="4 / 3" width="100%" />
+              <Thumb v-if="e.type === 'image'" :src="e.thumb || e.url" :ratio="4 / 3" width="100%" />
               <span v-else class="ph" :class="e.type"><AIcon :name="iconOf(e)" :size="26" :stroke="1.3" /></span>
               <span class="name ellipsis">{{ e.name }}</span>
               <span class="meta">{{ e.type === 'dir' ? '文件夹' : fmtSize(e.size) }}<template v-if="e.usedBy || e.usedByAlbums"> · 已用 {{ (e.usedBy || 0) + (e.usedByAlbums || 0) }}</template></span>

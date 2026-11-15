@@ -211,7 +211,8 @@ function addFiles(files) {
     it.probing = true
     imageSize(f, { signal: ctrl.signal }).then(size => {
       it.probing = false
-      if (!size || !items.value.includes(it)) return
+      // 上传结果已经给了实际尺寸（缩小过的图）：以它为准
+      if (!size || !items.value.includes(it) || it.sized) return
       it.width = size.width
       it.height = size.height
       if (it.url) rememberImageSize(it.url, size)
@@ -240,6 +241,8 @@ function pumpUpload() {
         if (!items.value.includes(it)) return
         it.url = res.url
         it.state = 'ok'
+        // 上传前缩小过（见 utils/imagePrep.js）：存实际上传的那张的尺寸
+        if (res.width && res.height) { it.width = res.width; it.height = res.height; it.probing = false; it.sized = true }
         if (it.width && it.height) rememberImageSize(res.url, it)
         sync()
       })

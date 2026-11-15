@@ -149,6 +149,7 @@ keyPassword=……
 | 屏幕常亮 | 视频播放时 WebView 自己会让屏幕常亮，暂停就恢复，不用额外处理 |
 | 震动 | `VIBRATE` 权限，网页版的 `navigator.vibrate` 可用 |
 | 下载链接 | 交给系统浏览器 |
+| 放大 / 字号 | `capacitor.config.js` 的 `zoomEnabled: true`：可以双指放大网页（Capacitor 默认关掉缩放；双击不缩放，网页版用 `touch-action: manipulation` 留给点赞）。系统「字体大小」：WebView 默认按系统字体比例放大文字（`WebSettings` 的 textZoom），外壳不改它。改了配置要 `npm run android:sync` 后重新打包 |
 
 ## 图标和启动图
 
@@ -196,6 +197,7 @@ iOS 工程在 `ios/`（Xcode 工程 + Swift Package Manager）。Windows 上编�
 | 全屏 / 横屏 | 支持横竖屏。Capacitor 打开了 WebView 的元素全屏（iOS 15.4+）；系统不让元素全屏时网页版自己退回伪全屏或 `<video>` 自带的全屏。`screen.orientation.lock` 在 iOS 上不支持，横过来看靠转手机（网页版横屏自动全屏的逻辑照常） |
 | 屏幕常亮 | 视频播放时系统自己会保持亮屏 |
 | 震动 | iOS 的网页不支持 `navigator.vibrate`，App 里也没有震动（网页版调用时什么都不发生） |
+| 放大 / 字号 | `zoomEnabled: true`（Capacitor 不再拦掉双指手势）。网页版给 iPhone 加了 `maximum-scale=1`（挡住点进小字号输入框时整页自动放大；Safari 不因它禁止双指放大），WKWebView 却会遵守它，所以 `ReelViewController.swift` 在建 WebView 之前（`webViewConfiguration(for:)`）设了 `ignoresViewportScaleLimits = true`，App 里能像 Safari 一样双指放大。跟随系统「更大字体」（Dynamic Type）：按系统字号设 `webView.pageZoom`（最多 1.35 倍，放大后网页最窄按 320 排版；监听 `UIContentSizeCategory.didChangeNotification`，改了字号回到 App 马上生效）。这两处是原生代码，要重新打包才生效（Windows 上没编译过，交给 iOS CI 的模拟器构建检查） |
 | 其他 | 长按链接不弹系统预览；iPad 也按手机版排版；系统自带的界面（视频播放器、复制粘贴菜单）跟着手机语言，手机是中文就显示中文；上传 TestFlight 不用回答加密问题（`ITSAppUsesNonExemptEncryption = false`） |
 
 ### Ad Hoc 还是 TestFlight

@@ -12,6 +12,15 @@
   --t3: #e6e6e6;
   --t-card: #9a9a9a;
   --tag: #a6a6a6;
+  /*
+   * 小号的次要文字（时间、简介、空状态的副标题、「已看完」这类）：比 --t2 暗一档，但在页面底色 / 面板 / 弹层上
+   * 对比度仍然 ≥ 4.5:1（#0a0a0a 上 5.0、#111 上 4.8、弹层 #151515 上 4.6）。不要再写死 #6e6e6e 这类更暗的灰（只有 3.2–3.9:1）
+   */
+  --t-sub: #808080;
+  /* 输入框的占位字：在输入框底色上 ≥ 4.5:1（--field #1a1a1a 上 5.0、#1f1f1f 上 4.8、#141414 上 5.3） */
+  --t-ph: #8a8a8a;
+  /* 弹层（#151515）里没选中的选项（倍速、全部分类，styles/common.css 的 .opt）：比弹层亮一档；--t2 的字在上面 4.6:1 */
+  --opt: #242424;
   /* filter applied to photos: `none` keeps their colours, `grayscale(1)` makes them black-and-white too */
   --media: none;
   --tabbar-h: 61px;

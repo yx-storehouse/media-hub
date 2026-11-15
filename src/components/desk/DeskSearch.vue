@@ -1,9 +1,10 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { getHotWords } from '@/api'
 import { useRecentSearches } from '@/components/search/recent'
 import Icon from '@/components/Icon.vue'
+import { deskSearchRequest } from './deskSearch'
 
 /*
  * 桌面顶栏的搜索框（窗口中间，最宽约 560px）。
@@ -13,9 +14,14 @@ import Icon from '@/components/Icon.vue'
  *   - ↑ ↓ 在建议里移动，回车搜选中的那个（没选就搜框里的字），Esc 先收起建议、再按一次离开输入框；
  *   - 回车去 #/search?q=…；已经在搜索页上：建议页上搜多一条历史，结果页里换词替换地址（和搜索页自己的规则一致），
  *     保留「视频 / 帖子」标签；
- *   - 在搜索页上，框里显示的就是地址栏里的关键词。
+ *   - 在搜索页上，框里显示的就是地址栏里的关键词；
+ *   - 搜帖子（社区右上角的「搜索帖子」调 focusDeskSearch({ scope: 'post' })，见 deskSearch.js；
+ *     或者在 #/search?type=post 上）：占位文字是「搜索帖子」，回车搜帖子；
+ *   - 打开没有关键词的搜索页（#/search，顶栏回车空搜、社区的「搜索帖子」）：自动聚焦这个框，直接打字就能搜；
+ *   - 搜了一次马上记进近期搜索（和搜索页共用一份），下次打开下拉就在里面。
  */
 const PLACEHOLDER = '搜您想搜,看您所想'
+const PLACEHOLDER_POST = '搜索帖子'
 const RECENT_MAX = 6
 const HOT_MAX = 8
 
@@ -28,6 +34,11 @@ const text = ref('')
 const focused = ref(false)
 const popOpen = ref(false)
 const active = ref(-1)
+/* 搜什么：'' 普通（视频 + 帖子，去搜索页默认的视频标签）/ 'post' 帖子 */
+const scope = ref('')
+/* 地址决定的范围：在搜索页的帖子标签上是搜帖子，其余是普通搜索 */
+const routeScope = () => (route.name === 'search' && route.query.type === 'post' ? 'post' : '')
+const placeholder = computed(() => (scope.value === 'post' ? PLACEHOLDER_POST : PLACEHOLDER))
 
 /* ---------- 建议 ---------- */
 
@@ -78,22 +89,26 @@ const queryParam = raw => (typeof raw === 'string' ? raw.trim() : '')
 
 function submit(word) {
   const q = String(word ?? text.value).trim()
+  const post = scope.value === 'post'
   popOpen.value = false
   active.value = -1
   inputEl.value?.blur()
+  // 马上记进近期搜索（和搜索页共用一份）：下次打开下拉就有，不用等重新读
+  if (q) recent.note(q)
   if (route.name === 'search') {
     text.value = q
     const cur = queryParam(route.query.q)
-    if (q === cur) return
-    const type = route.query.type === 'post' ? { type: 'post' } : {}
+    const type = route.query.type === 'post' || post ? { type: 'post' } : {}
     const to = { path: '/search', query: { ...(q ? { q } : {}), ...type } }
+    if (q === cur && !(post && route.query.type !== 'post')) return
     /* 和搜索页自己的规则一致：从建议页（没有关键词）搜索多一条历史，返回回到建议页；结果页里换词替换 */
     if (!cur && q) router.push(to)
     else router.replace(to)
     return
   }
   // 空着回车：去搜索页（近期搜索 / 热门搜索 / 热门创作者）
-  router.push(q ? { path: '/search', query: { q } } : '/search')
+  const query = { ...(q ? { q } : {}), ...(post ? { type: 'post' } : {}) }
+  router.push(Object.keys(query).length ? { path: '/search', query } : '/search')
 }
 
 function clear() {
@@ -137,16 +152,40 @@ function onInput() {
   popOpen.value = true
   active.value = -1
 }
+/* 程序聚焦（打开空的搜索页时）不展开下拉：搜索页自己就列着近期 / 热门搜索，打字或按 ↓ 才展开 */
+let quietFocus = false
 function onFocus() {
   focused.value = true
-  popOpen.value = true
+  popOpen.value = !quietFocus
+  quietFocus = false
   refresh()
 }
 function onBlur() {
   focused.value = false
   popOpen.value = false
   active.value = -1
+  // 框里空着离开：范围回到地址决定的那个（社区「搜索帖子」点开又没搜 → 普通搜索）
+  if (!text.value.trim()) scope.value = routeScope()
 }
+
+function focusInput({ quiet = false } = {}) {
+  const el = inputEl.value
+  if (!el) return
+  if (document.activeElement === el) {
+    if (!quiet) popOpen.value = true
+    return
+  }
+  quietFocus = quiet
+  el.focus({ preventScroll: true })
+  quietFocus = false
+}
+
+/* 别处要搜（社区的「搜索帖子」）：聚焦并带上范围，展开下拉 */
+watch(() => deskSearchRequest.seq, () => {
+  scope.value = deskSearchRequest.scope
+  focusInput()
+  inputEl.value?.select()
+})
 
 /* 「/」聚焦搜索框 */
 function onDocKey(e) {
@@ -166,8 +205,27 @@ watch(() => (route.name === 'search' ? queryParam(route.query.q) : null), q => {
   if (focused.value) return
   text.value = q || ''
 }, { immediate: true })
-/* 换页面时收起建议 */
-watch(() => route.fullPath, () => { popOpen.value = false })
+/* 搜索范围跟着搜索页的标签走（帖子标签 = 搜帖子）；离开搜索页回到普通搜索（正在输入时不动） */
+watch(routeScope, t => {
+  if (!focused.value) scope.value = t
+}, { immediate: true })
+/*
+ * 打开没有关键词的搜索页（顶栏空着回车、社区的「搜索帖子」、直接输入地址）：聚焦这个框，直接打字就能搜；
+ * 帖子标签（type=post）就按帖子搜。弹层开着时不抢焦点。
+ */
+watch(() => (route.name === 'search' && !queryParam(route.query.q) ? route.fullPath : ''), path => {
+  if (!path) return
+  if (document.querySelector('[aria-modal="true"]')) return
+  nextTick(() => focusInput({ quiet: true }))
+}, { immediate: true })
+/*
+ * 换页面时收起建议；离开了搜索页、框里又什么都没打（打开空搜索页时自动聚焦的那一下）：让出焦点，
+ * 新页面的内容拿到焦点，键盘照样能滚（见 composables/useMainFocus.js）
+ */
+watch(() => route.fullPath, () => {
+  popOpen.value = false
+  if (route.name !== 'search' && inputEl.value && document.activeElement === inputEl.value && !text.value.trim()) inputEl.value.blur()
+})
 </script>
 
 <template>
@@ -185,7 +243,7 @@ watch(() => route.fullPath, () => { popOpen.value = false })
           aria-controls="dsr-pop"
           :aria-expanded="showPop"
           :aria-activedescendant="activeDesc"
-          :placeholder="PLACEHOLDER"
+          :placeholder="placeholder"
           autocomplete="off"
           spellcheck="false"
           enterkeyhint="search"
@@ -267,7 +325,7 @@ watch(() => route.fullPath, () => { popOpen.value = false })
   -webkit-appearance: none;
   appearance: none;
 }
-.dsr-field input::placeholder { color: #6e6e6e; }
+.dsr-field input::placeholder { color: var(--t-ph); }
 /*
  * 用自己的清除按钮：去掉浏览器自带的 ×。WebKit 有的版本自带的 × 本来就是 appearance: none + 遮罩画的，
  * 只有 display: none 藏得掉（和搜索页 SearchView 一样）

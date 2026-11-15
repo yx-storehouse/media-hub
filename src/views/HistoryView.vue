@@ -4,7 +4,7 @@ import { useRouter } from 'vue-router'
 import { getHistory, removeHistory, clearHistory, getVideo } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 import { useAppStore } from '@/stores/app'
-import { toast } from '@/composables/useToast'
+import { toast, toastError } from '@/composables/useToast'
 import { formatClock, formatCount } from '@/utils/format'
 import { createFeed } from '@/components/creator/feed'
 import { useAutoMore } from '@/components/home/list'
@@ -16,6 +16,7 @@ import Cover from '@/components/Cover.vue'
 import Icon from '@/components/Icon.vue'
 import ListFoot from '@/components/home/ListFoot.vue'
 import ConfirmSheet from '@/components/me/ConfirmSheet.vue'
+import LoadState from '@/components/common/LoadState.vue'
 import { cameBack, vRise, leave } from '@/components/home/motion'
 import { isDesktop } from '@/composables/useDesktop'
 
@@ -132,9 +133,9 @@ async function commit(id) {
     // 拿掉这一条、改总数、清掉「提交中」在同一拍里做完：中间不会多渲染一次（标题数字不会先回跳一下）
     feed.list = feed.list.filter(x => x.id !== id)
     if (typeof res?.total === 'number') feed.total = res.total
-  } catch {
-    // 删除失败：这一条照常显示
-    toast('删除失败，请稍后重试')
+  } catch (e) {
+    // 删除失败：这一条照常显示（登录过期时不提示：登录框已经弹出来了）
+    toastError(e, '删除失败，请稍后重试')
   } finally {
     committing.delete(id)
   }
@@ -175,9 +176,9 @@ async function clearAll() {
     await Promise.all([clearHistory(), ...out.map(a => a.finished.catch(() => {}))])
     feed.restore({ list: [], total: 0, done: true })
     toast('观看历史已清空')
-  } catch {
+  } catch (e) {
     out.forEach(a => a.cancel())
-    toast('清空失败，请稍后重试')
+    toastError(e, '清空失败，请稍后重试')
   } finally {
     clearing.value = false
   }
@@ -260,10 +261,8 @@ onBeforeUnmount(() => {
       <button type="button" class="retry" @click="auth.requireLogin()">去登录</button>
     </div>
 
-    <div v-else-if="feed.total === null" class="empty">
-      加载失败，请检查网络
-      <button type="button" class="retry" @click="feed.more()">重试</button>
-    </div>
+    <!-- 第一页取不到：统一的说法 +「重试」，联网 / 隔一会儿会自己重试 -->
+    <LoadState v-else-if="feed.total === null" :error="feed.error" :retry="feed.more" />
 
     <div v-else-if="!feed.list.length" v-rise.self class="empty">
       <Icon name="iHistory" class="em-ic" />
@@ -367,8 +366,8 @@ onBeforeUnmount(() => {
   .hi-tt { word-break: break-word; }
 }
 .hi-pg { margin-top: auto; color: var(--t2); font-size: 12px; line-height: 17px; font-variant-numeric: tabular-nums; }
-.hi-pg.done { color: #6e6e6e; }
-.hi-at { color: #6e6e6e; font-size: 12px; line-height: 17px; font-variant-numeric: tabular-nums; }
+.hi-pg.done { color: var(--t-sub); }
+.hi-at { color: var(--t-sub); font-size: 12px; line-height: 17px; font-variant-numeric: tabular-nums; }
 
 /* 删除：图标小，点按区域 44x44 */
 .hi-del { position: absolute; right: 2px; bottom: 2px; display: grid; place-items: center; width: 44px; height: 44px; color: #6e6e6e; transition: color var(--dur-1) var(--ease-out); }
@@ -382,7 +381,7 @@ onBeforeUnmount(() => {
 .undo:active { opacity: .6; }
 
 .em-ic { width: 34px; height: 34px; margin: 0 auto 12px; color: #4a4a4a; stroke-width: 1.6; }
-.em-sub { margin-top: 6px; color: #6e6e6e; font-size: 12px; }
+.em-sub { margin-top: 6px; color: var(--t-sub); font-size: 12px; }
 
 /* ---- 骨架 ---- */
 .sk-row { display: flex; gap: 12px; padding: 9px 14px; }

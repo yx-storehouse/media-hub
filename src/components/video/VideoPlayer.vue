@@ -34,6 +34,7 @@ import Cover from '@/components/Cover.vue'
 import BottomSheet from '@/components/BottomSheet.vue'
 import RollNum from './RollNum.vue'
 import { spinPhase } from './spin'
+import { spaceToPlayer } from './mouseFocus'
 
 /*
  * 播放页的播放器。
@@ -48,8 +49,10 @@ import { spinPhase } from './spin'
  * 桌面布局（窗口 ≥ 1024px，用鼠标、键盘）另外有（手机上的触屏操作一点不变）：
  * - 鼠标移上去显示控制栏，不动 3 秒收起（鼠标停在控制栏上、开着设置时不收），收起时画面上不显示鼠标指针；移出画面就收起。
  * - 单击画面播放 / 暂停（暂停时中间的大播放键就是反馈），双击全屏（真全屏）。
- * - 键盘（焦点不在输入框、没开弹层）：空格 / K 播放暂停，← → 后退 / 前进 5 秒，J / L 10 秒，↑ ↓ 音量，M 静音，F 全屏；
- *   跳进度、调音量时画面中间偏上弹一个小标签。
+ * - 键盘（焦点不在输入框、没开弹层）：空格 / K 播放暂停，← → 后退 / 前进 5 秒，J / L 10 秒，↑ ↓ 音量，M 静音，F 全屏，
+ *   Esc 收起设置面板、取消播完后的自动连播倒计时；跳进度、调音量时画面中间偏上弹一个小标签。
+ *   鼠标点过的按钮不留焦点（播放页根上的 useMouseFocusGuard，见 mouseFocus.js）：点了赞、全屏、静音以后按空格还是播放 / 暂停。
+ *   控制栏按钮悬停时提示名字和快捷键（title），「播放设置」面板底下列出全部快捷键。
  * - 喇叭左边的音量条（鼠标移到喇叭上出现），进度条上指到哪显示那一刻的时间。
  * - 「播放设置」是控制栏上方的小面板（全屏时也能用），不是底部弹层。
  */
@@ -90,6 +93,16 @@ const emit = defineEmits({
 })
 
 const SPEEDS = ['0.5x', '0.75x', '1.0x', '1.25x', '1.5x', '2.0x']
+/** 桌面：「播放设置」面板底下列出的键盘快捷键（处理在 onKey）。短视频页的 J / K 是上一条 / 下一条，这里是跳 10 秒 / 暂停 */
+const KEYS = [
+  { keys: ['空格', 'K'], label: '播放 / 暂停' },
+  { keys: ['M'], label: '静音' },
+  { keys: ['←', '→'], label: '后退 / 前进 5 秒' },
+  { keys: ['F'], label: '全屏' },
+  { keys: ['J', 'L'], label: '后退 / 前进 10 秒' },
+  { keys: ['↑', '↓'], label: '音量' },
+  { keys: ['双击画面'], label: '全屏', mouse: true }
+]
 const QUALITY = { sd: '标清', hd: '高清', fhd: '超清' }
 /** 播完后自动播下一个前的倒计时（秒） */
 const AUTO_NEXT_SEC = 5
@@ -627,11 +640,6 @@ function onVolKey(e) {
 /* ---------- 桌面：键盘快捷键（焦点不在输入框、没开弹层、不在导航的下拉菜单里） ---------- */
 
 const isTyping = t => !!t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))
-/* 键盘聚焦（Tab 过来）的按钮：空格照常按下它；鼠标点过、焦点还留着的按钮（比如刚点了赞），空格还是播放 / 暂停 */
-function keyboardButton(t) {
-  if (!t?.closest?.('button, a[href], [role="button"], [role="switch"], [role="tab"], [role="menuitem"]')) return false
-  try { return t.matches(':focus-visible') } catch { return true }
-}
 const SEEK_KEYS = { ArrowLeft: -5, ArrowRight: 5, j: -10, J: -10, l: 10, L: 10 }
 function onKey(e) {
   if (!isDesktop.value || !props.keys || e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey || e.isComposing) return
@@ -644,6 +652,12 @@ function onKey(e) {
       e.preventDefault()
       return
     }
+    // 播完后正在倒计时自动播下一个：Esc 取消（和点「取消」一样）
+    if (ended.value && countdown.value) {
+      cancelCountdown()
+      e.preventDefault()
+      return
+    }
     // 伪全屏（浏览器不给真全屏时）：Esc 退出；真全屏由浏览器自己的 Esc 退出
     if (pseudoFs.value) {
       exitFullscreen()
@@ -653,7 +667,8 @@ function onKey(e) {
   }
   if (!hasSource.value) return
   if (k === ' ' || k === 'Spacebar' || k === 'k' || k === 'K') {
-    if (k !== 'k' && k !== 'K' && keyboardButton(t)) return
+    // 键盘走过来的按钮：空格按它；鼠标点过、焦点还留着的（顶栏的 ☰ 等）：焦点还回去，照样播放 / 暂停（mouseFocus.js）
+    if (k !== 'k' && k !== 'K' && !spaceToPlayer(t)) return
     if (!e.repeat) toggle()
   } else if (k in SEEK_KEYS) {
     // 焦点在进度条 / 音量条上：方向键归它们自己
@@ -1027,7 +1042,8 @@ onBeforeUnmount(() => {
     <div class="shade" />
 
     <div class="top">
-      <button type="button" class="back hit-44" aria-label="返回" @click.stop="emit('back')"><Icon name="chevL" /></button>
+      <button type="button" class="back hit-44" aria-label="返回" :title="isDesktop ? '返回' : undefined" @click.stop="emit('back')"><Icon name="chevL" /></button>
+      <!-- 清晰度只是说明（片源只有这一种），纯文字，不做成像按钮的胶囊 -->
       <span v-if="qualityLabel && hasSource" class="badge">{{ qualityLabel }}</span>
     </div>
 
@@ -1041,7 +1057,14 @@ onBeforeUnmount(() => {
     <template v-else>
       <!-- 暂停时播放键从略大轻轻落到位；开始播放时放大淡出 -->
       <Transition name="bp">
-        <button v-show="!playing && !ended && !autoStarting" type="button" class="big-play" :aria-label="failed ? '重新加载' : '播放'" @click.stop="play">
+        <button
+          v-show="!playing && !ended && !autoStarting"
+          type="button"
+          class="big-play"
+          :aria-label="failed ? '重新加载' : '播放'"
+          :title="isDesktop ? (failed ? '重新加载' : '播放（空格）') : undefined"
+          @click.stop="play"
+        >
           <Icon :name="failed ? 'refresh' : 'play'" :class="{ retry: failed }" />
         </button>
       </Transition>
@@ -1120,7 +1143,9 @@ onBeforeUnmount(() => {
           <span v-if="isDesktop && hoverT >= 0" class="seek-tip" :style="{ transform: `translateX(${tipX}px) translateX(-50%)` }" aria-hidden="true">{{ formatClock(hoverT) }}</span>
         </div>
         <div class="ctl">
-          <button type="button" :aria-label="playing ? '暂停' : '播放'" @click="toggle"><Icon :name="playing ? 'pause' : 'play'" /></button>
+          <button type="button" :aria-label="playing ? '暂停' : '播放'" :title="isDesktop ? (playing ? '暂停（空格 / K）' : '播放（空格 / K）') : undefined" @click="toggle">
+            <Icon :name="playing ? 'pause' : 'play'" />
+          </button>
           <span class="time">{{ formatClock(current) }} / {{ formatClock(duration) }}</span>
           <span class="sp" />
           <button
@@ -1129,6 +1154,7 @@ onBeforeUnmount(() => {
             class="set"
             :aria-label="cycleSpeed ? `倍速 ${store.playback.speed}，点击切换` : rateLabel ? `播放设置，当前 ${rateLabel} 倍速` : '播放设置'"
             :aria-expanded="isDesktop ? popOpen : undefined"
+            :title="isDesktop ? '播放设置' : undefined"
             @click="openSettings"
           >
             <Icon v-if="!cycleSpeed" name="cog" />
@@ -1137,7 +1163,9 @@ onBeforeUnmount(() => {
           </button>
           <!-- 竖屏时循环在「播放设置」里；手机全屏时设置面板打不开，放到控制栏上（桌面的设置面板全屏也能开） -->
           <button v-if="isFs && !isDesktop" type="button" class="loop" :class="{ on: loop }" :aria-pressed="loop" aria-label="循环播放" @click="toggleLoop"><Icon :key="loop ? 1 : 0" name="loop" /></button>
-          <button type="button" class="mute" :aria-label="muted ? '打开声音' : '静音'" @click="toggleMute"><Icon :name="silent ? 'mute' : 'vol'" /></button>
+          <button type="button" class="mute" :aria-label="muted ? '打开声音' : '静音'" :title="isDesktop ? (silent ? '打开声音（M）' : '静音（M）') : undefined" @click="toggleMute">
+            <Icon :name="silent ? 'mute' : 'vol'" />
+          </button>
           <!-- 桌面：音量条（排在喇叭左边，鼠标移到喇叭上出现，见样式） -->
           <div
             v-if="isDesktop"
@@ -1160,8 +1188,10 @@ onBeforeUnmount(() => {
             <div class="vol-track"><i :style="{ transform: `translateX(${volPct - 100}%)` }" /></div>
             <span class="vol-kw" :style="{ transform: `translateX(${volPct}%)` }"><b /></span>
           </div>
-          <button v-if="canPip" type="button" class="pip" aria-label="小窗播放" @click="togglePip"><Icon name="pip" /></button>
-          <button type="button" class="fsb" :aria-label="isFs ? '退出全屏' : '全屏'" @click="toggleFullscreen"><Icon :name="isFs ? 'fullscreenExit' : 'fullscreen'" /></button>
+          <button v-if="canPip" type="button" class="pip" aria-label="小窗播放" :title="isDesktop ? '小窗播放' : undefined" @click="togglePip"><Icon name="pip" /></button>
+          <button type="button" class="fsb" :aria-label="isFs ? '退出全屏' : '全屏'" :title="isDesktop ? (isFs ? '退出全屏（F）' : '全屏（F）') : undefined" @click="toggleFullscreen">
+            <Icon :name="isFs ? 'fullscreenExit' : 'fullscreen'" />
+          </button>
         </div>
       </div>
 
@@ -1182,21 +1212,25 @@ onBeforeUnmount(() => {
               {{ s }}
             </button>
           </div>
-          <div class="row2">
-            <span>循环播放</span>
-            <button type="button" class="sw" :class="{ on: loop }" role="switch" :aria-checked="loop" aria-label="循环播放" @click="toggleLoop" />
-          </div>
-          <div class="row2">
+          <!-- 开关和短视频的「播放设置」同一个顺序（自动连播在前）；整行都能点（开关本身的点击也冒泡到这一行） -->
+          <div class="row2 sw-row" @click="toggleAutoNext">
             <span>自动连播<small>播完 5 秒后播放下一个</small></span>
-            <button
-              type="button"
-              class="sw"
-              :class="{ on: store.playback.autoNext }"
-              role="switch"
-              :aria-checked="store.playback.autoNext"
-              aria-label="自动连播"
-              @click="toggleAutoNext"
-            />
+            <button type="button" class="sw" :class="{ on: store.playback.autoNext }" role="switch" :aria-checked="store.playback.autoNext" aria-label="自动连播" />
+          </div>
+          <div class="row2 sw-row" @click="toggleLoop">
+            <span>循环播放</span>
+            <button type="button" class="sw" :class="{ on: loop }" role="switch" :aria-checked="loop" aria-label="循环播放" />
+          </div>
+          <!-- 键盘快捷键一览（短视频的播放设置里也有一份） -->
+          <div class="pop-keys">
+            <div class="pop-hd">键盘快捷键</div>
+            <dl>
+              <div v-for="k in KEYS" :key="k.keys.join() + k.label">
+                <dt v-if="k.mouse" class="mouse">{{ k.keys[0] }}</dt>
+                <dt v-else><kbd v-for="c in k.keys" :key="c">{{ c }}</kbd></dt>
+                <dd>{{ k.label }}</dd>
+              </div>
+            </dl>
           </div>
         </div>
       </Transition>
@@ -1216,21 +1250,13 @@ onBeforeUnmount(() => {
           {{ s }}
         </button>
       </div>
-      <div class="row2">
-        <span>循环播放</span>
-        <button type="button" class="sw" :class="{ on: loop }" role="switch" :aria-checked="loop" aria-label="循环播放" @click="toggleLoop" />
-      </div>
-      <div class="row2">
+      <div class="row2 sw-row" @click="toggleAutoNext">
         <span>自动连播<small>播完 5 秒后播放下一个</small></span>
-        <button
-          type="button"
-          class="sw"
-          :class="{ on: store.playback.autoNext }"
-          role="switch"
-          :aria-checked="store.playback.autoNext"
-          aria-label="自动连播"
-          @click="toggleAutoNext"
-        />
+        <button type="button" class="sw" :class="{ on: store.playback.autoNext }" role="switch" :aria-checked="store.playback.autoNext" aria-label="自动连播" />
+      </div>
+      <div class="row2 sw-row" @click="toggleLoop">
+        <span>循环播放</span>
+        <button type="button" class="sw" :class="{ on: loop }" role="switch" :aria-checked="loop" aria-label="循环播放" />
       </div>
     </BottomSheet>
   </div>
@@ -1285,15 +1311,15 @@ onBeforeUnmount(() => {
 .top { position: absolute; left: 0; right: 0; top: 0; z-index: 2; display: flex; align-items: center; justify-content: space-between; padding: 6px 12px 0 6px; }
 .back { position: relative; display: grid; place-items: center; width: 40px; height: 40px; color: #fff; }
 .back svg { width: 24px; height: 24px; stroke-width: 2.6; filter: drop-shadow(0 1px 3px rgba(0, 0, 0, .5)); }
+/* 清晰度：只是一个说明（点了也没有别的可选），纯文字的小标签，不做成和按钮一样的描边胶囊 */
 .badge {
-  height: 24px;
-  padding: 0 11px;
-  border: 1px solid rgba(255, 255, 255, .32);
-  border-radius: 12px;
-  background: rgba(0, 0, 0, .32);
-  color: #fff;
+  padding: 0 6px;
+  color: rgba(255, 255, 255, .72);
   font-size: 12px;
-  line-height: 22px;
+  font-weight: 600;
+  line-height: 18px;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, .6);
+  pointer-events: none;
 }
 
 /* 全屏时避开刘海 / 圆角 */
@@ -1449,7 +1475,7 @@ onBeforeUnmount(() => {
 }
 .resume button { position: relative; height: 24px; padding: 0 10px; border-radius: 12px; background: rgba(255, 255, 255, .16); font-weight: 600; }
 .resume button::after { content: ''; position: absolute; inset: -6px -4px; }
-.ui-on .resume { transform: translateY(-50px); transition: transform var(--dur-3) var(--ease-out); }
+.ui-on .resume { transform: translateY(-56px); transition: transform var(--dur-3) var(--ease-out); }
 
 /* ---------- 结束画面 ---------- */
 .end {
@@ -1545,8 +1571,8 @@ onBeforeUnmount(() => {
 
 .bar { position: absolute; left: 0; right: 0; bottom: 0; padding: 0 6px 2px; }
 .seek { position: relative; display: flex; align-items: center; height: 18px; margin: 0 10px; border-radius: 4px; cursor: pointer; touch-action: none; }
-/* 线条只有 3px，手指按的区域放大到 32px 高（往上多一些，不压住下面的按钮） */
-.seek::before { content: ''; position: absolute; left: -10px; right: -10px; top: -10px; bottom: -4px; }
+/* 线条只有 3px，手指按的区域放大到 32px 高（全往上撑，不压住下面那排按钮：它们能点的高度要留满 44px） */
+.seek::before { content: ''; position: absolute; left: -10px; right: -10px; top: -14px; bottom: 0; }
 .seek:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .seek[aria-disabled] { cursor: default; }
 /* 已播部分是整条白线往左挪出去的那一截；拖动时线用 scaleY 变粗、圆点回弹变大（都只动 transform） */
@@ -1556,13 +1582,14 @@ onBeforeUnmount(() => {
 .knob { position: absolute; left: 0; top: 50%; width: 11px; height: 11px; margin: -5.5px 0 0 -5.5px; border-radius: 50%; background: #fff; box-shadow: 0 0 4px rgba(0, 0, 0, .4); transition: transform var(--dur-2) var(--ease-out); }
 .seeking .track { transform: scaleY(1.67); }
 .seeking .knob { transform: scale(1.4); transition: transform var(--dur-2) var(--ease-spring); }
-.ctl { display: flex; align-items: center; height: 38px; }
-.ctl button { display: grid; place-items: center; width: 38px; height: 38px; color: #fff; }
+/* 按钮能点的范围 40 × 44（图标还是 21px，看起来不变） */
+.ctl { display: flex; align-items: center; height: 44px; }
+.ctl button { display: grid; place-items: center; width: 40px; height: 44px; color: #fff; }
 .ctl svg { width: 21px; height: 21px; stroke-width: 2; filter: drop-shadow(0 1px 2px rgba(0, 0, 0, .4)); transition: transform var(--dur-2) var(--ease-spring); }
 /* 按下图标立刻缩一下，松开回弹 */
 .ctl button:active svg { transform: scale(var(--press-scale-sm)); transition: transform var(--dur-1) var(--ease-out); }
 .back:active svg { transform: scale(var(--press-scale-sm)); }
-.ctl .set { display: flex; gap: 3px; justify-content: center; width: auto; min-width: 38px; padding: 0 7px; }
+.ctl .set { display: flex; gap: 3px; justify-content: center; width: auto; min-width: 40px; padding: 0 8px; }
 .ctl .loop { transition: opacity var(--dur-2) var(--ease-out); }
 .ctl .loop:not(.on) { opacity: .5; }
 /* 切换循环：图标转一圈弹到位 */
@@ -1573,6 +1600,8 @@ onBeforeUnmount(() => {
 .sp { flex: 1; }
 .speeds { margin-bottom: 12px; }
 .row2 small { display: block; margin-top: 2px; color: var(--t2); font-size: 12px; }
+/* 开关那一行整行都能点 */
+.sw-row { cursor: pointer; }
 
 /* iOS 14 / 安卓 WebView 87 不认 aspect-ratio（Safari 15、Chrome 88 才有）：里面全是绝对定位的东西，高度会是 0，用 ::before 的 padding 撑出同样的比例（伪全屏 / 全屏时高度另有规定，多出来的这块被 overflow 裁掉，看不见） */
 @supports not (aspect-ratio: 1 / 1) {
@@ -1595,7 +1624,7 @@ onBeforeUnmount(() => {
 
   .top { padding: 12px 14px 0 12px; }
   .back { border-radius: 50%; }
-  .badge { height: 26px; padding: 0 12px; border-radius: 13px; font-size: 13px; line-height: 24px; }
+  .badge { padding: 0 4px; font-size: 13px; line-height: 20px; }
 
   .bar { padding: 0 12px 6px; }
   .seek { height: 22px; margin: 0 8px; }
@@ -1715,7 +1744,7 @@ onBeforeUnmount(() => {
     right: 12px;
     bottom: 72px;
     z-index: 4;
-    width: 280px;
+    width: 320px;
     max-height: calc(100% - 88px);
     overflow-y: auto;
     padding: 14px 16px 4px;
@@ -1733,6 +1762,25 @@ onBeforeUnmount(() => {
   .pop .opt { height: 34px; background: rgba(255, 255, 255, .08); color: var(--t3); font-size: 14px; }
   .pop .opt.on { background: var(--accent); color: var(--on-accent); }
   .pop .row2 { height: 52px; border-color: rgba(255, 255, 255, .08); }
+  /* 快捷键一览：两列（长的说明在左边一列），和短视频播放设置里的那一份同一个样子 */
+  .pop-keys { padding: 12px 0 12px; }
+  .pop-keys .pop-hd { margin-bottom: 8px; }
+  .pop-keys dl { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 8px 12px; }
+  .pop-keys dl > div { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .pop-keys dt { display: flex; flex: none; gap: 4px; }
+  .pop-keys dt.mouse { color: var(--t3); font-size: 12px; line-height: 22px; }
+  .pop-keys kbd {
+    min-width: 22px;
+    height: 22px;
+    padding: 0 5px;
+    border: 1px solid #333;
+    border-radius: 5px;
+    background: #1a1a1a;
+    color: var(--t3);
+    font: 600 12px/20px var(--font);
+    text-align: center;
+  }
+  .pop-keys dd { overflow: hidden; color: var(--t2); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
   .pop-enter-active { transition: opacity var(--dur-2) var(--ease-out), transform var(--dur-spring-snappy) var(--spring-snappy); }
   .pop-leave-active { transition: opacity var(--dur-1) var(--ease-in), transform var(--dur-1) var(--ease-in); }
   .pop-enter-from { opacity: 0; transform: translate3d(0, 6px, 0) scale(.96); }

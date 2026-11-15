@@ -5,7 +5,8 @@
 
 - 开发：`npm run dev` 后打开 `http://localhost:5173/admin.html`（或 `/admin`）。Vite 会把 `/api` 和 `/media` 转发到接口服务。
 - 打包：`npm run build` 生成 `dist/admin.html`；`node server/index.mjs` 托管 dist 时访问 `http://<服务器>:3000/admin`。
-- 只有管理员账号能登录。第一次部署：`node server/create-admin.mjs <登录名> <密码>`。
+- 只有管理员账号能登录。第一次部署：`node server/create-admin.mjs <登录名> <密码>`（Docker 部署在项目目录里运行 `docker compose exec reel node server/create-admin.mjs <登录名> <密码>`）。
+  登录页对内网所有人可见，只写「忘记密码或还没有账号，请联系管理员」；重置命令只写在「账号」页（只有管理员看得到）。
 - 组件示例：开发环境打开 `admin.html#/_kit`（`pages/_KitPage.vue`，只在 `import.meta.env.DEV` 时注册路由，打包时不包含），可以看到所有控件和 v-model 的值。
 - 接口说明见 `server/README.md`「管理后台接口」。
 
@@ -13,13 +14,18 @@
 src/admin/
   main.js / App.vue / router.js / nav.js   入口、外壳（侧边栏）、路由、导航
   api.js        每个 /api/admin/* 接口一个函数（含 XHR 上传 uploadFile）
-  auth.js       登录态 session、登录守卫、401 处理（令牌存 localStorage 的 reel.admin.token）
+  auth.js       登录态 session、登录守卫、401 处理（令牌存 localStorage 的 reel.admin.token）：用着用着 401 时在原地弹
+                「登录已过期」（components/ReloginModal.vue），重新登录后刚才失败的请求（保存、上传）自动重发，表单内容不丢；
+                别的标签页登录了（storage 事件）直接换上新令牌
   styles/admin.css    设计变量 + 基础样式 + 工具类
   components/   组件库（见下）
   composables/  useListPage / useEditor / useBatch / useExport / useMeta / useSchema /
                 useLeaveGuard / useUploader / useVideoProbe / useReorder
-  utils/        csv.js / xlsx.js（手写的 .xlsx 读取） / format.js / download.js / probe.js / image.js / roving.js
+  utils/        csv.js / xlsx.js（手写的 .xlsx 读取） / format.js / download.js / probe.js / image.js / imagePrep.js / roving.js /
+                chunkRetry.js（页面文件加载失败的恢复，见下面「发版 / 断网」）
   pages/        页面；KeywordsPage.vue 是列表页的参考实现
+  pages/import/ 批量导入向导（store.js 管状态）：预检按 1000 行一批发；「更新已有」时和库里一样的行是「无变化」（不写库，有单独的格子和筛选），
+                更新的行写明改了哪些字段（「将更新 / 已更新：标题、标签」）
 ```
 
 侧边栏「图片」（`#/albums`，`pages/AlbumsPage.vue`）管理的是**图集**：前台创作者主页「图片」里的内容，一个图集 = 标题（单张可不写）+ 简介 + 标签 +
@@ -28,6 +34,19 @@ src/admin/
 `toUrl` 的规则检查；上传的文件名按服务端的规则改写：连续的点、Windows 保留名、超过 200 字节、没有扩展名，不支持的格式直接跳过），
 改服务端的这两条规则时要一起改。上传失败的格子上直接写服务端给的原因，断网 / 5xx 可以「重试」，其他 4xx 只能「移除」。
 素材文件页可以把一个文件夹「建成图集」（`pages/media/AlbumFromFolder.vue`）。
+
+素材文件页（`pages/MediaPage.vue`）：网格 / 列表都能多选（网格左上角的勾选框，按住 Shift 连选；列表用表头勾选），底部批量条
+「移动到…」（`pages/media/MoveModal.vue`）/「重命名」（`RenameModal.vue`）/「删除」（一次确认，列出正被视频 / 图集使用的文件，
+服务端拒绝时再确认一次后带 force 重发）。改名 / 移动时服务端把视频、图集、帖子、专题头图、头像里引用它的地址一起改掉。
+文件夹显示「N 项」，不是空的文件夹点删除直接说「里面还有 N 项」并给「打开文件夹」。勾选的图片里有还没有小图的（这个功能之前传的），
+批量条多一个「生成小图（N）」：一张张下载原图、在浏览器里生成小图传上去，原图不动。
+
+图片上传（所有走 `useUploader` 的地方：素材页、图集、封面、头图、帖子配图）：大图先在浏览器里缩小（按 EXIF 方向转正后重新编码）——
+长边限到 2048，但缩完短边不小于 1080：普通照片照旧缩到长边 2048，长图（攻略截图、长条拼图、扫描件）和全景按短边保 1080，
+只为保短边又缩不到 0.8 倍的（1080 / 1170 / 1290 宽的手机长截图）原样上传，字不会被缩糊。原图传完再传一张小图
+「<最终文件名>.thumb.jpg」（如 a.jpg.thumb.jpg；服务端重名自动改名时用改过的名字）：长边 480、短边至少 360（网格、头图都是 cover 裁切，看短边），
+总像素 ≤ 360×1920（长图的小图如 1080×8000 → 305×2263）。App 的网格 / 头图用小图。GIF、动图、长边 ≤ 480 的图不处理。小图在素材页不单独列出（挂在原图的 `thumb` 上，网格用它显示），
+跟着原图删除 / 改名 / 移动；原图已经不在的小图标「小图」，可以删掉；图片选择器、建成图集不会选到它。
 
 ## 约定
 
@@ -82,10 +101,11 @@ src/admin/
 | `APager` | `v-model:page`、`v-model:page-size`、`total`、`disabled` | total 为 0（首次加载、出错、无数据）时整个不显示 |
 | `BatchBar` | `count`、`busy` | 默认插槽放按钮；`@clear`。会把自己的实际高度登记给提示条（两排按钮也不会被 toast 挡住） |
 | `ADrawer` | `v-model:open`、`title`、`width`=560、`dirty`、`loading`、`busy`（保存中，传 `editor.saving`：期间关不掉） | 默认（可滚动）、`#footer`、`#header`；`@save`（Ctrl/⌘+S）；ref 方法 `requestClose()`；里面有 `useUploader` 的上传没传完时，关闭会先确认 |
-| `AModal` | `v-model:open`、`title`、`width`=480、`persistent`（点遮罩不关）、`closable`（false 时 Esc / × 也不关，请求进行中用）、`flush` | 默认、`#footer`、`#header` |
+| `AModal` | `v-model:open`、`title`、`width`=480、`persistent`（点遮罩不关）、`closable`（false 时 Esc / × 也不关，请求进行中用）、`flush`、`beforeClose`（用户要关之前调用，返回 / resolve 成 false 就不关，用来「放弃已选的 N 个？」） | 默认、`#footer`、`#header`；ref 方法 `close()`（同样经过 beforeClose） |
 | `BatchValueModal` | `v-model:open`、`title`、`label`、`mode`=select/tags、`options`、`searchable`、`nullLabel`（多一个提交 null 的选项）、`hash`、`hint`、`count`、`unit`、`busy`、`placeholder`、`confirmText`='确定'、`width`=440 | `@submit(value)`：页面调批量接口，成功后把 open 关掉 |
 | `confirm.js` + `ConfirmHost` | `await confirmDialog({ title, message, confirmText, cancelText, danger })` → boolean | message 支持换行 |
-| `toast.js` + `ToastHost` | `toast(msg, { type: 'info'/'ok'/'error', duration })`、`toastError(e, fallback)`；`setBottomInset(key, px)` 登记贴底的固定条高度 | — |
+| `toast.js` + `ToastHost` | `toast(msg, { type: 'info'/'ok'/'error', duration })`（duration 0 = 不自动消失）→ id、`dismissToast(id)`、`toastError(e, fallback)`；`setBottomInset(key, px)` 登记贴底的固定条高度；`setRightInset(key, px)` 登记右侧抽屉宽度（ADrawer 自己登记：抽屉开着时提示条放在抽屉左边，不盖住抽屉里的控件） | — |
+| `ReloginModal` | App.vue 挂一次，状态在 `auth.js` 的 `relogin` | 「登录已过期」：登录后等着的请求自动重发；「取消」留在原页面 |
 | `FormField` | `label`、`required`、`hint`、`error`、`field`（接口字段名，用于聚焦错误）、`inline` | 默认插槽放控件；`#extra`（标签右侧） |
 | `TextInput` | `v-model`、`type`、`placeholder`、`maxlength`、`showCount`（框内右侧「12 / 200」）、`mono`、`size`、`disabled`、`readonly` | `@enter`；ref 方法 `focus()` |
 | `TextArea` | `v-model`、`rows`=3、`maxRows`=14、`maxlength`、`showCount`（框下右侧「1,234 / 5,000」） | 自动增高 |
@@ -100,7 +120,7 @@ src/admin/
 | `StatusBadge` | `status`、`kind`=content/creator/album、`label` | content：1 已发布 / 0 草稿 / 2 已下架；creator：1 正常 / 0 停用；album：1 上架 / 2 下架 |
 | `SearchBox` | `v-model`（防抖 300ms）、`placeholder`、`width`=240、`delay`、`autoKey`（按 / 聚焦） | `@search` |
 | `VideoPicker` | `v-model:open`、`multiple`、`excludeIds`、`title` | `@select([{ id, publicId, title, coverUrl, status, durationSec, topicName }])` |
-| `MediaPicker` | `v-model:open`、`accept`=image/video/any、`startDir` | `@select({ path, url, entry })`；连续点文件夹只认最后一次；关闭 = 取消上传 |
+| `MediaPicker` | `v-model:open`、`accept`=image/video/any、`startDir` | `@select({ path, url, entry })`；连续点文件夹只认最后一次；关闭 = 取消上传；不列出原图已经不在的小图 |
 | `EmptyState` | `variant`=empty/error、`icon`、`title`、`text`、`retry`=true、`retrying`、`compact` | 默认插槽放引导按钮；`variant="error"` 时自带「重试」按钮（`@retry`） |
 
 ## 组合函数（composables/）
@@ -125,8 +145,9 @@ const { query, rows, total, loading, loaded, error, selected, reload, sortModel,
 返回 `{ open, isNew, id, row, form, errors, saving, loadingRow, dirty, openNew(preset), openEdit(rowOrId), close(), submit(), showFieldError(field, msg, { focus }) }`。
 
 - 新建时去掉空值让服务端用默认值，编辑时只 PATCH 改动的字段。
-- 字段错误（本地校验 / 服务端 `field`）显示在 `<FormField field="…">` 下；校验失败时只聚焦并提示表单里最靠前的那个；
+- 字段错误（本地校验 / 服务端 `field`）显示在 `<FormField field="…">` 下（role=alert，读屏会读）；校验失败时只聚焦表单里最靠前的那个；
   该字段一改就清掉错误（服务端字段名和表单键不同时写 `fieldAlias: { durationSec: 'durationText' }`）。
+  错误已经写在表单项下面时不再弹提示框；只有表单里找不到对应项的错误、或网络 / 服务端出错才弹，并在重新保存、改好、关抽屉时收掉。
 - 保存进行中：`<ADrawer :busy="editor.saving">` 关不掉；万一期间换了一条（浏览器后退 / 深链），旧结果只提示 + 刷新列表，不动新打开的表单。
 - 有未保存的修改时：关抽屉（ADrawer 负责）、点侧边栏离开页面都会先确认，刷新 / 关标签页由浏览器提示（内部用 `useLeaveGuard`）。
 
@@ -135,6 +156,7 @@ const { query, rows, total, loading, loaded, error, selected, reload, sortModel,
 有未保存的修改时拦住离开：去别的路由先 `confirmDialog`（默认「放弃修改？」/「离开」），刷新、关标签页由浏览器提示（只在 dirty 时挂 beforeunload）。
 `isDirty` 可以是 ref / computed / getter。保存成功后马上要程序跳转：`bypass(); router.push(…)`（只放行下一次离开）。
 同一路由内只改查询参数不会触发；要在换筛选前确认，页面自己在改 query 前判断。
+`hasUnsavedChanges()`：现在页面上有没有未保存的修改（发版后页面文件加载失败时，有就不自动刷新，提示先保存）。
 
 ```js
 const { bypass } = useLeaveGuard(() => order.dirty, { message: '调整后的顺序还没有保存，确定离开？' })
@@ -155,6 +177,8 @@ try {
 ```
 
 同一个 `key` 再次上传会先取消上一个。在 `ADrawer` 里时，有上传进行中关抽屉会先确认（`UPLOAD_GUARD`）。
+图片会先处理（`utils/imagePrep.js`，见上面「图片上传」）：结果多带 `{ width, height, thumb }`（上传的那张图的尺寸、小图地址）；
+`onPrepare({ size, width, height, resized })` 在处理完、开始传之前调用；不想处理传 `image: false`。登录过期时上传也会等重新登录后重传一次。
 
 ### useVideoProbe() → reactive
 
@@ -194,7 +218,8 @@ const r = useReorder(() => rows.value, { onReset: had => had && toast('列表已
 ### 其他
 
 - `useBatch(batchFn, { selected, reload, clearSelection })` → `{ busy, run(action, value, { confirm, done, keepSelection }) }`
-- `useExport(type, () => params())` → `{ busy, run() }`，导出 `<类型名>-YYYYMMDD-HHmm.csv`，表头 = 字段中文名（可直接再导入）。也可直接用 `exportToCSV(type, query)`。
+- `useExport(type, () => params())` → `{ busy, run() }`，导出 `<类型名>-YYYYMMDD-HHmm.csv`，表头 = 字段中文名（可直接再导入）。也可直接用 `exportToCSV(type, query)`
+  （→ `{ count, total, truncated }`）。服务端一次最多导出 5 万行：被截断时提示「只导出了前 50,000 条（共 N 条），请加筛选分批导出」。
 - `useMeta()` → `meta`、`topicOptions / creatorOptions / categoryOptions / regionOptions / qualityOptions / statusOptions / postKindOptions / topicKindOptions / albumStatusOptions / enableOptions`、
   `labelOf(listName, value)`、`refreshMeta()`（改了专题 / 创作者后调用）。加载失败时 App 顶部出现带「重试」的提示条（`metaStatus`），
   之后再调用 `useMeta()` 也会自动重试（间隔至少 5 秒）。
@@ -207,6 +232,10 @@ const r = useReorder(() => rows.value, { onReset: had => had && toast('列表已
 - `format.js`：`fmtDate / fmtShortDate / fmtDay / fmtDuration / parseDuration / fmtSize / fmtCount / fmtNum / relTime / fileStamp`。
 - `download.js`：`downloadText / downloadBlob / downloadCSV`。
 - `probe.js`：`probeVideo(url, { at, maxWidth, timeout, signal })` → `{ durationSec, blob }`（浏览器里读时长、截封面；页面请用 `useVideoProbe`）。
+- `imagePrep.js`：`prepareImage(file, { path })` → `{ blob, width, height, resized, thumb }` 或 `null`（上传前缩小、生成 JPEG 小图，尺寸规则见上面「图片上传」和 `mainScale / thumbScale`；
+  一次只处理一张；页面不用直接调，`useUploader` 会调）；`thumbPathOf(path)`、`isThumbPath(path)`。
+- `chunkRetry.js`：页面文件加载失败的恢复（`isChunkError / whenOnline / probe / ensureStyles / reloadOnce`）。不用 `src/utils/chunkRetry.js`：那个文件
+  两个入口都用，会被打包进移动端的 kit 块，后台为了它要多下载好几百 KB。
 - `image.js`：`imageSize(urlOrFile, { timeout, signal })` → `{ width, height }` 或 `null`（浏览器里读图片的 naturalWidth / naturalHeight，
   按 EXIF 方向转正；读不到不抛错）；`rememberImageSize(url, size)` 记下已知尺寸。图集保存前补宽高、列表批量「读取尺寸」都用它。
 - `roving.js`：单选组 / 标签页的键盘操作，普通 `<button>` 就能用：
@@ -220,6 +249,16 @@ const r = useReorder(() => rows.value, { onReset: had => had && toast('列表已
 
   `rovingKeydown(e, { selector, orientation: 'both' | 'horizontal' | 'vertical', activate = true, loop = true })`：← → ↑ ↓ 移动（首尾循环）、Home / End；
   默认移到哪项就点哪项（手动激活的标签页传 `activate: false`）。`rovingTabindex(i, activeIndex)` → 0 / -1（都没选时第一项为 0）。
+
+## 发版 / 断网
+
+页面都是按需加载的。点到一个还没打开过的页面、它的文件下载失败时（`router.js` 的 `lazy()` + `main.js` 的 `router.onError`）：
+
+- 断网：提示「网络已断开，连上网后自动打开这个页面」，联网后原地址再试一次，页面自己打开；
+- 服务器连不上（NAS / 容器重启）：提示网络问题，隔 2、4、8…最长 30 秒看一眼服务器，回来了自动打开（最多等 10 分钟）；
+- 服务器能连上、文件却没有了（发了新版本，开着的旧标签页要的是旧文件名）：整页刷新到要去的那一页（30 秒内只刷新一次）；
+  页面上有没保存的修改时不刷新，提示「后台已更新：请先保存修改，再刷新浏览器」（不自动消失）；
+- 第一页就加载失败也会把外壳挂上并提示，不会整页空白。
 
 ## 新增一个列表页
 

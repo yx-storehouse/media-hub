@@ -13,6 +13,7 @@ import { ref, shallowRef, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { getLibrary } from '@/api'
 import BackHeader from '@/components/BackHeader.vue'
 import Cover from '@/components/Cover.vue'
+import LoadState from '@/components/common/LoadState.vue'
 import { cameBack, vRise } from '@/components/home/motion'
 
 defineOptions({ name: 'LibraryView' })
@@ -23,18 +24,20 @@ cameBack()
 const scrollEl = ref(null)
 /* null = 还没取到（显示骨架） */
 const categories = shallowRef(null)
-const failed = ref(false)
+/* 最近一次取失败的错误；重试期间先留着（自动重试时不会闪一下骨架），取到了才清掉 */
+const error = shallowRef(null)
 let lastTop = 0
 let loadSeq = 0
 
 async function load() {
   const token = ++loadSeq
-  failed.value = false
   try {
     const list = await getLibrary()
-    if (token === loadSeq) categories.value = list
-  } catch {
-    if (token === loadSeq) failed.value = true
+    if (token !== loadSeq) return
+    categories.value = list
+    error.value = null
+  } catch (e) {
+    if (token === loadSeq) error.value = e
   }
 }
 
@@ -47,7 +50,7 @@ function onScroll() {
 const snapKey = window.history.state?.position ?? ''
 
 function saveSnapshot() {
-  if (!categories.value || failed.value) return
+  if (!categories.value || error.value) return
   snapshots.delete(snapKey)
   snapshots.set(snapKey, { at: Date.now(), categories: categories.value, top: lastTop })
   while (snapshots.size > SNAPSHOT_MAX) snapshots.delete(snapshots.keys().next().value)
@@ -74,10 +77,8 @@ onBeforeUnmount(saveSnapshot)
 <template>
   <div class="page library">
     <BackHeader title="片库" />
-    <div v-if="failed" class="empty">
-      加载失败，请稍后重试
-      <button type="button" class="retry" @click="load()">重试</button>
-    </div>
+    <!-- 取不到：统一的说法 +「重试」，联网 / 隔一会儿会自己重试 -->
+    <LoadState v-if="error" :error="error" :retry="load" />
     <div v-else ref="scrollEl" class="scroll" @scroll.passive="onScroll">
       <!-- 骨架原地淡出，专题瓷砖一块块淡入、从略小放大到原位 -->
       <div class="m-swap">

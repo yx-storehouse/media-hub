@@ -1,6 +1,7 @@
 /*
  * 上传队列：同时传 3 个，其余排队；每个文件有进度、速度、取消、失败原因，失败 / 取消的可以重试。
  * 真正的上传交给 kit 的 useUploader（按 item.id 取消；页面卸载时自动中止没传完的），所以要在组件 setup 里创建。
+ * 图片由 useUploader 先缩小（规则见 utils/imagePrep.js）再传、再补一张 .thumb.jpg 小图：缩过的 item.size 换成实际要传的大小，item.resized = true。
  *
  *   const queue = createUploadQueue({ onDone: item => … })
  *   queue.add([{ file, rel: 'a.mp4' }], 'videos')   // 传到 media/videos/a.mp4（重名自动改名）
@@ -50,6 +51,8 @@ export function createUploadQueue({ concurrency = 3, onDone } = {}) {
         path: (dir ? dir + '/' : '') + relPath,
         dir,
         state: 'wait', // wait | up | done | fail | cancel
+        /** 图片缩小过（见 utils/imagePrep.js）：{ from: 原文件字节数, width, height } */
+        resized: null,
         loaded: 0,
         percent: 0,
         speed: 0,
@@ -92,6 +95,12 @@ export function createUploadQueue({ concurrency = 3, onDone } = {}) {
     try {
       const res = await up.upload(item.path, item.file, {
         key: item.id,
+        // 图片缩小后实际要传的字节数变了：进度和总量按它算
+        onPrepare: info => {
+          if (!info.resized) return
+          item.resized = { from: item.file.size, width: info.width, height: info.height }
+          item.size = info.size
+        },
         onProgress: p => {
           item.loaded = p.loaded
           item.percent = p.percent

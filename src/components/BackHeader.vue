@@ -1,12 +1,24 @@
 <script setup>
 import { ref } from 'vue'
+import { useRoute } from 'vue-router'
 import Icon from './Icon.vue'
 import { useBack } from '@/composables/useBack'
 import { useScrollEdge } from '@/components/motion/scrollEdge'
+import { isDesktop } from '@/composables/useDesktop'
+import { DESK_NAV } from '@/config/nav'
 
 /* Header for simple sub pages: back arrow + title. */
 defineProps({ title: { type: String, default: '' } })
 const back = useBack()
+
+/*
+ * 桌面布局：左侧导航直接链到的页面（观看历史、我的收藏、我的关注、片库）和首页、社区、我的一样是「一级页面」，
+ * 不显示手机式的返回箭头（返回用浏览器的后退）；从别处进来的子页面（账号管理等）照常有。
+ * 记下这一页自己的地址（离场动画里路由已经变了，不跟着变）。
+ */
+const SIDE_PATHS = new Set(DESK_NAV.flat().map(i => i.path).filter(Boolean))
+const ownPath = useRoute().path
+const topLevel = SIDE_PATHS.has(ownPath)
 
 /*
  * 内容从顶栏下面滚过去时，底边细线变亮、下面一道淡阴影（components/motion/scrollEdge.js）。
@@ -22,7 +34,7 @@ useScrollEdge(hd, () => {
 <template>
   <div ref="hd" class="sub-hd m-edge">
     <!-- m-press-sm：按下缩一点、松手带回弹（components/motion/press.js） -->
-    <button class="sh-back m-press-sm" aria-label="返回" @click="back"><Icon name="chevL" /></button>
+    <button v-if="!(topLevel && isDesktop)" class="sh-back m-press-sm" aria-label="返回" @click="back"><Icon name="chevL" /></button>
     <slot>{{ title }}</slot>
   </div>
 </template>

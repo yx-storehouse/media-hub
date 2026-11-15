@@ -1,20 +1,27 @@
 <script setup>
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref, shallowRef, useTemplateRef, watch } from 'vue'
 import { getShorts, getVideo, getCreator, toggleVideoLike, toggleVideoFav, toggleVideoDislike, toggleFollow, addHistory, isDemoId } from '@/api'
+import { errorText } from '@/api/http'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
-import { toast } from '@/composables/useToast'
+import { useVideoStore } from '@/stores/videos'
+import { toast, toastError } from '@/composables/useToast'
 import { useTabRetap } from '@/composables/useTabRetap'
+import { useReconnect } from '@/composables/useReconnect'
 import { isDesktop } from '@/composables/useDesktop'
 import { scrollBehavior } from '@/utils/motion'
 import Icon from '@/components/Icon.vue'
 import BottomSheet from '@/components/BottomSheet.vue'
+import LoadState from '@/components/common/LoadState.vue'
 import ShortItem, { audibleVolume, volumeZero } from '@/components/short/ShortItem.vue'
+import { spaceToPlayer, useMouseFocusGuard } from '@/components/video/mouseFocus'
 
 defineOptions({ name: 'ShortView' })
 
-/* 「专题」还没上线：点它只提示，不切换（内容一直是推荐） */
-const FEEDS = ['推荐', '专题']
+/*
+ * 顶上（桌面是画框左上角）只有「推荐」一个频道：以前旁边的「专题」点了只提示「即将上线」，已经去掉；
+ * 「推荐」现在只是说明这是推荐流的标签（不是按钮），换一批照旧是再点一次「短视频」/ 下拉 / 桌面的「换一批」
+ */
 const SPEEDS = ['0.5x', '0.75x', '1.0x', '1.25x', '1.5x', '2.0x']
 const TICK_MS = 100
 /** 每页条数；滑到离末尾还剩 PRELOAD_AHEAD 条时加载下一页 */
@@ -27,6 +34,13 @@ const SEEN_KEY = 'reel:short:seen'
 const SEEN_MAX = 100
 /** 没有视频文件的条目只显示封面：这么多秒后自动连播到下一条 */
 const PREVIEW_SEC = 15
+/*
+ * 视频文件打不开（NAS 文件共享抖一下、网络切换）：不当成「没有片源」，显示「视频暂时无法播放 · 点击重试」；
+ * 屏幕上这一条过 RETRY_MS 自己再试一次，重新成为当前条、点它、网络恢复（online）时也重试。
+ * 连着失败 MAX_FAILS 次才退回只看封面（和没有片源的一样，PREVIEW_SEC 后自动划走）
+ */
+const RETRY_MS = 3000
+const MAX_FAILS = 2
 /** 真实视频实际播满这么多秒才记一次观看（进观看历史、计播放数） */
 const WATCH_MIN = 3
 /** 第一页这么久还没回来：提示网络慢，给重试（请求本身 12 秒超时，超时后显示加载失败 + 重试） */
@@ -50,6 +64,7 @@ const KEYS = [
 
 const store = useAppStore()
 const auth = useAuthStore()
+const videoStore = useVideoStore()
 const pageEl = useTemplateRef('page')
 const feedEl = useTemplateRef('feed')
 
@@ -59,13 +74,14 @@ const clips = shallowRef([])
 const players = ref([])
 /** clip on screen; decides which clips are rendered and which real videos preload (the playback logic uses `current`) */
 const active = ref(0)
-/** 第一页还没回来 / 第一页很慢 / 第一页失败 / 正在刷新 */
+/** 第一页还没回来 / 第一页很慢 / 第一页失败（出错的那个错误，交给 LoadState）/ 正在刷新 */
 const loading = ref(true)
 const slow = ref(false)
-const failed = ref(false)
+const failed = shallowRef(null)
 const refreshing = ref(false)
-/** 下一页的状态，显示在最后一条下面的那一格：'' 平常 / 'loading' / 'failed' / 'end' */
+/** 下一页的状态，显示在最后一条下面的那一格：'' 平常 / 'loading' / 'failed' / 'end'；失败时的错误在 moreError */
 const moreState = ref('')
+const moreError = shallowRef(null)
 
 const settingsOpen = ref(false)
 
@@ -107,12 +123,47 @@ function authEpoch() {
 
 const isRealId = id => Number.isSafeInteger(id) && id > 0
 const dislikeKey = id => `dislike:short:${id}`
-/** 没有视频文件：只给一个很短的预览计时，让自动连播能往下走 */
-const clipLen = clip => (clip.src ? clip.len || 0 : Math.min(clip.len || PREVIEW_SEC, PREVIEW_SEC))
+/** 有视频文件、并且没有连着打不开 MAX_FAILS 次（那样就退回只看封面） */
+const playableClip = clip => !!clip?.src && (clip.fails || 0) < MAX_FAILS
+/** 没有视频文件（或者打不开）：只给一个很短的预览计时，让自动连播能往下走 */
+const clipLen = clip => (playableClip(clip) ? clip.len || 0 : Math.min(clip.len || PREVIEW_SEC, PREVIEW_SEC))
 const newPlayer = clip => ({ t: 0, playing: false, len: clipLen(clip) })
 const newSeed = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
 
 const curClip = computed(() => clips.value[active.value] || null)
+
+/*
+ * 第一批视频回来、第一次挂上时只渲染屏幕上这一条，前后几条等这一条画出来以后（两帧）再挂，而且一帧只多挂一圈
+ * （先前后各一条、下一帧再各一条；第一批时前面没有，就是先挂下一条）：第一次进短视频页时一下挂五条，
+ * 排版、画模糊的底图要卡一下（4 倍降速时一百多毫秒）。挂满以后一直是前后各 RENDER_AROUND 条
+ */
+const around = ref(0)
+let aroundRaf = 0
+function widenAfterPaint() {
+  if (around.value === RENDER_AROUND || aroundRaf) return
+  const step = () => {
+    around.value++
+    aroundRaf = around.value < RENDER_AROUND ? requestAnimationFrame(step) : 0
+  }
+  aroundRaf = requestAnimationFrame(() => { aroundRaf = requestAnimationFrame(step) })
+}
+
+/*
+ * 前后两条的预载：冷启动（打开短视频、换一批）时屏幕上这条和下一条同时整段下载会抢带宽，慢网下首帧要晚 0.8 秒左右。
+ * 所以这时前后两条先不下载（preload="none"，有封面图垫着；只取元数据也会先下好几百 KB），等屏幕上这条自己缓冲出一截
+ * （ShortItem 报 ahead）再整段预载（warm）：缓冲了 1.5 秒先预载下一条（1，上滑最常见：慢网下刚看几秒就划走，
+ * 下一条也已经下了一截、马上能播），缓冲够了（3 秒以上 / 整段下完）前后两条都预载（2）。之后一直开着：
+ * 上滑到的那条早就预载好了、一下就开播，它的前后两条接着预载（连着快速上滑也不用每条都等）。
+ * 例外：屏幕上这条播着播着快接不上了（ShortItem 报 0：网速只比码率快一点点）就先停掉预载，等它缓冲回来再开。
+ * 屏幕上这条没有视频文件（只看封面）时不用等。
+ */
+const warm = ref(0)
+const warmFor = i => !playableClip(curClip.value) || warm.value >= (i > active.value ? 1 : 2)
+function onAhead(i, lvl) {
+  if (i !== active.value) return
+  if (lvl === 0) warm.value = 0
+  else if (lvl > warm.value) warm.value = Math.min(2, lvl)
+}
 
 /* ---------- 最近刷到过（localStorage，读写失败就当没有） ---------- */
 
@@ -166,8 +217,8 @@ async function load() {
   let page
   try {
     page = await getShorts({ seed: s, limit: PAGE_SIZE, offset: 0, exclude: ex })
-  } catch {
-    if (gen === generation && !clips.value.length) failed.value = true
+  } catch (e) {
+    if (gen === generation && !clips.value.length) failed.value = e || true
     return false
   } finally {
     if (gen === generation) {
@@ -177,6 +228,8 @@ async function load() {
     }
   }
   if (gen !== generation) return false
+  // 第一次（原来是空的）：滚动位置本来就在最上面，不用再滚（滚动要量尺寸，会逼浏览器当场把刚挂上的几条排版一遍，卡一下）
+  const wasEmpty = !clips.value.length
   leaveView()
   seed = page.seed || s
   exclude = ex
@@ -184,13 +237,14 @@ async function load() {
   hasMore = page.hasMore !== false
   loadingMore = null
   moreState.value = hasMore ? '' : 'end'
-  failed.value = false
+  failed.value = null
   const list = withKeys(page.list || [], [], ep)
   clips.value = list
   players.value = list.map(newPlayer)
   current = 0
   atTail = false
   navTo = -1
+  warm.value = 0
   active.value = 0
   advancingTo = -1
   boosted = -1
@@ -199,17 +253,18 @@ async function load() {
   // 自动播放被拦下时 ShortItem 照常报 state=false，播放键照常淡入
   if (visible) play(0)
   await nextTick()
+  widenAfterPaint()
   if (visible) {
-    scrollToClip(0)
+    if (!wasEmpty) scrollToClip(0)
     observe()
   }
   return true
 }
 
 function retry() {
-  failed.value = false
+  failed.value = null
   loading.value = true
-  load()
+  return load()
 }
 
 /**
@@ -248,7 +303,11 @@ function loadMore() {
     }
     if (gen === generation) moreState.value = hasMore ? '' : 'end'
   })()
-    .catch(() => { if (gen === generation) moreState.value = 'failed' })
+    .catch(e => {
+      if (gen !== generation) return
+      moreError.value = e
+      moreState.value = 'failed'
+    })
     .finally(() => { if (loadingMore === p) loadingMore = null })
   loadingMore = p
   return p
@@ -270,15 +329,21 @@ async function refresh(via = 'tap') {
 }
 useTabRetap('short', () => refresh('tap'))
 
-/* 网络恢复：第一页失败的重新加载，翻页失败或者快到末尾的接着加载 */
+/*
+ * 网络恢复：第一页还在慢慢等的重新加载（第一页失败的由出错页的 LoadState 自己重试），翻页失败或者快到末尾的接着加载，
+ * 屏幕上和前后打不开的视频文件重新加载
+ */
 function onOnline() {
   if (!visible) return
   if (!clips.value.length) {
-    if (failed.value || slow.value) retry()
+    if (slow.value && !failed.value) retry()
     return
   }
   if (moreState.value === 'failed' || atTail || current >= clips.value.length - PRELOAD_AHEAD) loadMore()
+  for (let i = Math.max(0, active.value - 1); i <= Math.min(clips.value.length - 1, active.value + 1); i++) retryClip(i)
 }
+/* 翻页失败：服务器重启、网关 502 不会有 online 事件，出错期间（页面看得见时）隔一会儿自己再试（composables/useReconnect.js） */
+useReconnect(() => loadMore(), () => moreState.value === 'failed')
 
 /* ---------- 观看记录：真实视频播满 WATCH_MIN 秒记一次（登录后、只记数字 id），离开时补记看到第几秒 ---------- */
 
@@ -291,7 +356,7 @@ function startView(i) {
   const c = clips.value[i]
   if (viewing && viewing.key === c?.feedKey) return
   leaveView()
-  viewing = c?.src && isRealId(c.id) ? { key: c.feedKey, id: c.id, played: 0, sec: 0 } : null
+  viewing = playableClip(c) && isRealId(c.id) ? { key: c.feedKey, id: c.id, played: 0, sec: 0 } : null
 }
 /** 离开这一条（滑走、切到别的页、刷新）：看过的补记进度，不再计播放数 */
 function leaveView() {
@@ -377,14 +442,46 @@ async function interact(i, kind, want) {
     if (kind === 'fav' && typeof res?.active === 'boolean') sync.faved = res.active
     if (Object.keys(sync).length) patchVideo(clip.id, sync)
     if (sync.disliked === false) store.set(dislikeKey(clip.id), false)
+    noteStore(clip.id)
   } catch (e) {
     patchVideo(clip.id, before)   // 回滚
     store.set(dislikeKey(clip.id), localBefore)
-    toast(e?.code === 'demo' ? e.message : '操作失败，请稍后重试')
+    // 登录过期（登录框已经弹出来）、取消的请求不提示；其余用统一的说法（演示内容照样是「演示内容，无法操作」）
+    toastError(e)
   } finally {
     pending.delete(pk)
   }
 }
+
+/*
+ * ---------- 和别的页面同步赞 / 收藏（stores/videos.js）----------
+ * 从「看完整版」进播放页点了赞 / 收藏再返回：这一条马上显示最新的（以前要等下一轮核对，期间是旧的、想取消要多点一次）。
+ * 屏幕上这条和前后各两条里，store 里有比这一条上次核对更新的记录（at）就按它改；自己点完也记一笔（storeAt 跟着更新，不会再改回去）。
+ */
+function noteStore(id) {
+  const c = clips.value.find(x => x.id === id)
+  if (!c) return
+  videoStore.note(id, { liked: !!c.liked, faved: !!c.faved, disliked: !!c.disliked, likeCount: likesOf(c), favCount: favsOf(c) })
+  const s = videoStore.latest(id)
+  if (s) patchVideo(id, { storeAt: s.at })
+}
+function applyStore() {
+  const n = clips.value.length
+  if (!n) return
+  for (let i = Math.max(0, active.value - 2); i <= Math.min(n - 1, active.value + 2); i++) {
+    const c = clips.value[i]
+    const s = videoStore.latest(c.id)
+    if (!s || s.at <= (c.storeAt || 0)) continue
+    const upd = { storeAt: s.at }
+    if (typeof s.liked === 'boolean') upd.liked = s.liked
+    if (typeof s.faved === 'boolean') upd.faved = s.faved
+    if (typeof s.disliked === 'boolean') upd.disliked = s.disliked || store.has(dislikeKey(c.id))
+    if (typeof s.likeCount === 'number') upd.likes = s.likeCount
+    if (typeof s.favCount === 'number') upd.favs = s.favCount
+    patchVideo(c.id, upd)
+  }
+}
+watch(() => videoStore.version, () => { if (visible) applyStore() })
 
 /** 未登录（或演示内容）的「不喜欢」：记在本机，刷新推荐时带给服务端往后排，本机也不再显示 */
 function dislikeLocally(clip, on) {
@@ -507,7 +604,7 @@ async function onFollow(i) {
     if (typeof res?.active === 'boolean') follows.set(id, res.active)
   } catch (e) {
     follows.set(id, false)
-    toast(e?.code === 'demo' ? e.message : '关注失败，请稍后重试')
+    toastError(e, '关注失败，请稍后重试')
   } finally {
     followBusy.delete(id)
   }
@@ -562,6 +659,8 @@ function pauseAll() {
 function toggle(i) {
   const p = players.value[i]
   if (!p || i !== current || atTail) return
+  // 视频文件打不开的：点画面 / 播放键就是重试
+  if (retryClip(i)) return
   // 这一下点屏幕是用来恢复声音的（见 restoreSound）：正在播就接着播，不暂停
   if (p.playing && performance.now() - soundTapAt < SOUND_TAP_MS) return
   if (!p.playing && p.t >= p.len) p.t = 0
@@ -592,18 +691,58 @@ function onTime(i, t) {
 const onDuration = (i, d) => { players.value[i].len = d }
 /* 原生播放 / 暂停（播完、自动播放被拦）：只同步状态，不再反过来驱动 */
 const onState = (i, playing) => { players.value[i].playing = playing }
-/* 文件打不开：这条退回封面预览 */
+
+/*
+ * ---------- 视频文件打不开（见上面 RETRY_MS / MAX_FAILS）----------
+ * 片源（src）一直留着，不改成「暂无视频源」：clip.fails 记连着失败了几次，clip.attempt 每重试一次 +1（ShortItem 用它重新建 <video>）。
+ * 打不开一次：这条显示「视频暂时无法播放 · 点击重试」，屏幕上这条过一会儿自己再试；连着两次：退回只看封面（预览计时到了自动划走）。
+ * 重新加载出来了（ShortItem 报 recovered）就清零。
+ */
+let retryTimer = 0
 function onFailed(i) {
   const clip = clips.value[i]
-  patchVideo(clip.id, { src: null })
+  if (!clip?.src) return
+  const fails = (clip.fails || 0) + 1
+  patchVideo(clip.id, { fails })
   const p = players.value[i]
-  p.len = clipLen({ ...clip, src: null })
-  p.t = 0
-  if (i === current) {
-    if (viewing?.key === clip.feedKey) viewing = null
-    toast('视频加载失败，先看看封面吧')
+  if (!p) return
+  p.playing = false
+  if (i !== current || atTail) return
+  if (viewing?.key === clip.feedKey) viewing = null
+  if (fails >= MAX_FAILS) {
+    // 退回只看封面：和没有片源的一样走预览计时（自动连播到了就划走）
+    p.len = clipLen({ ...clip, fails })
+    p.t = 0
+    toast('视频暂时无法播放，先看看封面吧')
     play(i)
+    return
   }
+  clearTimeout(retryTimer)
+  const key = clip.feedKey
+  retryTimer = setTimeout(() => {
+    if (visible && !atTail && clips.value[current]?.feedKey === key) retryClip(current)
+  }, RETRY_MS)
+}
+/** 重试第 i 条打不开的视频文件（没失败过的什么也不做）；返回有没有重试 */
+function retryClip(i) {
+  const clip = clips.value[i]
+  if (!clip?.src || !clip.fails) return false
+  if (i === current) clearTimeout(retryTimer)
+  // 已经退回封面的（失败满了）再给一次机会：这次再打不开又退回封面
+  patchVideo(clip.id, { fails: Math.min(clip.fails, MAX_FAILS - 1), attempt: (clip.attempt || 0) + 1 })
+  const p = players.value[i]
+  p.len = clip.len || 0
+  p.t = 0
+  if (i === current && !atTail) {
+    play(i)
+    startView(i)
+  }
+  return true
+}
+/* 重新加载出来了：失败次数清零（之后再出错又从头算） */
+function onRecovered(i) {
+  const clip = clips.value[i]
+  if (clip?.fails) patchVideo(clip.id, { fails: 0 })
 }
 
 /* 长按边缘快进：真实视频由 ShortItem 改 playbackRate；这里只记着，快进时不触发下拉刷新 */
@@ -613,7 +752,7 @@ const onBoost = (i, on) => { boosted = on ? i : boosted === i ? -1 : boosted }
 function tick() {
   const p = players.value[current]
   const clip = clips.value[current]
-  if (atTail || !p || !p.playing || clip?.src) return
+  if (atTail || !p || !p.playing || playableClip(clip)) return
   p.t = Math.min(p.len, p.t + TICK_MS / 1000)
   if (p.t >= p.len) finish(current)
 }
@@ -711,7 +850,9 @@ function observe(reset = true) {
       if (navTo === current) navTo = -1
       active.value = current
       advancingTo = -1
-      play(current)
+      clearTimeout(retryTimer)
+      // 之前打不开的（预载时出错、划走前失败的）：重新成为当前条时重新加载
+      if (!retryClip(current)) play(current)
       startView(current)
       markSeen(clips.value[current]?.id)
       syncNear()
@@ -802,7 +943,8 @@ const canFullscreen = !!(document.fullscreenEnabled || document.webkitFullscreen
   (typeof HTMLVideoElement !== 'undefined' && 'webkitEnterFullscreen' in HTMLVideoElement.prototype)
 const canPip = !!document.pictureInPictureEnabled ||
   (typeof HTMLVideoElement !== 'undefined' && 'webkitSetPresentationMode' in HTMLVideoElement.prototype)
-const curHasFile = computed(() => !!curClip.value?.src)
+/* 屏幕上这条能真的播放（有文件、现在没有打不开）：才有全屏 / 小窗 */
+const curHasFile = computed(() => playableClip(curClip.value) && !curClip.value.fails)
 
 const fsElement = () => document.fullscreenElement || document.webkitFullscreenElement || null
 const curVideo = () => feedEl.value?.querySelector(`.sv-slot[data-index="${current}"] video`) || null
@@ -951,43 +1093,47 @@ const curItem = () => (atTail ? null : items.get(clips.value[current]?.feedKey) 
 const isTyping = t => !!t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))
 
 /*
- * 桌面：鼠标点过的按钮、拖过的进度条 / 音量条不留焦点（和 Safari 一样）。不然之后按空格不是播放 / 暂停，
- * 而是再按一下那个按钮（连播被关掉、赞被取消、静音又被打开），按别的快捷键时它还会莫名冒出焦点框
- * （Chrome 在按过键以后把鼠标点出来的焦点也当成键盘焦点画框）。
- * 按下鼠标的那一下（同一个任务里浏览器把焦点交给按下的元素）收到的焦点直接还回去；焦点本来就在页面里某个按钮上
- * （Tab 走过来的）又用鼠标点了它，也不留。键盘走过来的焦点照旧。只管这个页面里的（播放设置、登录框挂在页面外面）。
+ * 桌面：鼠标点过的按钮、拖过的进度条 / 音量条不留焦点（和 Safari 一样），页面外面（顶栏的 ☰、「登录」）用鼠标点过的按钮
+ * 空格时把焦点还回去：之后按空格还是播放 / 暂停，不是再按一下那个按钮（连播被关掉、赞被取消、静音又被打开、导航又展开）。
+ * 和播放页共用一套（components/video/mouseFocus.js）；只管这个页面里的（播放设置、登录框挂在页面外面）。
  */
-let mouseFocusing = false
-function onPagePointerDown(e) {
-  if (!isDesktop.value || e.pointerType !== 'mouse') return
-  const a = document.activeElement
-  if (a && a !== document.body && pageEl.value?.contains(a) && !isTyping(a)) a.blur()
-  mouseFocusing = true
-  setTimeout(() => { mouseFocusing = false })
-}
-function onPageFocusIn(e) {
-  if (mouseFocusing && !isTyping(e.target)) e.target.blur?.()
-}
-
-const BTN = 'button, [role="button"], [role="switch"], [role="tab"], [role="menuitem"]'
-
-/* 键盘聚焦（Tab 过来）的按钮：空格照常按下它；鼠标点的按钮不留焦点（见上面），空格还是播放 / 暂停 */
-function keyboardButton(t) {
-  if (!t?.closest?.(BTN)) return false
-  try { return t.matches(':focus-visible') } catch { return true }
-}
+const focusGuard = useMouseFocusGuard(pageEl)
 
 /*
- * 页面外面（顶栏的 ☰、「登录」）用鼠标点过的按钮：上面那套管不到，焦点留在它上面，按过键以后 Chrome 也把它当成键盘焦点，
- * 空格会再按它一下（☰ 又把导航展开了），而不是播放 / 暂停。记下鼠标最后按下的那个按钮，空格时还是播放 / 暂停（见 onDeskKey）。
- * 鼠标按在别处、按 Tab 走开就不算了；开着弹出菜单的按钮（头像菜单）空格照常归它
+ * 不认 inert 的老引擎（Chrome / 安卓 WebView 87–101、Safari 14.5–15.4）：桌面上 :inert 管不住屏幕外的那几条，
+ * Tab 会走进上一条 / 下一条的按钮，画框跟着滚过去、换成播放那一条。这里兜底（认 inert 的引擎不挂监听）：
+ * 焦点落进不是当前这条的格子时，浏览器为了露出它已经把画框滚过去了，先滚回当前这条（同一个任务里，观察者还没看到），
+ * 再把焦点送到该去的地方——从画框前面 Tab 进来的送到当前这条的第一个按钮（Shift+Tab 进来的送到最后一个）；
+ * 从当前这条往后 / 往前 Tab 出去的送到画框后面 / 前面的第一个能聚焦的元素。
+ * 不能把别的格子 visibility: hidden：当前条要滑进 60% 才算换条，翻页途中所有引擎都会看到空白。
  */
-let mouseBtn = null
-function onDocPointerDown(e) {
-  mouseBtn = isDesktop.value && e.pointerType === 'mouse' ? e.target.closest?.(BTN) || null : null
-}
-function mouseFocused(t) {
-  return !!mouseBtn && t.closest(BTN) === mouseBtn && !mouseBtn.matches('[aria-haspopup][aria-expanded="true"]')
+const HAS_INERT = typeof HTMLElement !== 'undefined' && 'inert' in HTMLElement.prototype
+const TABBABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+const tabbables = (root = document) => [...root.querySelectorAll(TABBABLE)].filter(el => el.getClientRects().length && !el.closest('[inert]'))
+function onFeedFocusIn(e) {
+  if (HAS_INERT || !isDesktop.value) return
+  const feed = feedEl.value
+  const slot = e.target instanceof Element ? e.target.closest('.sv-slot[data-index]') : null
+  if (!feed || !slot || Number(slot.dataset.index) === active.value) return
+  const curSlot = feed.querySelector(`.sv-slot[data-index="${active.value}"]`)
+  const from = e.relatedTarget instanceof Element ? e.relatedTarget : null
+  // 往后走（Tab）还是往前（Shift+Tab）：落点在来处的后面就是往后
+  const forward = !from || !!(from.compareDocumentPosition(e.target) & Node.DOCUMENT_POSITION_FOLLOWING)
+  scrollToClip(atTail ? clips.value.length : current)
+  let to = null
+  if (from && curSlot?.contains(from)) {
+    // 从当前这条走出去：画框后面（前面）第一个能聚焦的；后面没有了就绕回页面最前面（和浏览器走到头一样从头来）
+    const all = tabbables()
+    const outside = all.filter(el => !feed.contains(el))
+    to = forward
+      ? outside.find(el => feed.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING) || outside[0]
+      : [...outside].reverse().find(el => feed.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_PRECEDING) || outside[outside.length - 1]
+  } else if (curSlot) {
+    const mine = tabbables(curSlot)
+    to = forward ? mine[0] : mine[mine.length - 1]
+  }
+  if (to) to.focus({ preventScroll: true })
+  else e.target.blur()
 }
 
 /*
@@ -995,7 +1141,6 @@ function mouseFocused(t) {
  * 在输入框里打字、开着弹层（播放设置、登录框等）时不管；按住不放只算一下（← / → 除外，可以一直跳）。
  */
 function onDeskKey(e) {
-  if (e.key === 'Tab') mouseBtn = null
   if (!isDesktop.value || !visible || e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey || e.isComposing) return
   if (isTyping(e.target) || document.querySelector('[aria-modal="true"]')) return
   // 焦点在顶栏的下拉菜单（头像菜单）、搜索建议里：按键归它们（和 VideoPlayer 一样）
@@ -1007,15 +1152,11 @@ function onDeskKey(e) {
   } else if (k === 'ArrowUp' || k === 'k' || k === 'K' || k === 'PageUp') {
     if (once) step(-1)
   } else if (k === ' ' || k === 'Spacebar') {
-    if (keyboardButton(e.target)) {
-      if (!mouseFocused(e.target)) return
-      // 鼠标点过的 ☰ 等：焦点还回去（松开空格时不会再按它一下），这一下照样是播放 / 暂停
-      e.target.blur()
-      mouseBtn = null
-    }
+    // 键盘走过来的按钮：空格按它；鼠标点过的 ☰ 等：焦点还回去（松开空格时不会再按它一下），这一下照样是播放 / 暂停
+    if (!spaceToPlayer(e.target)) return
     if (once) togglePlay()
   } else if (k === 'ArrowLeft' || k === 'ArrowRight') {
-    if (clips.value[current]?.src) curItem()?.seekBy(k === 'ArrowLeft' ? -KEY_SEEK : KEY_SEEK)
+    if (playableClip(clips.value[current])) curItem()?.seekBy(k === 'ArrowLeft' ? -KEY_SEEK : KEY_SEEK)
   } else if (k === 'm' || k === 'M') {
     // 和控制栏上的喇叭一样：听不到声音（静音了，或者音量拉到了 0）就恢复声音，否则静音
     if (once) setMuted(!(store.muted || volumeZero()))
@@ -1046,11 +1187,10 @@ function stop() {
   pauseAll()
   pullEnd()
   exitFullscreen()
+  clearTimeout(retryTimer)
   window.removeEventListener('online', onOnline)
   document.removeEventListener('visibilitychange', onHidden)
   document.removeEventListener('keydown', onDeskKey)
-  document.removeEventListener('pointerdown', onDocPointerDown, true)
-  mouseBtn = null
 }
 
 onMounted(() => {
@@ -1080,12 +1220,8 @@ onActivated(() => {
   window.addEventListener('online', onOnline)
   document.addEventListener('visibilitychange', onHidden)
   document.addEventListener('keydown', onDeskKey)
-  document.addEventListener('pointerdown', onDocPointerDown, true)
-  if (!clips.value.length) {
-    // first activation: load() starts the observer once the feed is rendered; a failed first page retries here
-    if (failed.value) retry()
-    return
-  }
+  // first activation: load() starts the observer once the feed is rendered; a failed first page is retried by its LoadState
+  if (!clips.value.length) return
   if (atTail) {
     scrollToClip(clips.value.length)
     observe()
@@ -1095,7 +1231,9 @@ onActivated(() => {
   if (advancingTo >= 0) current = advancingTo
   advancingTo = -1
   scrollToClip(current) // keep the same clip on screen in case the scroll offset was lost while detached
-  play(current)
+  // 在别的页面赞 / 收藏过（看完整版）：先按 stores/videos.js 里的最新状态改好，再核对
+  applyStore()
+  if (!retryClip(current)) play(current)
   startView(current)
   observe()
   syncNear()
@@ -1105,6 +1243,7 @@ onDeactivated(stop)
 
 onUnmounted(() => {
   stop()
+  cancelAnimationFrame(aroundRaf)
   bindWheel(false)
   clearTimeout(slowTimer)
   ro?.disconnect()
@@ -1118,10 +1257,6 @@ onUnmounted(() => {
 })
 
 /* ---------- top bar + settings ---------- */
-
-function selectFeed(i) {
-  if (FEEDS[i] === '专题') toast('专题内容即将上线')
-}
 
 /**
  * 用户自己点的静音 / 恢复声音：记下来，下次打开照这个来。
@@ -1157,10 +1292,10 @@ function setSpeed(speed) {
     @touchend.capture.passive="restoreSound"
     @click.capture="restoreSound"
     @keydown.capture="restoreSound"
-    @pointerdown.capture="onPagePointerDown"
-    @focusin="onPageFocusIn"
+    @pointerdown.capture="focusGuard.onPointerDown"
+    @focusin="focusGuard.onFocusIn"
   >
-    <!-- 手机：顶上一条（全屏 / 小窗、推荐 / 专题、声音）；桌面上这些都在每一条画框里（左上角的频道、底边的控制栏） -->
+    <!-- 手机：顶上一条（全屏 / 小窗、「推荐」、声音）；桌面上这些都在每一条画框里（左上角的「推荐 · 换一批」、底边的控制栏） -->
     <div class="sv-top">
       <div class="l">
         <!-- 只有能真正播放的条目才有全屏 / 小窗；全屏时一直留着退出键 -->
@@ -1183,20 +1318,7 @@ function setSpeed(speed) {
           <Icon name="pip" />
         </button>
       </div>
-      <div class="tt2" role="tablist">
-        <button
-          v-for="(name, i) in FEEDS"
-          :key="name"
-          class="sv-tab"
-          :class="{ on: i === 0 }"
-          type="button"
-          role="tab"
-          :aria-selected="i === 0"
-          @click="selectFeed(i)"
-        >
-          {{ name }}
-        </button>
-      </div>
+      <div class="tt2"><span class="sv-tab on">推荐</span></div>
       <div class="r">
         <button
           type="button"
@@ -1228,6 +1350,7 @@ function setSpeed(speed) {
     <div
       ref="feed"
       class="scroll sv-feed"
+      @focusin="onFeedFocusIn"
       @touchstart.passive="pullStart"
       @touchmove.passive="pullMove"
       @touchend.passive="pullEnd"
@@ -1237,7 +1360,7 @@ function setSpeed(speed) {
       <div v-for="(clip, i) in clips" :key="clip.feedKey" class="sv-slot" :data-index="i">
         <!-- 桌面：只有屏幕上这一条能用 Tab 聚焦 / 点（上下两条露出来的一截不接操作，Tab 也不会跳到屏幕外的那几条去） -->
         <ShortItem
-          v-if="Math.abs(i - active) <= RENDER_AROUND"
+          v-if="Math.abs(i - active) <= around"
           :ref="inst => setItem(clip.feedKey, inst)"
           :inert="isDesktop && i !== active ? true : undefined"
           :clip="clip"
@@ -1252,6 +1375,9 @@ function setSpeed(speed) {
           :current="i === active"
           :eager="Math.abs(i - active) <= 1"
           :near="Math.abs(i - active) <= 1"
+          :warm="warmFor(i)"
+          :fails="clip.fails || 0"
+          :attempt="clip.attempt || 0"
           :following="followOf(clip)"
           :fs="fullscreen"
           :can-fs="canFullscreen"
@@ -1265,6 +1391,9 @@ function setSpeed(speed) {
           @state="on => onState(i, on)"
           @ended="finish(i)"
           @failed="onFailed(i)"
+          @retry="retryClip(i)"
+          @recovered="onRecovered(i)"
+          @ahead="lvl => onAhead(i, lvl)"
           @unmute="setMuted(false)"
           @like="onLike(i)"
           @dislike="onDislike(i)"
@@ -1280,20 +1409,7 @@ function setSpeed(speed) {
             这里不写 v-if：带条件的插槽会被编译成「动态插槽」，父组件每次更新（播放进度）都会让每一条跟着重渲染
           -->
           <template #top>
-            <div class="sv-feeds" role="tablist" aria-label="短视频频道">
-              <button
-                v-for="(name, fi) in FEEDS"
-                :key="name"
-                class="sv-tab"
-                :class="{ on: fi === 0 }"
-                type="button"
-                role="tab"
-                :aria-selected="fi === 0"
-                @click="selectFeed(fi)"
-              >
-                {{ name }}
-              </button>
-            </div>
+            <div class="sv-feeds"><span class="sv-tab on">推荐</span></div>
             <i class="sv-dsep" aria-hidden="true" />
             <button class="sv-rf" type="button" title="换一批（再点一次左侧的「短视频」也一样）" @click="refresh('tap')">
               <Icon name="refresh" />换一批
@@ -1303,8 +1419,8 @@ function setSpeed(speed) {
       </div>
       <!-- 最后一格：下一页还没到时转圈，失败时给重试（滑到这里会自动再试一次） -->
       <div v-if="clips.length" class="sv-slot sv-tail" data-tail>
-        <div v-if="moreState === 'failed'" class="sv-tail-in">
-          网络不给力，下一页没加载出来
+        <div v-if="moreState === 'failed'" class="sv-tail-in" role="alert">
+          {{ errorText(moreError) }}
           <button class="retry" type="button" @click="loadMore">点击重试</button>
         </div>
         <div v-else-if="moreState === 'end'" class="sv-tail-in">暂时没有更多了</div>
@@ -1323,10 +1439,8 @@ function setSpeed(speed) {
           <Icon v-else name="refresh" class="sv-spin" />
         </div>
       </div>
-      <div v-else-if="failed" class="empty sv-empty">
-        加载失败，请检查网络后重试
-        <button class="retry" type="button" @click="retry">重试</button>
-      </div>
+      <!-- 第一页失败：统一的说法；连不上 / 服务器出错时联网、过一会儿会自己重试（LoadState） -->
+      <LoadState v-else-if="failed" class="sv-empty" :error="failed" :retry="retry" />
       <div v-else-if="!loading && !clips.length" class="empty sv-empty">还没有视频</div>
     </div>
 
@@ -1335,20 +1449,7 @@ function setSpeed(speed) {
       位置和每一条里的那一份（上面的 #top 插槽）一样：数据回来时不跳；没有视频时这里的「换一批」就是刷新
     -->
     <div v-if="isDesktop && !clips.length" class="sv-ftop">
-      <div class="sv-feeds" role="tablist" aria-label="短视频频道">
-        <button
-          v-for="(name, fi) in FEEDS"
-          :key="name"
-          class="sv-tab"
-          :class="{ on: fi === 0 }"
-          type="button"
-          role="tab"
-          :aria-selected="fi === 0"
-          @click="selectFeed(fi)"
-        >
-          {{ name }}
-        </button>
-      </div>
+      <div class="sv-feeds"><span class="sv-tab on">推荐</span></div>
       <i class="sv-dsep" aria-hidden="true" />
       <button class="sv-rf" type="button" title="换一批（再点一次左侧的「短视频」也一样）" @click="refresh('tap')">
         <Icon name="refresh" />换一批
@@ -1369,29 +1470,14 @@ function setSpeed(speed) {
           {{ s }}
         </button>
       </div>
-      <div class="row2">
+      <!-- 和播放页的「播放设置」同一个顺序（自动连播在前）；整行都能点（开关本身的点击也冒泡到这一行） -->
+      <div class="row2 sw-row" @click="store.playback.autoNext = !store.playback.autoNext">
         <span>自动连播</span>
-        <button
-          class="sw"
-          :class="{ on: store.playback.autoNext }"
-          type="button"
-          role="switch"
-          aria-label="自动连播"
-          :aria-checked="store.playback.autoNext"
-          @click="store.playback.autoNext = !store.playback.autoNext"
-        />
+        <button class="sw" :class="{ on: store.playback.autoNext }" type="button" role="switch" aria-label="自动连播" :aria-checked="store.playback.autoNext" />
       </div>
-      <div class="row2">
+      <div class="row2 sw-row" @click="store.playback.loop = !store.playback.loop">
         <span>循环播放</span>
-        <button
-          class="sw"
-          :class="{ on: store.playback.loop }"
-          type="button"
-          role="switch"
-          aria-label="循环播放"
-          :aria-checked="store.playback.loop"
-          @click="store.playback.loop = !store.playback.loop"
-        />
+        <button class="sw" :class="{ on: store.playback.loop }" type="button" role="switch" aria-label="循环播放" :aria-checked="store.playback.loop" />
       </div>
       <!-- 桌面：键盘快捷键一览 -->
       <div v-if="isDesktop" class="sv-keys">
@@ -1438,7 +1524,10 @@ function setSpeed(speed) {
   text-align: center;
 }
 .sv-tail .retry,
-.sk-c .retry { height: 30px; margin-top: 4px; padding: 0 18px; border-radius: 15px; background: var(--chip); color: var(--t1); font-size: 13px; }
+.sk-c .retry { position: relative; height: 30px; margin-top: 4px; padding: 0 18px; border-radius: 15px; background: var(--chip); color: var(--t1); font-size: 13px; }
+/* 能点的范围上下撑到 44px（和出错页的「重试」一样） */
+.sv-tail .retry::after,
+.sk-c .retry::after { content: ''; position: absolute; top: -7px; right: -4px; bottom: -7px; left: -4px; }
 .sv-spin { width: 22px; height: 22px; color: rgba(255, 255, 255, .6); stroke-width: 2.2; animation: rot .8s linear infinite; }
 
 /* 第一页的占位骨架：和真实的一条同样的布局（右侧一列按钮、左下角文字） */
@@ -1508,8 +1597,7 @@ function setSpeed(speed) {
   pointer-events: none;
 }
 .sv-top .l,
-.sv-top .r,
-.sv-tab { pointer-events: auto; }
+.sv-top .r { pointer-events: auto; }
 /* 左上角全屏 / 小窗、右上角声音：图标 17px，按钮本身 44×44（从屏幕边缘算起），可点区域不再偏小 */
 .sv-top .l { position: absolute; left: 0; top: 0; display: flex; color: #fff; }
 .sv-top .l svg { width: 17px; height: 17px; stroke-width: 2.2; opacity: .92; }
@@ -1519,8 +1607,10 @@ function setSpeed(speed) {
 .sv-top .r button { display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; }
 .sv-top .tt2 { position: absolute; left: 0; right: 0; top: 15px; display: flex; justify-content: center; gap: 30px; }
 
+/* 「推荐」：说明这是推荐流的标签（不是按钮，点下去落到下面的画面上） */
 .sv-tab {
   position: relative;
+  display: block;
   color: rgba(255, 255, 255, .7);
   font-size: 16px;
   font-weight: 600;
@@ -1544,6 +1634,7 @@ function setSpeed(speed) {
 .sv-page.fs { bottom: 0; padding-top: 0; }
 
 .speeds { margin-bottom: 12px; }
+.sw-row { cursor: pointer; }
 
 /*
  * ---- 桌面布局（≥ 1024px，参照抖音网页版的推荐流）----
@@ -1623,7 +1714,8 @@ function setSpeed(speed) {
     background: var(--panel);
     font-size: 14px;
   }
-  .sv-empty .retry { height: 30px; margin: 4px 0 0; padding: 0 18px; border-radius: 15px; font-size: 13px; }
+  /* 出错页是 LoadState（子组件）：按钮要用 :deep 才选得到 */
+  .sv-empty :deep(.retry) { height: 30px; margin: 4px 0 0; padding: 0 18px; border-radius: 15px; font-size: 13px; }
   /* 还没有内容时左上角的「推荐 / 专题 · 换一批」：和每一条画框里的那一份同一个位置（画框左上角往里 --sv-in） */
   .sv-ftop { position: absolute; left: calc(var(--sv-gap) + var(--sv-in)); top: calc(var(--sv-gap) + var(--sv-in) - 6px); z-index: 6; display: flex; align-items: center; }
 
@@ -1665,15 +1757,13 @@ function setSpeed(speed) {
   .sk-side i { width: 32px; height: 32px; }
 }
 @media (min-width: 1024px) and (hover: hover) {
-  .sv-tab { transition: color var(--dur-2) var(--ease-out); }
-  .sv-tab:not(.on):hover { color: rgba(255, 255, 255, .92); }
   .sv-rf { transition: background-color var(--dur-2) var(--ease-out), color var(--dur-2) var(--ease-out); }
   .sv-rf:hover { background: rgba(255, 255, 255, .12); color: #fff; }
   .sv-tail .retry,
   .sk-c .retry,
-  .sv-empty .retry { transition: background-color var(--dur-2) var(--ease-out); }
+  .sv-empty :deep(.retry) { transition: background-color var(--dur-2) var(--ease-out); }
   .sv-tail .retry:hover,
   .sk-c .retry:hover,
-  .sv-empty .retry:hover { background: #262626; color: var(--t1); }
+  .sv-empty :deep(.retry:hover) { background: #262626; color: var(--t1); }
 }
 </style>

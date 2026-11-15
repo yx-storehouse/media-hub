@@ -12,8 +12,8 @@ import ConfirmSheet from '@/components/me/ConfirmSheet.vue'
  * 桌面顶栏右边的账号区：
  *   没登录：「登录」按钮，打开和手机上同一个登录框（auth.requireLogin()，桌面上是居中的对话框）
  *   登录了：头像，点开一个小菜单——我的、观看历史、我的收藏、管理后台（管理员；新标签页打开 admin.html）、退出登录（先确认）
- *   带着令牌刚打开、还在向服务端核对（auth.ready 之前）：先占一个头像大小的灰圆，不闪一下「登录」；
- *   令牌失效时 auth.init() 也会置 ready，照样换成「登录」。
+ *   带着令牌刚打开、还在向服务端核对（auth.ready 之前），或者服务器暂时连不上、登录状态稍后恢复（auth.restoring，
+ *   又没有缓存的用户信息）：先占一个头像大小的灰圆，不闪一下「登录」；令牌失效时 auth.init() 会清掉令牌，照样换成「登录」。
  * 菜单：点外面 / Esc / 换页面就收起；↑ ↓ 在菜单项之间移动，Esc 收起后焦点回到头像。
  * 点外面关菜单的那一下只关菜单，不顺带点开下面的东西（见 swallowClick）。
  */
@@ -134,12 +134,12 @@ async function signOut() {
 
 <template>
   <div class="dacc">
-    <button v-if="!auth.loggedIn && (auth.ready || !auth.token)" ref="loginEl" type="button" class="da-login" @click="auth.requireLogin()">
+    <button v-if="!auth.loggedIn && !(auth.token && (!auth.ready || auth.restoring))" ref="loginEl" type="button" class="da-login" @click="auth.requireLogin()">
       <Icon name="user" />登录
     </button>
 
-    <!-- 带着令牌、还在核对：头像大小的灰圆占位（不闪「登录」） -->
-    <span v-else-if="!auth.loggedIn" class="da-wait" aria-hidden="true"><span class="av" /></span>
+    <!-- 带着令牌、还在核对（或连不上服务器、稍后恢复）：头像大小的灰圆占位（不闪「登录」） -->
+    <span v-else-if="!auth.loggedIn" class="da-wait" :title="auth.restoring ? '暂时连不上，登录状态稍后恢复' : undefined"><span class="av" aria-hidden="true" /></span>
 
     <template v-else>
       <button

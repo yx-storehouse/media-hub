@@ -5,7 +5,7 @@
  *
  * 各类数据（videos / posts / topics / creators / keywords / albums）的接口形状一致：
  *   GET    /api/admin/:type             列表（?page&pageSize&sort&order + 各自的筛选）
- *   GET    /api/admin/:type/export      导出（同列表筛选）→ { fields, rows }
+ *   GET    /api/admin/:type/export      导出（同列表筛选，最多 5 万行）→ { fields, rows, total, truncated, limit }
  *   GET    /api/admin/:type/:id         单条
  *   POST   /api/admin/:type             新建
  *   PATCH  /api/admin/:type/:id         修改（只改传了的字段）
@@ -59,6 +59,9 @@ export const adminRoutes = [
   /* 素材文件 */
   ['GET', /^\/api\/admin\/media$/, (m, q) => media.listMedia(q), ADMIN],
   ['DELETE', /^\/api\/admin\/media$/, (m, q) => media.deleteMedia(q), ADMIN],
+  ['POST', /^\/api\/admin\/media\/delete$/, (m, q, body) => media.deleteManyMedia(body), ADMIN],
+  ['POST', /^\/api\/admin\/media\/rename$/, (m, q, body) => media.renameMedia(body), ADMIN],
+  ['POST', /^\/api\/admin\/media\/move$/, (m, q, body) => media.moveMedia(body), ADMIN],
   ['PUT', /^\/api\/admin\/media\/upload$/, (m, q, b, c) => media.upload(c.req, q), ADMIN],
   ['POST', /^\/api\/admin\/media\/folder$/, (m, q, body) => media.createFolder(body), ADMIN],
   ['POST', /^\/api\/admin\/media\/scan$/, (m, q, body) => media.scanMedia(body), ADMIN]

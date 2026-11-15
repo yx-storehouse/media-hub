@@ -50,6 +50,16 @@ export function createSession(db, userId, device = null) {
   return { token, expiresAt: t + SESSION_DAYS * DAY }
 }
 
+/*
+ * 解析会话时顺带的写（删过期会话、续期）：别的进程正拿着写锁时（见 db/index.mjs 的 whenWritable）跳过，
+ * 下次请求再做，不能让每个带令牌的请求（包括读）因此失败。判断同 db/index.mjs 的 isBusyError
+ * （这里不引那个模块：create-admin.mjs 也用本文件，引了会顺带打开服务端的库）。
+ */
+const isBusy = e => e?.code === 'ERR_SQLITE_ERROR' && [5, 6].includes(Number(e.errcode) & 0xff)
+function sideWrite(fn) {
+  try { fn() } catch (e) { if (!isBusy(e)) throw e }
+}
+
 /** 校验令牌；有效则顺延过期时间并返回用户 */
 export function resolveSession(db, token) {
   if (!token) return null
@@ -57,14 +67,14 @@ export function resolveSession(db, token) {
   if (!row) return null
   const t = now()
   if (row.expires_at <= t) {
-    db.prepare('DELETE FROM sessions WHERE token = ?').run(token)
+    sideWrite(() => db.prepare('DELETE FROM sessions WHERE token = ?').run(token))
     return null
   }
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(row.user_id)
   if (!user || user.status !== 1) return null
   // 滑动过期：用一次就续一次，但最多每 6 小时写一次，避免每个请求都写库
   if (row.expires_at - t < (SESSION_DAYS - 1) * DAY) {
-    db.prepare('UPDATE sessions SET expires_at = ? WHERE token = ?').run(t + SESSION_DAYS * DAY, token)
+    sideWrite(() => db.prepare('UPDATE sessions SET expires_at = ? WHERE token = ?').run(t + SESSION_DAYS * DAY, token))
   }
   return { user, session: row }
 }

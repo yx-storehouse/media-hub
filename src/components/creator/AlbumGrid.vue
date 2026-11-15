@@ -12,6 +12,7 @@ import Icon from '@/components/Icon.vue'
  *
  * 结构（给动效挂钩子用）：.ag 网格 > .ag-t 一格（按住时全局 m-hold 加 .m-pressed，封面压暗一点，和「媒体」一样）
  * > .ag-cv 封面 + .ag-n 张数角标。3:4 用 padding 撑高（iOS 14 不认 aspect-ratio）。
+ * 封面放小图（接口的 cover.thumb，长边约 480、短边至少 360；没有小图时用原图），原图只在全屏看大图时用。
  */
 defineProps({
   /** AlbumItem[]：{ id, title, cover, count, publishedAt, time }（见 src/api/index.js） */
@@ -42,7 +43,7 @@ const label = a => (a.count > 1 ? `查看图集：${a.title || '未命名'}，�
       :aria-label="label(a)"
       @click="emit('open', a)"
     >
-      <Cover class="ag-cv" :src="a.cover?.src || null" :fallback="a.cover?.fallback || null" />
+      <Cover class="ag-cv" :src="a.cover?.thumb || a.cover?.src || null" :fallback="a.cover?.fallback || null" />
       <span v-if="a.count > 1" class="ag-n" aria-hidden="true">
         <Icon name="images" />
         <span>{{ a.count }}</span>

@@ -7,7 +7,7 @@
  */
 import { createHash } from 'node:crypto'
 import * as A from '../db/admin.mjs'
-import { db, parseTags } from '../db/index.mjs'
+import { db, parseTags, txWait, retryBusy, isBusyError } from '../db/index.mjs'
 import { InputError } from '../lib/errors.mjs'
 import { avatar } from '../lib/art.mjs'
 import { liteCover, liteDoc } from '../lib/lite-art.mjs'
@@ -120,6 +120,17 @@ function changedOnly(row, cols) {
   const out = {}
   for (const [k, v] of Object.entries(cols)) if (row[k] !== v) out[k] = v
   return out
+}
+
+/**
+ * 记下这次修改真正改了哪些字段（接口字段名）。导入「更新已有」时 ctx.changed 是个数组，
+ * importOne 据此把没有任何变化的行标成 unchanged、有变化的写明改了什么；新建 / 后台编辑不传，什么也不做。
+ * cols 是数据库列（如 changedOnly 的结果），按字段表换回接口字段名；不在字段表里的列（如跟着名字变的头像占位图）不算。
+ */
+function noteChanged(ctx, spec, cols = {}, extra = []) {
+  if (!ctx?.changed) return
+  const keys = Object.keys(cols).map(col => Object.keys(spec).find(k => spec[k].col === col)).filter(Boolean)
+  for (const k of [...keys, ...extra]) if (!ctx.changed.includes(k)) ctx.changed.push(k)
 }
 
 /** 可选的布尔字段（不在列里的，如 isShort）：undefined = 不改 */
@@ -269,8 +280,10 @@ function updateVideo(id, body, ctx = {}) {
   const isShort = optBool(body, 'isShort', '短视频')
   tx(() => {
     if ('public_id' in cols && cols.public_id !== row.public_id && A.publicIdTaken(cols.public_id, id)) fail('编号已存在', 'publicId')
-    A.updateRow('videos', id, changedOnly(row, cols))
-    if (isShort !== undefined) A.setShort(id, isShort)
+    const diff = changedOnly(row, cols)
+    A.updateRow('videos', id, diff)
+    const shortChanged = isShort !== undefined && A.setShort(id, isShort) > 0
+    noteChanged(ctx, VIDEO_SPEC, diff, shortChanged ? ['isShort'] : [])
     if (!ctx.deferRecount && ('status' in cols || 'topic_id' in cols)) A.recountTopics()
   })
   return id
@@ -344,14 +357,16 @@ function createPost(body, ctx = {}) {
   })
 }
 
-function updatePost(id, body) {
+function updatePost(id, body, ctx = {}) {
   requireObject(body)
   const row = A.postRow(requireId(id))
   if (!row) fail('帖子不存在')
   const cols = collect(body, POST_SPEC, { create: false })
   const { main, images } = postMediaInput(body)
   tx(() => {
-    A.updateRow('posts', id, changedOnly(row, cols))
+    const diff = changedOnly(row, cols)
+    A.updateRow('posts', id, diff)
+    noteChanged(ctx, POST_SPEC, diff)
     const kind = cols.media_kind ?? row.media_kind
     const videoId = 'video_id' in cols ? cols.video_id : row.video_id
     // 关联视频真的换了才同步主图时长：原样保存 / 导出再导入不改 post_media
@@ -361,10 +376,12 @@ function updatePost(id, body) {
       const nextMain = main !== undefined ? main : cur.mainImage
       const nextImages = images !== undefined ? images : cur.images
       // 内容没变就不重写：避免「原样保存 / 导出再导入」把原有的占位缩略图冲掉
-      const same = nextMain === cur.mainImage && nextImages.length === cur.images.length &&
-        nextImages.every((u, i) => u === cur.images[i]) && kind === row.media_kind
-      if (!same) writePostMedia(id, kind, videoId, nextMain, nextImages)
-      else if (videoChanged) A.syncPostMainDuration(id, videoId ? A.videoDuration(videoId) : null)
+      const sameImages = nextImages.length === cur.images.length && nextImages.every((u, i) => u === cur.images[i])
+      const same = nextMain === cur.mainImage && sameImages && kind === row.media_kind
+      if (!same) {
+        writePostMedia(id, kind, videoId, nextMain, nextImages)
+        noteChanged(ctx, POST_SPEC, {}, [...(nextMain !== cur.mainImage ? ['mainImage'] : []), ...(sameImages ? [] : ['images'])])
+      } else if (videoChanged) A.syncPostMainDuration(id, videoId ? A.videoDuration(videoId) : null)
     } else if (videoChanged) {
       A.syncPostMainDuration(id, videoId ? A.videoDuration(videoId) : null)
     }
@@ -447,12 +464,17 @@ function updateTopic(id, body, ctx = {}) {
   const covers = coversInput(body)
   tx(() => {
     if ('slug' in cols && cols.slug !== row.slug && A.slugTaken(cols.slug, id)) fail('标识已存在', 'slug')
-    A.updateRow('topics', id, changedOnly(row, cols))
+    const diff = changedOnly(row, cols)
+    A.updateRow('topics', id, diff)
+    noteChanged(ctx, TOPIC_SPEC, diff)
     if (covers !== undefined) {
       const cur = A.topicCoverRows(id)
       const curUrls = cur.map(c => c.url).filter(Boolean)
       const same = cur.length === 4 && curUrls.length === covers.length && covers.every((u, i) => u === cur[i].url)
-      if (!same) writeTopicCovers(id, covers)
+      if (!same) {
+        writeTopicCovers(id, covers)
+        noteChanged(ctx, TOPIC_SPEC, {}, ['covers'])
+      }
     }
     if (!ctx.deferRecount && 'status' in cols) A.recountTopics()
   })
@@ -510,7 +532,7 @@ function createCreator(body) {
   })
 }
 
-function updateCreator(id, body) {
+function updateCreator(id, body, ctx = {}) {
   requireObject(body)
   const row = A.creatorRow(requireId(id))
   if (!row) fail('创作者不存在')
@@ -519,7 +541,9 @@ function updateCreator(id, body) {
     if ('handle' in cols && cols.handle !== row.handle && A.handleTaken(cols.handle, id)) fail('账号已存在', 'handle')
     // 首字头像跟着名字走
     if ('name' in cols && cols.name !== row.name) cols.avatar_fallback = avatar(cols.name, cols.handle ?? row.handle).fallback
-    A.updateRow('creators', id, changedOnly(row, cols))
+    const diff = changedOnly(row, cols)
+    A.updateRow('creators', id, diff)
+    noteChanged(ctx, CREATOR_SPEC, diff)
   })
   return id
 }
@@ -552,7 +576,7 @@ function createKeyword(body) {
   return A.insertRow('search_keywords', cols)
 }
 
-function updateKeyword(id, body) {
+function updateKeyword(id, body, ctx = {}) {
   requireObject(body)
   const row = A.keywordRow(requireId(id))
   if (!row) fail('热词不存在')
@@ -562,9 +586,11 @@ function updateKeyword(id, body) {
     if (other && other !== id) fail('热词已存在', 'word')
   }
   // 值都没变就不动 updated_at（导出再原样导入不算修改）
-  if (Object.keys(cols).some(k => cols[k] !== row[k])) {
+  const diff = changedOnly(row, cols)
+  if (Object.keys(diff).length) {
     cols.updated_at = now()
     A.updateRow('search_keywords', id, cols)
+    noteChanged(ctx, KEYWORD_SPEC, diff)
   }
   return id
 }
@@ -644,6 +670,7 @@ function updateAlbum(id, body, ctx = {}) {
     const imagesChanged = images !== undefined && !sameImages(images, cur)
     if (imagesChanged) A.replaceAlbumImages(id, images)
     if (Object.keys(changed).length || imagesChanged) A.updateRow('albums', id, { ...changed, updated_at: now() })
+    noteChanged(ctx, ALBUM_SPEC, changed, imagesChanged ? ['images'] : [])
   })
   return id
 }
@@ -737,6 +764,7 @@ export function batch(type, body) {
   const ids = parseIds(body.ids)
   const { action, value } = body
   if (typeof action !== 'string') fail('缺少 action', 'action')
+  if (action === 'delete') return batchDelete(type, ids)
   const unsupported = () => fail(`不支持的批量操作：${action}`, 'action')
 
   return tx(() => {
@@ -744,7 +772,6 @@ export function batch(type, body) {
       case 'videos': {
         let affected
         if (STATUS_ACTIONS.has(action)) affected = A.setColumn('videos', ids, 'status', STATUS_ACTIONS.get(action))
-        else if (action === 'delete') affected = A.deleteRows('videos', ids)
         else if (action === 'setTopic') affected = A.setColumn('videos', ids, 'topic_id', isNullish(value) ? null : pTopicRef(value, 'value'))
         else if (action === 'setCreator') affected = A.setColumn('videos', ids, 'creator_id', isNullish(value) ? null : pCreatorRef(value, 'value'))
         else if (action === 'setCategory') affected = A.setColumn('videos', ids, 'category_key', isNullish(value) ? null : pCategory(value, 'value'))
@@ -758,13 +785,12 @@ export function batch(type, body) {
           affected = 0
           for (const id of A.existingIds('videos', ids)) affected += A.setShort(id, action === 'addShort')
         } else unsupported()
-        if (['delete', 'setTopic'].includes(action) || STATUS_ACTIONS.has(action)) A.recountTopics()
+        if (action === 'setTopic' || STATUS_ACTIONS.has(action)) A.recountTopics()
         return { affected }
       }
       case 'posts': {
         let affected
         if (STATUS_ACTIONS.has(action)) affected = A.setColumn('posts', ids, 'status', STATUS_ACTIONS.get(action))
-        else if (action === 'delete') affected = A.deleteRows('posts', ids)
         else if (action === 'setHot' || action === 'unsetHot') affected = A.setColumn('posts', ids, 'is_hot', action === 'setHot' ? 1 : 0)
         else if (action === 'setCreator') {
           if (isNullish(value)) fail('请选择发布者', 'value')
@@ -779,28 +805,16 @@ export function batch(type, body) {
           const affected = A.setColumn('topics', ids, 'status', STATUS_ACTIONS.get(action))
           return { affected }
         }
-        if (action === 'delete') {
-          const impact = A.topicsDeleteImpact(ids)
-          const affected = A.deleteRows('topics', ids)
-          A.recountTopics()
-          return { affected, deletedSections: impact.sections, detachedVideos: impact.videos }
-        }
         return unsupported()
       }
       case 'creators': {
         const set = CREATOR_ACTIONS.get(action)
         if (set) return { affected: A.setColumn('creators', ids, set[0], set[1]) }
-        if (action === 'delete') {
-          const impact = A.creatorsDeleteImpact(ids)
-          const affected = A.deleteRows('creators', ids)
-          return { affected, deletedPosts: impact.posts, deletedAlbums: impact.albums, detachedVideos: impact.videos }
-        }
         return unsupported()
       }
       case 'albums': {
         let affected
         if (action === 'publish' || action === 'unpublish') affected = A.setAlbumColumn(ids, 'status', action === 'publish' ? 1 : 2)
-        else if (action === 'delete') affected = A.deleteRows('albums', ids)
         else if (action === 'setCreator') {
           if (isNullish(value)) fail('请选择创作者', 'value')
           affected = A.setAlbumColumn(ids, 'creator_id', pCreatorRef(value, 'value'))
@@ -810,7 +824,6 @@ export function batch(type, body) {
         return { affected }
       }
       case 'keywords': {
-        if (action === 'delete') return { affected: A.deleteRows('search_keywords', ids) }
         const set = KEYWORD_ACTIONS.get(action)
         if (!set) return unsupported()
         const affected = A.setColumn('search_keywords', ids, set[0], set[1])
@@ -820,6 +833,44 @@ export function batch(type, body) {
     }
     return unsupported()
   })
+}
+
+const DELETE_TABLES = { videos: 'videos', posts: 'posts', topics: 'topics', creators: 'creators', keywords: 'search_keywords', albums: 'albums' }
+/* 批量删除每块的目标耗时（毫秒）和块大小的上下限：块越小 App 等得越少，但总耗时略长 */
+const DELETE_SLICE_MS = 40
+const DELETE_CHUNK_MIN = 1, DELETE_CHUNK_MAX = 1000, DELETE_CHUNK_START = 10
+
+/**
+ * 批量删除：分块删，每块一个事务，块之间让一次事件循环。
+ * 删一条视频要顺着外键把它的观看历史、点赞、收藏、短视频、分区条目……一起删掉（级联），一次删几千条即使有索引
+ * 也要零点几秒，以前整批在一个事务里同步执行，期间 App 的请求全在排队（没有外键索引的老库要十几秒）。
+ * 现在每块按上一块的耗时调整大小（目标 DELETE_SLICE_MS），App 的请求最多等一块。
+ * 每块各自提交：万一中途出错，已经删掉的块不会恢复，返回的 affected 是真正删掉的条数（再删一次剩下的即可）。
+ * 块之间让出了事件循环，别的进程可能趁机拿走写锁：每块用 txWait 异步等锁（不卡别的请求），等不到才报「忙」。
+ * 删专题 / 创作者返回的级联影响数（deletedSections、deletedPosts …）在删之前统计。
+ */
+async function batchDelete(type, ids) {
+  const table = DELETE_TABLES[type]
+  const impact = type === 'topics' ? A.topicsDeleteImpact(ids) : type === 'creators' ? A.creatorsDeleteImpact(ids) : null
+  let affected = 0, size = DELETE_CHUNK_START
+  for (let i = 0; i < ids.length;) {
+    if (i) await new Promise(resolve => setImmediate(resolve))
+    const part = ids.slice(i, i + size)
+    let t0 = 0
+    affected += await txWait(() => {
+      t0 = performance.now()
+      return A.deleteRows(table, part)
+    })
+    i += part.length
+    // 下一块：按这一块每条的耗时估，最多翻倍（每条的耗时随缓存命中波动很大，一下子放太大会卡住）
+    const ms = Math.max(performance.now() - t0, 1)
+    size = Math.min(DELETE_CHUNK_MAX, part.length * 2, Math.max(DELETE_CHUNK_MIN, Math.round(part.length * DELETE_SLICE_MS / ms)))
+  }
+  // 专题视频数：删视频 / 删专题后重算一次（删创作者只是让视频变成「无创作者」，不影响）
+  if (type === 'videos' || type === 'topics') await txWait(() => A.recountTopics())
+  if (type === 'topics') return { affected, deletedSections: impact.sections, detachedVideos: impact.videos }
+  if (type === 'creators') return { affected, deletedPosts: impact.posts, deletedAlbums: impact.albums, detachedVideos: impact.videos }
+  return { affected }
 }
 
 /** PUT /topics/order：按给定顺序把 sort_order 设成 0,1,2… */
@@ -1073,11 +1124,21 @@ function importOne(type, raw, ctx, onDuplicate) {
   const match = findExisting(type, cells)
   if (match) {
     const by = KEY_LABELS[match.by] || match.by
-    if (onDuplicate === 'skip') return { status: 'skipped', id: match.id, message: `已存在（按${by}匹配到 ID ${match.id}），已跳过` }
-    if (onDuplicate === 'error') fail(`数据已存在（按${by}匹配到 ID ${match.id}）`, match.by)
-    t.update(match.id, toBody(type, cells, ctx), ctx)
+    const head = `按${by}匹配到 ID ${match.id}`
+    if (onDuplicate === 'skip') return { status: 'skipped', id: match.id, message: `已存在（${head}），${ctx.dryRun ? '将跳过' : '已跳过'}` }
+    if (onDuplicate === 'error') fail(`数据已存在（${head}）`, match.by)
+    // 记下真正改了哪些字段：一个都没变的行是 unchanged（不写库、单独计数），有变化的写明改了什么
+    const changed = ctx.changed = []
+    try {
+      t.update(match.id, toBody(type, cells, ctx), ctx)
+    } finally {
+      ctx.changed = null
+    }
     // 写明按哪个键匹配到的：预检里就能看出「按播放地址匹配」这类可能不是本意的更新
-    return { status: 'updated', id: match.id, message: `按${by}匹配到 ID ${match.id}，已更新` }
+    if (!changed.length) return { status: 'unchanged', id: match.id, message: `${head}，没有变化` }
+    const keys = changed.map(k => F.apiToImportKey(type, k))
+    const labels = keys.map(k => F.SCHEMAS[type].fields.find(x => x.key === k)?.label || k)
+    return { status: 'updated', id: match.id, changed: keys, message: `${head}，${ctx.dryRun ? '将更新' : '已更新'}：${labels.join('、')}` }
   }
   const id = t.create(toBody(type, cells, ctx), ctx)
   return { status: 'created', id }
@@ -1147,7 +1208,8 @@ function replayKey(type, o, userId) {
  */
 export async function importRows(type, body, who = {}) {
   const imageSizeOf = type === 'albums' ? await albumImageSizer(body, who) : null
-  return importRowsNow(type, body, who, imageSizeOf)
+  // 读文件头时让出过事件循环，别的进程可能趁机拿走写锁：拿不到就异步等它放开再开事务（见 importRowsNow 的 BEGIN IMMEDIATE）
+  return retryBusy(() => importRowsNow(type, body, who, imageSizeOf))
 }
 
 /* 脚本 / curl 可能把布尔写成字符串；尤其 dryRun 认错了会把「预检」当成真导入 */
@@ -1225,18 +1287,26 @@ function importRowsNow(type, body, who, imageSizeOf) {
     // 创作者没有「草稿」，默认状态只作用于视频 / 帖子 / 专题 / 图集（图集只有上架 / 下架，草稿按下架，见 createAlbum）
     defaultStatus: type === 'creators' ? 1 : defaultStatus,
     deferRecount: true,
+    dryRun,
     pending: null,
+    // 「更新已有」的行：update* 往里记真正改了的字段（见 noteChanged），每行重新开一个
+    changed: null,
     // 图集：事先读好的图片宽高（albumImageSizer）；undefined = 当场读
     imageSizeOf: imageSizeOf || undefined
   }
   const out = {
-    total: rows.length, created: 0, updated: 0, skipped: 0, failed: 0,
+    total: rows.length, created: 0, updated: 0, unchanged: 0, skipped: 0, failed: 0,
     results: [], autoCreated: { topics: [], creators: [] }
   }
-  const counter = { created: 'created', updated: 'updated', skipped: 'skipped', error: 'failed' }
+  const counter = { created: 'created', updated: 'updated', unchanged: 'unchanged', skipped: 'skipped', error: 'failed' }
 
   if (db.isTransaction) throw new Error('导入时不应已处在事务中')
-  db.exec('BEGIN')
+  /*
+   * BEGIN IMMEDIATE（预检也一样）：一开始就拿写锁，别的进程拿着时马上报「忙」、什么都还没做，
+   * 由 importRows 的 retryBusy 异步等锁放开再整个重来。普通的 BEGIN 先读后写，要写时如果别的进程刚提交过，
+   * SQLite 直接报「忙」不等，结果每一行都记成「服务器内部错误」。
+   */
+  db.exec('BEGIN IMMEDIATE')
   try {
     rows.forEach((raw, i) => {
       const rowNo = Number.isSafeInteger(Number(raw?._row)) && Number(raw._row) > 0 ? Number(raw._row) : i + 1
@@ -1247,6 +1317,8 @@ function importRowsNow(type, body, who, imageSizeOf) {
         out.autoCreated.topics.push(...ctx.pending.topics)
         out.autoCreated.creators.push(...ctx.pending.creators)
       } catch (e) {
+        // 拿着写锁不该再报「忙」；万一报了，整批回滚交给外面（重来或回 503），不把每一行都记成「服务器内部错误」
+        if (isBusyError(e)) throw e
         if (e instanceof InputError) {
           r = { status: 'error', message: e.message }
           if (e.field) r.field = F.apiToImportKey(type, e.field)
@@ -1270,7 +1342,10 @@ function importRowsNow(type, body, who, imageSizeOf) {
 
 /* ---------------- 导出 ---------------- */
 
-const MAX_EXPORT = 50000
+/* 导出上限（行），ADMIN_EXPORT_MAX 可改（测试用它测「被截断」） */
+const MAX_EXPORT = Number(process.env.ADMIN_EXPORT_MAX) >= 1 ? Math.floor(Number(process.env.ADMIN_EXPORT_MAX)) : 50000
+/* 视频导出按 id 分块取整行，块之间让一次事件循环：导出几万条时 App 的请求不用排在后面等 */
+const EXPORT_CHUNK = 2000
 const digits = s => /^\d+$/.test(String(s))
 /** 纯数字账号再导入时会被当成 id，导出时加 @ */
 const creatorRef = handle => (handle ? (digits(handle) ? '@' + handle : handle) : '')
@@ -1303,25 +1378,45 @@ function topicRefWriter() {
 
 /**
  * 导出成「可直接再导入」的字符串：专题 → 名称（读不回同一个专题时用标识 / ID）、创作者 → 账号、
- * 时长 hh:mm:ss、状态 → 中文、时间 → 本地「YYYY-MM-DD HH:mm:ss」、布尔 → 是 / 否、多个地址用换行
+ * 时长 hh:mm:ss、状态 → 中文、时间 → 本地「YYYY-MM-DD HH:mm:ss」、布尔 → 是 / 否、多个地址用换行。
+ * 最多 MAX_EXPORT 行：多取一行判断是否截断，截断时另查一次总数，返回 { fields, rows, total, truncated, limit }，
+ * 前端据此提示「只导出了前 50,000 条（共 N 条）」。
  */
-export function exportRows(type, q = {}) {
-  typeOf(type)
+export async function exportRows(type, q = {}) {
+  const t = typeOf(type)
   const f = FILTERS[type](q)
-  const opts = { sort: q.sort, order: q.order, limit: MAX_EXPORT }
+  const opts = { sort: q.sort, order: q.order, limit: MAX_EXPORT + 1 }
   const str = v => (v === null || v === undefined ? '' : String(v))
-  let rows
+  let rows, truncated = false
+  // 查询多取了一行：多出来就是被截断了，去掉这一行
+  const cap = list => {
+    if (list.length <= MAX_EXPORT) return list
+    truncated = true
+    return list.slice(0, MAX_EXPORT)
+  }
   if (type === 'videos') {
     const topicRef = topicRefWriter()
-    rows = A.exportVideos(f, opts).map(r => ({
-      id: str(r.id), publicId: str(r.public_id), title: str(r.title), description: str(r.description),
-      topic: topicRef(r), creator: creatorRef(r.creator_handle), category: str(r.category_key), region: str(r.region),
-      quality: str(r.quality), tags: parseTags(r.tags).join(','), duration: F.fmtDuration(r.duration_sec),
-      coverUrl: str(r.cover_url), playbackUrl: str(r.playback_url), status: F.statusLabel(r.status),
-      publishedAt: F.fmtTimestamp(r.published_at), isShort: F.fmtBool(r.is_short)
-    }))
-  } else if (type === 'posts') {
-    rows = A.exportPosts(f, opts).map(r => ({
+    const ids = A.exportVideoIds(f, opts)
+    truncated = ids.length > MAX_EXPORT
+    rows = []
+    for (let i = 0; i < Math.min(ids.length, MAX_EXPORT); i += EXPORT_CHUNK) {
+      if (i) await new Promise(resolve => setImmediate(resolve))
+      const part = ids.slice(i, Math.min(i + EXPORT_CHUNK, MAX_EXPORT))
+      for (const r of A.exportVideoRows(part)) {
+        rows.push({
+          id: str(r.id), publicId: str(r.public_id), title: str(r.title), description: str(r.description),
+          topic: topicRef(r), creator: creatorRef(r.creator_handle), category: str(r.category_key), region: str(r.region),
+          quality: str(r.quality), tags: parseTags(r.tags).join(','), duration: F.fmtDuration(r.duration_sec),
+          coverUrl: str(r.cover_url), playbackUrl: str(r.playback_url), status: F.statusLabel(r.status),
+          publishedAt: F.fmtTimestamp(r.published_at), isShort: F.fmtBool(r.is_short)
+        })
+      }
+    }
+    const total = truncated ? A.countVideos(f) : rows.length
+    return { fields: F.fieldKeys(type), rows, total, truncated, limit: MAX_EXPORT }
+  }
+  if (type === 'posts') {
+    rows = cap(A.exportPosts(f, opts)).map(r => ({
       id: str(r.id), creator: creatorRef(r.creator_handle), text: str(r.text), content: str(r.content), kind: F.postKindLabel(r.media_kind),
       video: r.video_id ? (digits(r.video_public_id) || !r.video_public_id ? String(r.video_id) : r.video_public_id) : '',
       tags: parseTags(r.tags).join(','), mainImage: str(r.main_image), images: (r.images || []).join('\n'),
@@ -1329,28 +1424,30 @@ export function exportRows(type, q = {}) {
       status: F.statusLabel(r.status), publishedAt: F.fmtTimestamp(r.published_at)
     }))
   } else if (type === 'topics') {
-    rows = A.exportTopics(f, opts).map(r => ({
+    rows = cap(A.exportTopics(f, opts)).map(r => ({
       id: str(r.id), name: str(r.name), slug: str(r.slug), description: str(r.description), kind: F.topicKindLabel(r.kind),
       sortOrder: str(r.sort_order), isFeatured: F.fmtBool(r.is_featured), cardSize: str(r.card_size),
       playsCount: str(r.plays_count), status: F.statusLabel(r.status), covers: (r.covers || []).join('\n')
     }))
   } else if (type === 'creators') {
-    rows = A.exportCreators(f, opts).map(r => ({
+    rows = cap(A.exportCreators(f, opts)).map(r => ({
       id: str(r.id), handle: str(r.handle), name: str(r.name), avatarUrl: str(r.avatar_url), bio: str(r.bio),
       isVerified: F.fmtBool(r.is_verified), isOfficial: F.fmtBool(r.is_official), status: F.creatorStatusLabel(r.status)
     }))
   } else if (type === 'albums') {
     // 图片只导出地址（换行分隔、按顺序）；再导入时同一地址沿用库里的宽高
-    rows = A.exportAlbums(f, opts).map(r => ({
+    rows = cap(A.exportAlbums(f, opts)).map(r => ({
       id: str(r.id), title: str(r.title), creator: creatorRef(r.creator_handle), images: (r.images || []).map(m => m.url).join('\n'),
       description: str(r.description), tags: parseTags(r.tags).join(','), status: F.albumStatusLabel(r.status),
       publishedAt: F.fmtTimestamp(r.published_at)
     }))
   } else {
-    rows = A.exportKeywords(f, opts).map(r => ({
+    rows = cap(A.exportKeywords(f, opts)).map(r => ({
       word: str(r.word), isHot: F.fmtBool(r.is_hot), isBanned: F.fmtBool(r.is_banned),
       weight: str(r.weight), sortOrder: str(r.sort_order)
     }))
   }
-  return { fields: F.fieldKeys(type), rows }
+  // 截断了才按列表的筛选再数一次总数（列表查询只取 1 行）
+  const total = truncated ? t.list(f, { limit: 1, offset: 0 }).total : rows.length
+  return { fields: F.fieldKeys(type), rows, total, truncated, limit: MAX_EXPORT }
 }

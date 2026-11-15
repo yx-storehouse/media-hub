@@ -24,6 +24,22 @@ export function setBottomInset(key, px) {
   else insets.delete(key)
 }
 
+/*
+ * 贴在窗口右边的抽屉（ADrawer）的宽度：抽屉开着时提示条放到抽屉左边（遮罩上），
+ * 不再叠在抽屉右下角的输入框 / 上传按钮上。多个抽屉取最宽的。
+ */
+const sides = reactive(new Map())
+export const rightInset = computed(() => {
+  let max = 0
+  for (const v of sides.values()) max = Math.max(max, v)
+  return max
+})
+/** key 任意（每个抽屉一个）；px <= 0 表示不再占用 */
+export function setRightInset(key, px) {
+  if (px > 0) sides.set(key, Math.ceil(px))
+  else sides.delete(key)
+}
+
 export function toast(message, { type = 'info', duration } = {}) {
   const id = ++seq
   const ms = duration ?? (type === 'error' ? 5000 : 2600)

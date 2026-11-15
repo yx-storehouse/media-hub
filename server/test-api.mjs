@@ -8,7 +8,7 @@
  */
 import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
-import { rmSync, existsSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
+import { rmSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -908,8 +908,8 @@ adminCheck('创作者主页「图片」：图集新的在前、翻页、只算�
     must(all.total === 4 && ids(all.list) === exp, `顺序 ${ids(all.list)}（total ${all.total}），期望 ${exp}`)
     must(all.list.every(a => Object.keys(a).join() === ALBUM_ITEM_KEYS), '字段 ' + Object.keys(all.list[0]).join())
     const g1 = all.list.find(a => a.id === a1.id), g2 = all.list.find(a => a.id === a2.id)
-    must(json(g1.cover) === json({ url: '/m/a1.jpg', width: 1080, height: 1440 }) && g1.count === 3 && g1.title === '三张图' && g1.publishedAt === T - 3600 && g1.time === '1小时前', '三张图 ' + json(g1))
-    must(json(g2.cover) === json({ url: 'https://e.com/single.jpg', width: 0, height: 0 }) && g2.count === 1 && g2.title === '', '单张图片（不知道宽高为 0）' + json(g2))
+    must(json(g1.cover) === json({ url: '/m/a1.jpg', width: 1080, height: 1440, thumb: '/m/a1.jpg' }) && g1.count === 3 && g1.title === '三张图' && g1.publishedAt === T - 3600 && g1.time === '1小时前', '三张图 ' + json(g1))
+    must(json(g2.cover) === json({ url: 'https://e.com/single.jpg', width: 0, height: 0, thumb: 'https://e.com/single.jpg' }) && g2.count === 1 && g2.title === '', '单张图片（不知道宽高为 0）' + json(g2))
     must((await data('GET', `/api/creators/${c.id}`)).albumCount === 4, '头部 albumCount 和 total 一致（下架的不算）')
     // 翻页：3 条一页拼起来和一次取完全一样
     const pages = [...(await data('GET', `/api/creators/${c.id}/albums?limit=3&offset=0`)).list, ...(await data('GET', `/api/creators/${c.id}/albums?limit=3&offset=3`)).list]
@@ -948,7 +948,8 @@ adminCheck('图集详情：结构、作者、标签、图片顺序和宽高、�
     must(d.id === a.id && d.title === '雨后' && d.description === '第一段\n\n第二段' && json(d.tags) === '["街拍","雨天"]', '基本字段 ' + json({ ...d, creator: undefined, images: undefined }))
     must(Object.keys(d.creator).join() === 'id,name,handle,verified,avatar' && d.creator.id === c.id && d.creator.name === '图集详情测试' &&
       d.creator.handle === 'profile_t9' && d.creator.verified === true && isCover(d.creator.avatar), '作者 ' + json(d.creator).slice(0, 120))
-    must(json(d.images) === json([imgs[0], imgs[1], { url: '/m/d2.jpg', width: 0, height: 0 }]) && d.count === 3, '图片 ' + json(d.images))
+    // thumb：网格用的小图地址（这几张不是素材目录里的图、也不是 picsum，就是原图）
+    must(json(d.images) === json([{ ...imgs[0], thumb: imgs[0].url }, { ...imgs[1], thumb: imgs[1].url }, { url: '/m/d2.jpg', width: 0, height: 0, thumb: '/m/d2.jpg' }]) && d.count === 3, '图片 ' + json(d.images))
     must(d.following === false && typeof d.time === 'string' && d.publishedAt > 0, '关注 / 时间')
     // 关注作者后 following 为 true，未登录仍是 false
     await data('POST', `/api/creators/${c.id}/follow`, { on: true })
@@ -1531,6 +1532,404 @@ async function oldDbAlbumsCheck() {
 }
 if (argBase) results.push({ name: '老库自动补建图集表（原有数据不动）', ok: true, note: '跳过（--base 模式）' })
 else await check('老库自动补建图集表（原有数据不动）', oldDbAlbumsCheck)
+
+/*
+ * ---- 审计修复（服务端）：占位图、分页上限、最新兜底、相似推荐的片源、缩略图、执行计划、热词缓存、保活 ----
+ */
+const ART_REF = /^url\(\/api\/art\/[0-9a-f]{16}\.svg\)$/
+
+await check('列表-01：列表里的占位图是短地址，接口不再内联 SVG', async () => {
+  const paths = ['/api/category/ai/videos?limit=20', '/api/topic/2/videos', '/api/community/posts', '/api/library',
+    '/api/creators/3/media', '/api/shorts?limit=10', '/api/search?q=' + encodeURIComponent('露营'), '/api/home/section/1/videos?size=8',
+    '/api/videos/2/related', '/api/live', '/api/nearby']
+  const sizes = []
+  for (const p of paths) {
+    const r = await raw(p)
+    const text = r.body.toString()
+    must(r.status === 200, `${p} HTTP ${r.status}`)
+    must(!text.includes('data:image/svg'), `${p} 还内联着 SVG`)
+    sizes.push(`${p.split('?')[0].replace('/api/', '')} ${(r.body.length / 1024).toFixed(1)}K`)
+  }
+  const list = await data('GET', '/api/category/ai/videos?limit=20')
+  must(list.every(v => ART_REF.test(v.cover.fallback)), '封面占位图 ' + list[0].cover.fallback)
+  must(list.every(v => !v.creator || ART_REF.test(v.creator.avatar.fallback)), '创作者头像占位图 ' + list[0].creator?.avatar?.fallback)
+  return sizes.join('，')
+})
+
+await check('列表-01：GET /api/art/<hash>.svg 返回原来的 SVG，一年缓存 + ETag + CSP', async () => {
+  const v = (await data('GET', '/api/category/ai/videos?limit=1'))[0]
+  const path = v.cover.fallback.slice(4, -1)
+  const r = await raw(path, { 'accept-encoding': 'br' })
+  must(r.status === 200 && r.headers['content-type'] === 'image/svg+xml', `HTTP ${r.status} ${r.headers['content-type']}`)
+  must(r.headers['cache-control'] === 'public, max-age=31536000, immutable', '缓存头 ' + r.headers['cache-control'])
+  must(/default-src 'none'/.test(r.headers['content-security-policy'] || '') && r.headers['x-content-type-options'] === 'nosniff', '安全头')
+  const svg = decode(r)
+  must(svg.startsWith('<svg') && svg.includes('viewBox'), '内容不是 SVG')
+  const again = await raw(path, { 'if-none-match': r.headers.etag })
+  must(again.status === 304, '带 ETag 应 304，实际 ' + again.status)
+  const miss = await raw('/api/art/0123456789abcdef.svg')
+  const bad = await raw('/api/art/..%2F..%2Fetc.svg')
+  must(miss.status === 404 && bad.status === 404, `不存在 ${miss.status} / 非法 ${bad.status}`)
+  if (!argBase) {
+    const db = new DatabaseSync(TEST_DB, { readOnly: true })
+    const left = db.prepare(`SELECT
+        (SELECT COUNT(*) FROM videos WHERE cover_fallback LIKE 'url(''data:%') +
+        (SELECT COUNT(*) FROM post_media WHERE fallback LIKE 'url(''data:%') +
+        (SELECT COUNT(*) FROM topic_covers WHERE fallback LIKE 'url(''data:%') +
+        (SELECT COUNT(*) FROM creators WHERE avatar_fallback LIKE 'url(''data:%') AS n`).get().n
+    const blobs = db.prepare('SELECT COUNT(*) n FROM art_blobs').get().n
+    db.close()
+    must(left === 0 && blobs > 0, `库里还有 ${left} 条内联占位图（art_blobs ${blobs} 张）`)
+  }
+  return `${svg.length} 字节的 SVG，br ${r.body.length} 字节，304 / 404 正常`
+})
+
+await check('列表-01：后台新建内容的占位图是纯 CSS 渐变（几百字节，没有 SVG）', async () => {
+  const { liteCover, liteDoc } = await import('./lib/lite-art.mjs')
+  const a = liteCover('vid-VID-1001'), b = liteCover('post-12-main', { w: 800, h: 450 }), c = liteCover('hero-3-0', { w: 300, h: 600 }), d = liteDoc('post-12-0')
+  // 两种画面（黄昏 / 光斑）都要覆盖到：多取一些种子
+  const many = Array.from({ length: 40 }, (_, i) => liteCover('vid-VID-' + (1400 + i)))
+  for (const x of [a, b, c, d, ...many]) {
+    must(typeof x === 'string' && x.length <= 600 && !/svg|url\(/i.test(x) && /gradient\(/.test(x), '占位图 ' + x.slice(0, 80))
+    // 颜色只能是 #rgb / #rgba / #rrggbb / #rrggbbaa（拼出 10 位的颜色会让整串 background-image 失效、格子一片黑）
+    const colors = x.match(/#[0-9a-f]+/gi) || []
+    must(colors.every(h => [4, 5, 7, 9].includes(h.length)), '颜色写法不对 ' + colors.filter(h => ![4, 5, 7, 9].includes(h.length)))
+  }
+  must(liteCover('vid-VID-1001') === a && liteCover('vid-VID-1002') !== a, '同一个种子应得到同一张、不同种子不同')
+  return `${a.length} / ${b.length} / ${c.length} / ${d.length} 字节`
+})
+
+await check('服务端-02：公开列表的 limit / offset 有上限，不再一次拉走整张表、offset=1e20 不再 500', async () => {
+  const routes = ['/api/home/latest/videos?date=recent', '/api/category/cn/videos', '/api/topic/2/videos', '/api/community/posts',
+    '/api/live', '/api/nearby', '/api/search/creators', '/api/search?q=' + encodeURIComponent('日'), '/api/me/history', '/api/creators/3/media']
+  const counts = []
+  for (const r0 of routes) {
+    const sep = r0.includes('?') ? '&' : '?'
+    const rows = d => (Array.isArray(d) ? d : d.list).length
+    const n = rows(await data('GET', r0 + sep + 'limit=-1'))
+    must(n <= 50, `${r0} limit=-1 拿到 ${n} 条`)
+    const nb = rows(await data('GET', r0 + sep + 'limit=1000'))
+    must(nb <= 50, `${r0} limit=1000 拿到 ${nb} 条`)
+    for (const q of ['offset=1e20', 'offset=Infinity', 'offset=-5', 'limit=abc']) {
+      const res = await call('GET', r0 + sep + q)
+      must(res.status === 200 && res.json?.code === 0, `${r0} ${q} → HTTP ${res.status}`)
+    }
+    counts.push(n)
+  }
+  const sec = await data('GET', '/api/home/section/1/videos?size=100000')
+  must(sec.length <= 60, '分区 size 上限 60，实际 ' + sec.length)
+  for (const q of ['/api/category/cn/videos?filter=1e20', '/api/videos/2/related?batch=Infinity&limit=1e9', '/api/search/hot?page=1e30',
+    '/api/live?tab=1e20', '/api/nearby?filter=-1', '/api/topic/2/videos?sort=99', '/api/community/posts?tab=1e9', '/api/home/latest/videos?date=1e20']) {
+    const res = await call('GET', q)
+    must(res.status === 200 && res.json?.code === 0, `${q} → HTTP ${res.status} ${res.json?.message || ''}`)
+  }
+  return 'limit=-1 每个接口最多 ' + Math.max(...counts) + ' 条；1e20 / Infinity / 负数都按默认处理'
+})
+
+await check('首页-01：「最新」带最近一次上新的时间，date=recent 不限日期列出最近上新', async () => {
+  const f = await data('GET', '/api/home/latest/filters')
+  must(Number.isInteger(f.latestAt) && f.latestAt > 0, 'latestAt ' + f.latestAt)
+  const rec = await data('GET', '/api/home/latest/videos?date=recent&limit=10')
+  must(rec.length === 10 && rec[0].publishedAt === f.latestAt, `最近上新 ${rec.length} 条，首条 ${rec[0]?.publishedAt} / latestAt ${f.latestAt}`)
+  must(rec.every((v, i) => i === 0 || rec[i - 1].publishedAt >= v.publishedAt), '应按发布时间倒序')
+  const p2 = await data('GET', '/api/home/latest/videos?date=recent&limit=10&offset=10')
+  must(p2.length > 0 && !p2.some(v => rec.some(x => x.id === v.id)), '翻页重复')
+  const cn = await data('GET', '/api/home/latest/videos?date=recent&region=cn&limit=5')
+  must(cn.length > 0, '按地区筛最近上新')
+  return `latestAt ${new Date(f.latestAt * 1000).toLocaleDateString('zh-CN')}，最近上新第一页 ${rec.length} 条`
+})
+
+await check('播放-02：相似推荐 / 专题列表每条带 hasSrc，相似推荐里有片源的排在前面', async () => {
+  if (argBase) return '跳过（--base 模式）'
+  // 种子数据的视频都没有片源：给同专题里播放最少的那条临时配上片源，它应该排到相似推荐的第一位
+  const self = (await data('GET', '/api/topic/2/videos?sort=1&limit=1')).list[0]
+  const before = await data('GET', `/api/videos/${self.id}/related?limit=20`)
+  must(before.every(v => v.hasSrc === false), '种子数据应该都没有片源：' + before.map(v => v.hasSrc).join())
+  const sameTopic = before.filter(v => v.topicId === self.topicId)
+  const pick = sameTopic[sameTopic.length - 1]
+  must(pick && before.indexOf(pick) > 0, '同专题的视频不够')
+  const db = new DatabaseSync(TEST_DB)
+  db.prepare('UPDATE videos SET playback_url = ? WHERE id = ?').run('/media/videos/hassrc-test.mp4', pick.id)
+  db.close()
+  try {
+    const rel = await data('GET', `/api/videos/${self.id}/related?limit=20`)
+    must(rel[0].id === pick.id && rel[0].hasSrc === true && rel.slice(1).every(v => v.hasSrc === false),
+      `有片源的 #${pick.id}（原来排第 ${before.indexOf(pick) + 1}）应排第一：` + rel.map(v => v.id + (v.hasSrc ? 'Y' : 'n')).join(' '))
+    const topic = await data('GET', `/api/topic/${self.topicId}/videos?limit=50`)
+    must(topic.list.every(v => typeof v.hasSrc === 'boolean') && topic.list.find(v => v.id === pick.id)?.hasSrc === true, '专题列表 hasSrc')
+    const detail = await data('GET', `/api/videos/${pick.id}`)
+    must(detail.src === '/media/videos/hassrc-test.mp4' && detail.hasSrc === true, 'hasSrc 和详情的 src 对不上')
+    return `#${pick.id} 从第 ${before.indexOf(pick) + 1} 位排到第 1 位`
+  } finally {
+    const d2 = new DatabaseSync(TEST_DB)
+    d2.prepare('UPDATE videos SET playback_url = NULL WHERE id = ?').run(pick.id)
+    d2.close()
+  }
+})
+
+await check('创作者-01：网格 / 头图 / 图集带小图地址 thumb（素材旁的 <原图文件名>.thumb.jpg、picsum 按尺寸缩小）', async () => {
+  if (argBase) return '跳过（--base 模式）'
+  // 准备一个用站内图片的图集：一张有小图、一张没有，再加一张 picsum 的。
+  // R-AR-03：同一个文件夹里还有一张主名相同的 a.png（没有自己的小图）—— 它不能借用 a.jpg 的小图；
+  // 旧写法的 a.thumb.jpg（不带原图扩展名）谁的小图都不是
+  mkdirSync(join(TEST_MEDIA, 'images', 'thumbtest'), { recursive: true })
+  writeFileSync(join(TEST_MEDIA, 'images', 'thumbtest', 'a.jpg'), 'x')
+  writeFileSync(join(TEST_MEDIA, 'images', 'thumbtest', 'a.jpg.thumb.jpg'), 'x')
+  writeFileSync(join(TEST_MEDIA, 'images', 'thumbtest', 'a.png'), 'x')
+  writeFileSync(join(TEST_MEDIA, 'images', 'thumbtest', 'a.thumb.jpg'), 'x')
+  writeFileSync(join(TEST_MEDIA, 'images', 'thumbtest', 'b.png'), 'x')
+  const db = new DatabaseSync(TEST_DB)
+  const creator = db.prepare("SELECT id FROM creators WHERE handle = 'trip'").get().id
+  const t0 = Math.floor(Date.now() / 1000) + 3600
+  const albumId = Number(db.prepare(`INSERT INTO albums(creator_id, title, status, published_at, created_at, updated_at, image_count) VALUES(?,?,1,?,?,?,3)`)
+    .run(creator, '缩略图测试', t0, t0, t0).lastInsertRowid)
+  db.prepare('UPDATE albums SET image_count = 4 WHERE id = ?').run(albumId)
+  const img = db.prepare('INSERT INTO album_images(album_id, url, width, height, sort, created_at) VALUES(?,?,?,?,?,?)')
+  img.run(albumId, '/media/images/thumbtest/a.jpg?v=2', 4032, 3024, 0, t0)
+  img.run(albumId, '/media/images/thumbtest/b.png', 1000, 1000, 1, t0)
+  img.run(albumId, 'https://picsum.photos/seed/x1/1080/1440', 1080, 1440, 2, t0)
+  img.run(albumId, '/media/images/thumbtest/a.png', 800, 600, 3, t0)
+  db.close()
+  try {
+    const al = await data('GET', `/api/albums/${albumId}`)
+    const th = al.images.map(i => i.thumb)
+    must(th[0] === '/media/images/thumbtest/a.jpg.thumb.jpg?v=2', '有小图 ' + th[0])
+    must(th[1] === '/media/images/thumbtest/b.png', '没有小图用原图 ' + th[1])
+    must(th[2] === 'https://picsum.photos/seed/x1/360/480', 'picsum 缩小 ' + th[2])
+    must(th[3] === '/media/images/thumbtest/a.png', '同主名的 a.png 没有自己的小图，用原图（不能显示成 a.jpg 的小图）' + th[3])
+    must(al.images[0].url === '/media/images/thumbtest/a.jpg?v=2', '原图地址不变')
+    const albums = await data('GET', `/api/creators/${creator}/albums`)
+    must(albums.list[0].id === albumId && albums.list[0].cover.thumb === th[0], '图集封面 thumb ' + json(albums.list[0].cover))
+    const media = await data('GET', `/api/creators/${creator}/media?limit=3`)
+    must(media.list[0].albumId === albumId && media.list[0].cover.thumb === th[0] && media.list[0].cover.src === al.images[0].url, '照片墙 ' + json(media.list[0].cover))
+    const prof = await data('GET', `/api/creators/${creator}`)
+    must(prof.banner[0].thumb === th[0] && prof.banner.every(b => 'thumb' in b), '头图 ' + json(prof.banner[0]))
+    const posts = await data('GET', '/api/community/posts')
+    must(posts.every(p => !p.media.main || 'thumb' in p.media.main), '帖子图 thumb')
+    return th.join(' | ')
+  } finally {
+    const d2 = new DatabaseSync(TEST_DB)
+    d2.prepare('DELETE FROM albums WHERE id = ?').run(albumId)
+    d2.close()
+  }
+})
+
+await check('执行计划：创作者主页 / 专题排序 / 最新 / 搜索 / 我的收藏 / 按 id 取行都走索引（锁住，防回归）', async () => {
+  if (argBase) return '跳过（--base 模式）'
+  const db = new DatabaseSync(TEST_DB, { readOnly: true })
+  const plan = (sql, ...a) => db.prepare('EXPLAIN QUERY PLAN ' + sql).all(...a).map(r => r.detail).join(' | ')
+  const expect = [
+    ['创作者计数', 'SELECT COUNT(*) n, MAX(published_at) t FROM videos WHERE creator_id = ? AND status = 1', [1], /COVERING INDEX idx_videos_creator_pub/],
+    ['创作者最热', 'SELECT * FROM v_videos WHERE creator_id = ? ORDER BY play_count DESC, published_at DESC, id DESC LIMIT 20', [1], /INDEX idx_videos_creator_play/],
+    ['创作者帖子计数', 'SELECT COUNT(*) n, MAX(published_at) t FROM posts WHERE creator_id = ? AND status = 1', [1], /COVERING INDEX idx_posts_creator_pub/],
+    ['照片墙去重', `SELECT COUNT(*) FROM posts p JOIN post_media m ON m.post_id = p.id WHERE p.creator_id = ? AND p.status = 1
+       AND NOT EXISTS (SELECT 1 FROM videos cv WHERE cv.cover_url = m.url AND +cv.creator_id = p.creator_id AND +cv.status = 1)`, [1], /SEARCH cv USING (COVERING )?INDEX idx_videos_cover/],
+    ['专题按播放', 'SELECT * FROM v_videos WHERE topic_id = ? ORDER BY play_count DESC LIMIT 20', [2], /INDEX idx_videos_topic_play \(status=\? AND topic_id=\?\)/],
+    ['专题按收藏', 'SELECT * FROM v_videos WHERE topic_id = ? ORDER BY fav_count DESC LIMIT 20', [2], /INDEX idx_videos_topic_fav \(status=\? AND topic_id=\?\)/],
+    ['专题播放之和', 'SELECT COALESCE(SUM(play_count), 0) p, COALESCE(SUM(fav_count), 0) f FROM videos WHERE status = 1 AND topic_id = ?', [2], /COVERING INDEX idx_videos_topic_play/],
+    ['最新计数', 'SELECT region, COUNT(*) c FROM videos WHERE status = 1 AND published_at >= ? AND published_at < ? GROUP BY region', [0, 1], /COVERING INDEX idx_videos_pub_region/],
+    ['两字搜索计数', 'SELECT COUNT(*) c FROM videos WHERE status = 1 AND (title LIKE ? OR tags LIKE ?)', ['%a%', '%a%'], /COVERING INDEX idx_videos_search/],
+    ['两字搜索一页', 'SELECT id FROM videos WHERE status = 1 AND (title LIKE ? OR tags LIKE ?) ORDER BY published_at DESC LIMIT 20', ['%a%', '%a%'], /COVERING INDEX idx_videos_search/],
+    ['两字搜帖子', 'SELECT 1 FROM posts WHERE status = 1 AND (text LIKE ? OR tags LIKE ?) LIMIT 1', ['%a%', '%a%'], /COVERING INDEX idx_posts_search/],
+    ['相似推荐', `SELECT id FROM videos WHERE status = 1 AND id != ? AND (topic_id = ? OR category_key = ?)
+       ORDER BY (playback_url IS NOT NULL AND playback_url != '') DESC, (topic_id = ?) DESC, play_count DESC, id LIMIT 6`, [1, 1, 'ai', 1], /COVERING INDEX idx_videos_related_src/],
+    ['我的收藏', 'SELECT v.* FROM video_favs f JOIN v_videos v ON v.id = f.video_id WHERE f.user_id = ? ORDER BY f.created_at DESC, f.video_id DESC LIMIT 20', [1], /COVERING INDEX idx_video_favs_user/],
+    ['按 id 取行', 'SELECT v.* FROM json_each(?) j CROSS JOIN v_videos v ON v.id = j.value', ['[1,2,3]'], /SEARCH v USING INTEGER PRIMARY KEY/],
+    ['删视频级联', 'SELECT 1 FROM watch_history WHERE video_id = ?', [1], /idx_watch_history_video/]
+  ]
+  const bad = []
+  for (const [name, sql, args, re] of expect) {
+    const p = plan(sql, ...args)
+    if (!re.test(p)) bad.push(`${name}：${p}`)
+    if (/\bSCAN (videos|v|posts|p)\b(?! USING)/.test(p)) bad.push(`${name} 全表扫描：${p}`)
+  }
+  db.close()
+  must(!bad.length, bad.join('\n'))
+  return `${expect.length} 条查询的执行计划符合预期`
+})
+
+await check('热门搜索：后台加了词立刻能看到（缓存随后台写操作作废）', async () => {
+  if (argBase) return '跳过（--base 模式）'
+  const all = async () => {
+    const seen = new Set()
+    for (let p = 0; p < 40; p++) for (const w of await data('GET', '/api/search/hot?page=' + p)) seen.add(w.word)
+    return seen
+  }
+  await all()   // 先把筛好的词表缓存起来
+  const v = (await data('GET', '/api/category/ai/videos?limit=1'))[0]
+  const word = [...v.title].slice(2, 4).join('')
+  const kw = await data('POST', '/api/admin/keywords', { word, weight: 100000 })
+  const after = await all()
+  await data('DELETE', `/api/admin/keywords/${kw.id}`)
+  const gone = await all()
+  must(after.has(word), `新加的词「${word}」没出现`)
+  must(!gone.has(word), `删掉的词「${word}」还在`)
+  return `「${word}」加上立刻出现、删掉立刻消失`
+})
+
+await check('服务端-01：保活连接空闲 6 秒后照样能复用（keepAliveTimeout 65 秒）', async () => {
+  const { Agent, get: httpGet } = await import('node:http')
+  const agent = new Agent({ keepAlive: true, maxSockets: 1 })
+  const once = () => new Promise((resolve, reject) => {
+    const r = httpGet(base + '/api/health', { agent }, res => { res.resume(); res.on('end', () => resolve({ status: res.statusCode, reused: r.reusedSocket })) })
+    r.on('error', reject)
+  })
+  const a = await once()
+  await new Promise(r => setTimeout(r, 6000))
+  const b = await once()
+  agent.destroy()
+  must(a.status === 200 && b.status === 200 && b.reused, `第二次 ${b.status} reused=${b.reused}`)
+  return '空闲 6 秒后复用同一条连接'
+})
+
+/*
+ * ---- 老库迁移：占位图还内联在行里、没有这次新加的索引的库（修复之前的版本建的）----
+ * 按现在的表结构建库，再把占位图塞回行里、删掉 art_blobs 和新索引；另起一个服务（3182）指向它：
+ * 启动时应把占位图挪进 art_blobs（接口只下发短地址、画面不变）、补上索引，各表行数不变；再启动一次什么都不做。
+ */
+const NEW_INDEXES = ['idx_videos_related_src', 'idx_videos_topic_play', 'idx_videos_topic_fav', 'idx_videos_pub_region', 'idx_videos_search',
+  'idx_posts_search', 'idx_videos_creator_pub', 'idx_videos_creator_play', 'idx_posts_creator_pub', 'idx_video_favs_user', 'idx_post_favs_user',
+  'idx_topic_favs_user', 'idx_user_follows_user', 'idx_watch_history_video', 'idx_video_dislikes_video', 'idx_search_history_video', 'idx_posts_video',
+  'idx_episodes_video', 'idx_uploads_video', 'idx_comments_user', 'idx_comments_parent', 'idx_comments_likes_comment', 'idx_post_media_blobs_post',
+  'idx_danmaku_user', 'idx_videos_topic', 'idx_videos_admin_play', 'idx_videos_admin_like', 'idx_videos_admin_fav', 'idx_videos_admin_title', 'idx_videos_admin_dur']
+const ART_COLS = [['videos', 'cover_fallback'], ['post_media', 'fallback'], ['topic_covers', 'fallback'], ['live_rooms', 'cover_fallback'], ['places', 'cover_fallback'], ['creators', 'avatar_fallback']]
+
+async function oldDbArtCheck() {
+  const dir = mkdtempSync(join(tmpdir(), 'reel-old-art-'))
+  const OLD_DB = join(dir, 'old.db')
+  let srv = null
+  try {
+    await new Promise(r => spawn(process.execPath, [join(here, 'db', 'seed.mjs')], { env: { ...process.env, DB_PATH: OLD_DB }, stdio: 'ignore' }).on('exit', r))
+    const w = new DatabaseSync(OLD_DB)
+    const inline = svg => "url('data:image/svg+xml;utf8," + encodeURIComponent(svg).replace(/'/g, '%27') + "')"
+    let restored = 0
+    for (const [t, c] of ART_COLS) {
+      for (const r of w.prepare(`SELECT rowid rid, ${c} v FROM ${t} WHERE ${c} LIKE 'url(/api/art/%'`).all()) {
+        const svg = w.prepare('SELECT svg FROM art_blobs WHERE hash = ?').get(r.v.slice(13, 29)).svg
+        w.prepare(`UPDATE ${t} SET ${c} = ? WHERE rowid = ?`).run(inline(svg), r.rid)
+        restored++
+      }
+    }
+    w.exec('DROP TABLE art_blobs')
+    for (const i of NEW_INDEXES) w.exec(`DROP INDEX IF EXISTS ${i}`)
+    const tables = db2 => db2.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '%_fts%'").all().map(r => r.name)
+    const counts = db2 => Object.fromEntries(tables(db2).map(t => [t, db2.prepare(`SELECT COUNT(*) c FROM "${t}"`).get().c]))
+    const countsBefore = counts(w)
+    const sample = w.prepare('SELECT id, cover_fallback FROM videos ORDER BY id LIMIT 1').get()
+    w.close()
+    must(restored > 100, '没能还原成内联占位图：' + restored)
+
+    srv = await startOn(OLD_DB, 3182)
+    must(srv.up, '老库上的服务没启动起来：' + srv.log().slice(0, 200))
+    const j = async p => { const r = await fetch(srv.base + p).then(x => x.json()); must(r.code === 0, `${p} → ${r.message}`); return r.data }
+    const v = await j(`/api/videos/${sample.id}`)
+    must(ART_REF.test(v.cover.fallback), '迁移后占位图 ' + v.cover.fallback?.slice(0, 60))
+    const svg = await fetch(srv.base + v.cover.fallback.slice(4, -1)).then(r => r.text())
+    must(inline(svg) === sample.cover_fallback, '挪走的 SVG 和原来的不一样')
+    for (const p of ['/api/category/ai/videos?limit=20', '/api/community/posts', '/api/library', '/api/live']) {
+      const text = await fetch(srv.base + p).then(r => r.text())
+      must(!text.includes('data:image/svg'), `${p} 还内联着 SVG`)
+    }
+    must(/已把 \d+ 张内联的占位图挪进 art_blobs/.test(srv.log()), '启动日志里应提示挪了占位图：' + srv.log().slice(0, 200))
+    await srv.stop()
+
+    const r = new DatabaseSync(OLD_DB, { readOnly: true })
+    const countsAfter = counts(r)
+    const idx = new Set(r.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(x => x.name))
+    const left = ART_COLS.reduce((n, [t, c]) => n + r.prepare(`SELECT COUNT(*) n FROM ${t} WHERE ${c} LIKE 'url(''data:%'`).get().n, 0)
+    r.close()
+    for (const [t, n] of Object.entries(countsBefore)) must(countsAfter[t] === n, `${t} 行数 ${n} → ${countsAfter[t]}`)
+    must(left === 0, `还有 ${left} 条内联占位图`)
+    const missing = NEW_INDEXES.filter(i => !idx.has(i))
+    must(!missing.length, '缺索引 ' + missing.join(','))
+
+    srv = await startOn(OLD_DB, 3182)
+    must(srv.up && ART_REF.test((await j(`/api/videos/${sample.id}`)).cover.fallback), '第二次启动')
+    must(!/已把 \d+ 张内联的占位图/.test(srv.log()), '第二次启动不应再挪')
+    return `挪走 ${restored} 张占位图、补建 ${NEW_INDEXES.length} 个索引；${Object.keys(countsBefore).length} 张表行数不变；SVG 原样`
+  } finally {
+    if (srv) await srv.stop()
+    try { rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
+}
+if (argBase) results.push({ name: '老库：内联占位图挪进 art_blobs、补建索引（行数不变）', ok: true, note: '跳过（--base 模式）' })
+else await check('老库：内联占位图挪进 art_blobs、补建索引（行数不变）', oldDbArtCheck)
+
+/*
+ * ---- 回滚（RP-06 / R-AR-05）：server/inline-art.mjs 把占位图换回内联写法，老版本（没有 /api/art）照常显示 ----
+ * 种子库（已经是短地址）复制一份：--check 只数不改；真跑以后那六列里没有短地址了，每一行和「按 art_blobs 内联」逐字节一样，
+ * 别的行不动；再跑一次什么都不改；用 moveInlineArt 挪回去和原来的短地址一模一样；用 stdin 喂进去（老镜像里的跑法）也能跑。
+ */
+async function inlineArtCheck() {
+  const dir = mkdtempSync(join(tmpdir(), 'reel-inline-art-'))
+  const DB = join(dir, 'roll.db')
+  const script = join(here, 'inline-art.mjs')
+  const runScript = (args = [], { stdin = false } = {}) => new Promise(resolve => {
+    const p = spawn(process.execPath, stdin ? ['--input-type=module', '-', ...args] : [script, ...args],
+      { env: { ...process.env, DB_PATH: DB }, stdio: ['pipe', 'pipe', 'pipe'] })
+    let out = ''
+    p.stdout.on('data', d => { out += d })
+    p.stderr.on('data', d => { out += d })
+    p.on('exit', code => resolve({ code, out }))
+    if (stdin) p.stdin.end(readFileSync(script))
+    else p.stdin.end()
+  })
+  const inline = svg => "url('data:image/svg+xml;utf8," + encodeURIComponent(svg).replace(/'/g, '%27') + "')"
+  const snap = () => {
+    const d = new DatabaseSync(DB, { readOnly: true })
+    const cols = Object.fromEntries(ART_COLS.map(([t, c]) => [`${t}.${c}`, d.prepare(`SELECT rowid rid, ${c} v FROM ${t} ORDER BY rowid`).all().map(r => [r.rid, r.v])]))
+    const blobs = new Map(d.prepare('SELECT hash, svg FROM art_blobs').all().map(r => [r.hash, r.svg]))
+    d.close()
+    return { cols, blobs }
+  }
+  try {
+    await new Promise(r => spawn(process.execPath, [join(here, 'db', 'seed.mjs')], { env: { ...process.env, DB_PATH: DB }, stdio: 'ignore' }).on('exit', r))
+    const before = snap()
+    const refs = Object.values(before.cols).flat().filter(([, v]) => ART_REF.test(v ?? '')).length
+    must(refs > 100, '种子库里的短地址太少：' + refs)
+
+    const dry = await runScript(['--check'])
+    must(dry.code === 0 && dry.out.includes(`一共 ${refs} 行是短地址`), '--check ' + dry.out)
+    must(json(snap().cols) === json(before.cols), '--check 不应改库')
+
+    const r1 = await runScript()
+    must(r1.code === 0 && r1.out.includes(`已把 ${refs} 行占位图换回内联写法`), '换回 ' + r1.out)
+    // 脚本里的列和 lib/art-store.mjs 的 ART_COLUMNS 一致（各列都报了数）
+    const { ART_COLUMNS } = await import('./lib/art-store.mjs')
+    must(json(ART_COLUMNS) === json(ART_COLS) && ART_COLS.every(([t, c]) => r1.out.includes(`${t}.${c}：换回`)), '列不一致：' + r1.out)
+    const after = snap()
+    let restored = 0
+    for (const [key, rows] of Object.entries(before.cols)) {
+      rows.forEach(([rid, v], i) => {
+        const [rid2, v2] = after.cols[key][i]
+        must(rid2 === rid, `${key} 行变了`)
+        if (ART_REF.test(v ?? '')) {
+          must(v2 === inline(before.blobs.get(v.slice(13, 29))), `${key} #${rid} 没有逐字节还原`)
+          restored++
+        } else must(v2 === v, `${key} #${rid} 不是短地址，不该动`)
+      })
+    }
+    must(restored === refs, `还原了 ${restored} / ${refs}`)
+
+    const r2 = await runScript()
+    must(r2.code === 0 && /没有要换的行/.test(r2.out) && json(snap().cols) === json(after.cols), '再跑一次 ' + r2.out)
+
+    // 挪回去（新版本再启动时做的事）和原来的短地址一模一样
+    const { moveInlineArt } = await import('./lib/art-store.mjs')
+    const w = new DatabaseSync(DB)
+    moveInlineArt(w, { compact: false })
+    w.close()
+    must(json(snap().cols) === json(before.cols), '挪回 art_blobs 后和原来的短地址不一样')
+
+    const r3 = await runScript([], { stdin: true })
+    must(r3.code === 0 && r3.out.includes(`已把 ${refs} 行占位图换回内联写法`) && json(snap().cols) === json(after.cols), 'stdin 跑法 ' + r3.out)
+    return `${refs} 行短地址逐字节换回内联写法（${ART_COLS.length} 列），重复执行不改；挪回去和原来一样；stdin 喂进去也能跑`
+  } finally {
+    try { rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
+}
+if (argBase) results.push({ name: '回滚：inline-art.mjs 把占位图换回内联写法', ok: true, note: '跳过（--base 模式）' })
+else await check('回滚：inline-art.mjs 把占位图换回内联写法', inlineArtCheck)
 
 /* ---- 错误处理：这些用例「必须失败」 ---- */
 async function tFail(name, method, path, expectHint, body) {

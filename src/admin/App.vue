@@ -7,6 +7,7 @@ import AIcon from './components/AIcon.vue'
 import ABtn from './components/ABtn.vue'
 import ToastHost from './components/ToastHost.vue'
 import ConfirmHost from './components/ConfirmHost.vue'
+import ReloginModal from './components/ReloginModal.vue'
 import { trapTab } from './components/layers'
 import { metaStatus, refreshMeta } from './composables/useMeta'
 
@@ -127,6 +128,7 @@ const metaFailed = computed(() => !bare.value && !!metaStatus.error.value && !me
     </div>
   </div>
 
+  <ReloginModal />
   <ToastHost />
   <ConfirmHost />
 </template>

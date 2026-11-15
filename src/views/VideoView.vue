@@ -12,21 +12,26 @@ import { useRoute, useRouter, onBeforeRouteUpdate, onBeforeRouteLeave } from 'vu
 import {
   getVideo, getRelatedVideos, getCreator, toggleVideoLike, toggleVideoDislike, toggleVideoFav, toggleFollow, addHistory, isDemoId
 } from '@/api'
+import { MSG } from '@/api/http'
 import { useAuthStore } from '@/stores/auth'
+import { useVideoStore } from '@/stores/videos'
 import { useBack } from '@/composables/useBack'
-import { toast } from '@/composables/useToast'
+import { toast, toastError } from '@/composables/useToast'
 import { share } from '@/composables/useShare'
+import { usePageTitle } from '@/composables/usePageTitle'
 import { formatCount, formatDate } from '@/utils/format'
 import { cssDuration, cssEasing, haptic, reducedMotion, scrollBehavior } from '@/utils/motion'
 import Icon from '@/components/Icon.vue'
 import Cover from '@/components/Cover.vue'
+import LoadState from '@/components/common/LoadState.vue'
 import VideoPlayer from '@/components/video/VideoPlayer.vue'
 import RelatedVideo from '@/components/video/RelatedVideo.vue'
 import ActBurst from '@/components/video/ActBurst.vue'
 import RollNum from '@/components/video/RollNum.vue'
 import { pickResume, setResume } from '@/components/video/resume'
 import { peekVideo, rememberVideo } from '@/components/video/preview'
-import { parseList, nextInList } from '@/components/video/playlist'
+import { parseList, nextInList, playable } from '@/components/video/playlist'
+import { useMouseFocusGuard } from '@/components/video/mouseFocus'
 import { spinPhase } from '@/components/video/spin'
 import { twoCol } from '@/components/video/deskLayout'
 import { claimHero, claimRelatedHero, armHeroBack } from '@/components/motion/hero'
@@ -35,9 +40,13 @@ import { isDesktop } from '@/composables/useDesktop'
 /*
  * 播放页：播放器 → 标题、数据、作者（关注）、简介、热门榜 / 所属专题、标签 → 相似推荐，底部赞 / 不喜欢 / 收藏 / 分享。
  * - 续播：本机和服务端记录里取更新的一份（resume.js）；播放中、切后台、离开时都记进度。
- * - 播完的「下一个」：地址里带了列表（专题「播放全部」，见 playlist.js）就是列表的下一条，否则是相似推荐的第一条；
+ * - 播完的「下一个」：地址里带了列表（专题「播放全部」，见 playlist.js）就是列表里往后第一条有片源的，否则是相似推荐里
+ *   第一条有片源的（hasSrc，服务端把有片源的排在前面）；都没有片源时结束画面只有「重播」，不倒计时、不会连到「暂无视频源」上。
  *   跳过去替换当前记录，连着看几个以后，返回键仍然回到进来之前的页面。
  * - 在本页登录 / 退出后重新取一次自己的赞 / 收藏 / 关注状态；没登录时点的操作，登录后补做。
+ *   赞 / 收藏的最新状态记到 stores/videos.js：短视频页（常驻）返回时据此更新同一条。
+ * - 加载失败用 LoadState：统一的说法，连不上 / 服务器出错时联网、过一会儿会自己重试；视频不存在（4xx）不重试。
+ * - 浏览器标题是视频标题（usePageTitle）。
  * - 本页里换视频（相似推荐、下一个、自动连播）：新视频的详情回来之前旧内容先留着（播放器立刻停、旧内容的操作不再生效），
  *   回来时一次换成新内容，不会先闪一下骨架屏、底部操作栏也不会消失又出现（见 load 的 keepMs）。
  *   接口慢：播放器那一块先换成新视频的封面（飞过来的缩略图落地时、或者 0.25 秒后），旧的信息区等满 0.25 秒才变暗，
@@ -51,13 +60,14 @@ defineOptions({ name: 'VideoView' })
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
+const videoStore = useVideoStore()
 const back = useBack()
 
 const video = shallowRef(null)
 const related = shallowRef([])
 /* 加载中先显示列表里带过来的封面和标题（preview.js） */
 const preview = shallowRef(peekVideo(route.params.id))
-/* 加载失败：message 给用户看；retry 只在可能是网络问题时显示（视频不存在重试也没用） */
+/* 加载失败：{ error, retry }，交给 LoadState 显示；retry 只在可能是网络问题时有（视频不存在重试也没用） */
 const failed = ref(null)
 const scroller = ref(null)
 const relatedEl = ref(null)
@@ -98,12 +108,14 @@ const topicTo = computed(() => {
   return v?.topicName && /^(\d+|demo:\d+)$/.test(String(v.topicId ?? '')) ? `/topic/${encodeURIComponent(v.topicId)}` : null
 })
 
-/** 播完后的下一个（给播放器显示）：{ video, query, hint } */
+usePageTitle(() => video.value?.title)
+
+/** 播完后的下一个（给播放器显示）：{ video, query, hint }；只挑有片源的（没有就是 null，结束画面只有「重播」） */
 const nextItem = computed(() => {
   const cur = video.value
   if (!cur) return null
   if (listNext.value) return { video: listNext.value.video, query: listNext.value.query, hint: '专题下一条' }
-  const r = related.value.find(v => String(v.id) !== String(cur.id))
+  const r = related.value.find(v => String(v.id) !== String(cur.id) && playable(v))
   return r ? { video: r, query: null, hint: '相似推荐' } : null
 })
 
@@ -220,6 +232,7 @@ async function load(id, query = route.query, { keepMs = 0 } = {}) {
     endSwitch(id)
     if (!same) startSec.value = pickResume(v)
     video.value = v
+    noteState(v)
     related.value = list
     showRelated(v.id, 0)
     const s = scrollEl()
@@ -233,13 +246,13 @@ async function load(id, query = route.query, { keepMs = 0 } = {}) {
     // 失败时不能留着旧视频（旧播放器、操作栏还在）：撤掉，显示失败
     endSwitch(id)
     actsIn.value = false
+    // 说法统一由 LoadState（errorText）给：断网、超时、服务器出错各有一句，4xx 用接口的说明（「视频不存在或已下架」）
     const missing = e?.status >= 400 && e?.status < 500 && e?.status !== 401
-    failed.value = missing
-      ? { message: '视频不存在或已下架', retry: false }
-      // 断网、超时的提示本身就是给用户看的；其他（服务器出错、返回格式不对）不把技术细节露出来
-      : { message: ['network', 'timeout'].includes(e?.code) ? e.message : '加载失败，请稍后重试', retry: true }
+    failed.value = { error: e || true, retry: !missing }
   }
 }
+/* 出错页的「重试」（LoadState 联网、过一会儿也会自己调它） */
+const reload = () => load(route.params.id)
 
 async function loadCreator(v) {
   const c = v.creator
@@ -272,8 +285,8 @@ async function shuffle() {
     related.value = list
     showRelated(id, b)
     return true
-  } catch {
-    toast('加载失败，请稍后重试')
+  } catch (e) {
+    toastError(e, MSG.load)
     return false
   }
 }
@@ -443,8 +456,10 @@ function syncState() {
   if (inflight.has(key)) return inflight.get(key)
   const p = Promise.allSettled([
     getVideo(v.id).then(d => {
-      if (String(video.value?.id) !== String(v.id)) return
+      // 赞 / 收藏正在和服务端同步（见 interact）：那边会以服务端为准收尾，这里不去盖掉界面上刚点的
+      if (String(video.value?.id) !== String(v.id) || reconciling === v.id) return
       video.value = { ...video.value, liked: !!d.liked, disliked: !!d.disliked, faved: !!d.faved, likeCount: d.likeCount, favCount: d.favCount }
+      noteState(video.value)
     }),
     loadCreator(v)
   ]).finally(() => inflight.delete(key))
@@ -455,21 +470,32 @@ watch(session, (now, before) => {
   if (before !== null) syncState() // 启动时的首次校验不算
 })
 
-/* ---------- 赞 / 不喜欢 / 收藏：乐观更新 → 一次请求（服务端保证赞和不喜欢互斥）→ 以返回为准 / 失败回滚 ---------- */
+/* ---------- 赞 / 不喜欢 / 收藏：界面立刻变 → 请求一个一个发，直到服务端和界面上想要的一致 → 失败回到服务端确认过的状态 ---------- */
 
+/*
+ * 点一下界面立刻变（乐观更新）。上一个请求还没回来又点了（网慢时连点两下想「点亮再取消」）：不再悄悄忽略，界面照样跟着变，
+ * 只是先不发；那个请求回来后，服务端的状态和界面上想要的不一样就再补发一次 { on: 想要的状态 }（接口是幂等的开 / 关），
+ * 直到一致——连点两下的结果就是原样，和用户想的一样。
+ * 赞和不喜欢互斥由服务端保证（点亮一个时另一个熄掉）；赞数以服务端返回的为准，收藏数接口不返回，按点的算。
+ * 失败：回到服务端最后确认的状态，提示一下（toastError：登录过期时登录框已经弹出来了，不再提示）。
+ */
 const TOGGLE = { like: toggleVideoLike, dislike: toggleVideoDislike, fav: toggleVideoFav }
 const FIELD = { like: 'liked', dislike: 'disliked', fav: 'faved' }
 const COUNT = { like: 'likeCount', fav: 'favCount' }
-const pending = new Set()
+/** 正在和服务端同步赞 / 收藏的视频 id（同一时间只有一个同步在跑） */
+let reconciling = null
 
 function patch(kind, on, into) {
   into[FIELD[kind]] = on
   if (COUNT[kind]) into[COUNT[kind]] = Math.max(0, (into[COUNT[kind]] ?? 0) + (on ? 1 : -1))
 }
+const pick = v => ({ liked: !!v.liked, disliked: !!v.disliked, faved: !!v.faved, likeCount: v.likeCount, favCount: v.favCount })
+/* 记到 stores/videos.js：短视频页回来时同一条跟着变 */
+const noteState = v => { if (v) videoStore.note(v.id, pick(v)) }
 
-async function interact(kind) {
+function interact(kind) {
   const v = video.value
-  if (!v || pending.size || switching.value) return
+  if (!v || switching.value) return
   // 未登录：弹登录框，登录后补做这一下
   if (!auth.requireLogin({ then: () => afterLogin(kind, v.id) })) return
 
@@ -480,28 +506,65 @@ async function interact(kind) {
   patch(kind, next, updated)
   if (other) patch(other, false, updated)
   video.value = updated
+  // 没在同步：点之前的样子就是服务端确认过的状态，从它开始；在同步的话，那边每回来一个请求都会再对一遍
+  if (reconciling == null) reconcile(v)
+}
 
-  pending.add(kind)
+/** 下一个要发的请求：界面上想要的（want）和服务端的（srv）哪里不一样；一样了返回 null。先点亮（顺带熄掉互斥的那个，少发一次） */
+function nextStep(want, srv) {
+  if (!!want.faved !== srv.faved) return { kind: 'fav', on: !!want.faved }
+  if (want.liked && !srv.liked) return { kind: 'like', on: true }
+  if (want.disliked && !srv.disliked) return { kind: 'dislike', on: true }
+  if (!want.liked && srv.liked) return { kind: 'like', on: false }
+  if (!want.disliked && srv.disliked) return { kind: 'dislike', on: false }
+  return null
+}
+
+/** base：开始同步时服务端确认过的状态（这一串点击之前界面上的样子） */
+async function reconcile(base) {
+  const id = base.id
+  const same = () => String(video.value?.id) === String(id)
+  const srv = { liked: !!base.liked, disliked: !!base.disliked, faved: !!base.faved, likeCount: base.likeCount ?? 0 }
+  let favSent = false
+  reconciling = id
   try {
-    const res = await TOGGLE[kind](v.id, { on: next })
-    // 服务端返回了最新状态就以它为准（多端操作、重复点击时不会和服务端对不上）
-    if (res && video.value?.id === v.id) {
-      const sync = {}
-      if (typeof res.liked === 'boolean') sync.liked = res.liked
-      if (typeof res.disliked === 'boolean') sync.disliked = res.disliked
-      if (typeof res.likeCount === 'number') sync.likeCount = res.likeCount
-      if (kind === 'fav' && typeof res.active === 'boolean') sync.faved = res.active
-      if (Object.keys(sync).length) video.value = { ...video.value, ...sync }
+    // 最多补发几次（每一下点击最多多一个请求；防止状态来回跳时停不下来）
+    for (let n = 0; n < 8 && same(); n++) {
+      const step = nextStep(video.value, srv)
+      if (!step) break
+      const res = await TOGGLE[step.kind](id, { on: step.on })
+      if (step.kind === 'fav') {
+        srv.faved = typeof res?.active === 'boolean' ? res.active : step.on
+        favSent = true
+      } else {
+        // 服务端返回了两者的最新状态就以它为准（演示数据可能只给 active）
+        const on = typeof res?.active === 'boolean' ? res.active : step.on
+        srv[FIELD[step.kind]] = on
+        if (on) srv[step.kind === 'like' ? 'disliked' : 'liked'] = false
+        if (typeof res?.liked === 'boolean') srv.liked = res.liked
+        if (typeof res?.disliked === 'boolean') srv.disliked = res.disliked
+        if (typeof res?.likeCount === 'number') srv.likeCount = res.likeCount
+      }
     }
-    if (kind === 'fav') toast(next ? '已收藏' : '已取消收藏')
+    // 换了视频：已经发出去的照样生效，界面上已经不是它了
+    if (!same()) return
+    // 一致了：以服务端为准收尾（赞数用服务端的）
+    video.value = { ...video.value, liked: srv.liked, disliked: srv.disliked, faved: srv.faved, likeCount: srv.likeCount }
+    noteState(video.value)
+    if (favSent) toast(srv.faved ? '已收藏' : '已取消收藏')
   } catch (e) {
-    if (video.value?.id === v.id) video.value = { ...video.value, ...pick(v) } // 回滚
-    toast(e?.code === 'demo' ? e.message : '操作失败，请稍后重试')
+    if (same()) {
+      // 回到服务端最后确认的状态（收藏数按差了几个往回算）
+      const cur = video.value
+      const favCount = Math.max(0, (cur.favCount ?? 0) + (srv.faved === !!cur.faved ? 0 : srv.faved ? 1 : -1))
+      video.value = { ...cur, liked: srv.liked, disliked: srv.disliked, faved: srv.faved, likeCount: srv.likeCount, favCount }
+      noteState(video.value)
+    }
+    toastError(e)
   } finally {
-    pending.delete(kind)
+    if (reconciling === id) reconciling = null
   }
 }
-const pick = v => ({ liked: v.liked, disliked: v.disliked, faved: v.faved, likeCount: v.likeCount, favCount: v.favCount })
 
 /* 登录后补做：先拿到自己真实的状态，已经是点亮的就不再点（否则会把原本的赞 / 收藏取消掉） */
 async function afterLogin(kind, id) {
@@ -519,7 +582,7 @@ async function afterLogin(kind, id) {
 
 /*
  * 按下立刻缩一下（CSS :active）；状态真的变了才弹：点亮是回弹 + 赞 / 收藏冒一圈小点并轻震，熄掉是轻轻一缩。
- * 没登录会先弹登录框、请求中连点不算，所以先记下「刚点过」，等状态真的变了再动；登录后补做的那一下不动。
+ * 没登录会先弹登录框，所以先记下「刚点过」，等状态真的变了再动（请求中连点也是每一下都变）；登录后补做的那一下不动。
  * fx[kind] = { kind: 'on' | 'off' | 'tap', key }：key 递增会重新挂上图标，连点时从头播。
  */
 const fx = reactive({})
@@ -579,7 +642,7 @@ async function onFollow() {
     toast(on ? '已关注' : '已取消关注')
   } catch (e) {
     if (creator.value?.id === c.id) following.value = !next
-    toast(e?.code === 'demo' ? e.message : '操作失败，请稍后重试')
+    toastError(e)
   } finally {
     followBusy = false
   }
@@ -672,10 +735,21 @@ const toggleDesc = () => animateHeight(descEl.value, () => { descOpen.value = !d
 
 /* iOS Safari 只有挂了 touchstart 监听的区域才会出现 :active 按压效果 */
 const noop = () => {}
+
+/* 桌面：鼠标点过的按钮（赞、收藏、全屏、换一批……）不留焦点，之后按空格还是播放 / 暂停（components/video/mouseFocus.js） */
+const focusGuard = useMouseFocusGuard(root)
 </script>
 
 <template>
-  <div ref="root" class="page video" :class="{ 'hero-hold': heroHold, switching, dim, v2: twoCol }" @touchstart.passive="noop" @wheel.passive="onPageWheel">
+  <div
+    ref="root"
+    class="page video"
+    :class="{ 'hero-hold': heroHold, switching, dim, v2: twoCol }"
+    @touchstart.passive="noop"
+    @wheel.passive="onPageWheel"
+    @pointerdown.capture="focusGuard.onPointerDown"
+    @focusin="focusGuard.onFocusIn"
+  >
     <VideoPlayer
       v-if="video && !playerPh"
       ref="playerRef"
@@ -700,10 +774,7 @@ const noop = () => {}
     </div>
 
     <div ref="scroller" class="scroll">
-      <div v-if="failed" class="empty">
-        {{ failed.message }}
-        <button v-if="failed.retry" type="button" class="retry" @click="load(route.params.id)">重试</button>
-      </div>
+      <LoadState v-if="failed" :error="failed.error" :retry="failed.retry ? reload : null" />
 
       <template v-else-if="video">
         <section class="info">
@@ -992,9 +1063,17 @@ const noop = () => {}
 .v-tags.open { align-items: flex-start; }
 .v-tags.open .lb { line-height: 24px; }
 .v-tags.open .list { flex-wrap: wrap; }
-.tag { flex: none; height: 24px; padding: 0 11px; border-radius: 12px; background: var(--chip); color: #b5b5b5; font-size: 12px; }
+/*
+ * 标签只有 24px 高：能点的范围上下撑到 44px（左右只撑到间距的一半）。收起时标签那一行 overflow: hidden，
+ * 给它上下各 10px 的内边距（再用负外边距收回，排版不变），撑出去的部分在裁切范围里；展开（折行）时上下只撑到行距的一半
+ */
+.v-tags .list { padding: 10px 0; margin: -10px 0; }
+.tag { position: relative; flex: none; height: 24px; padding: 0 11px; border-radius: 12px; background: var(--chip); color: #b5b5b5; font-size: 12px; }
+.tag::after { content: ''; position: absolute; inset: -10px -3px; }
+.v-tags.open .tag::after { inset: -3px; }
 .tag:active { background: #222; }
-.more { display: flex; flex: none; align-items: center; gap: 2px; height: 24px; color: var(--t1); font-size: 13px; font-weight: 500; }
+.more { position: relative; display: flex; flex: none; align-items: center; gap: 2px; height: 24px; color: var(--t1); font-size: 13px; font-weight: 500; }
+.more::after { content: ''; position: absolute; inset: -10px -6px; }
 .more svg { width: 13px; height: 13px; stroke-width: 2.6; transition: transform var(--dur-3) var(--ease-in-out); }
 .v-tags.open .more svg, .desc.open .more svg { transform: rotate(180deg); }
 
@@ -1132,7 +1211,7 @@ const noop = () => {}
   .pad-b { grid-column: main; grid-row: 9; height: 48px; }
   /* 加载失败 / 视频不存在：说明和「重试」放在黑色的播放器占位正中（和播放器里的提示一个位置），不在下面空着一大块 */
   .video .empty { position: relative; z-index: 1; grid-column: main; grid-row: 1; align-self: center; padding: 0 24px; color: rgba(255, 255, 255, .78); }
-  .video .empty .retry { height: 34px; margin-top: 16px; padding: 0 20px; border-radius: 17px; background: rgba(255, 255, 255, .14); color: #fff; font-size: 14px; }
+  .video .empty :deep(.retry) { height: 34px; margin-top: 16px; padding: 0 20px; border-radius: 17px; background: rgba(255, 255, 255, .14); color: #fff; font-size: 14px; }
 
   /* ---- 作者 ---- */
   .au { gap: 12px; }
@@ -1178,6 +1257,9 @@ const noop = () => {}
   .v-tags .list { gap: 8px; }
   .tag { height: 28px; padding: 0 12px; border-radius: 14px; font-size: 13px; }
   .more { height: 28px; font-size: 14px; }
+  /* 鼠标用不着撑大的点按范围（悬停的范围也跟着变大会显得怪） */
+  .v-tags .list { padding: 0; margin: 0; }
+  .tag::after, .more::after { display: none; }
 
   /* ---- 相似推荐：单栏时在信息下面排成两列；两栏时在右栏 ---- */
   .r-hd { height: 40px; margin-bottom: 8px; padding: 0; }
@@ -1276,7 +1358,7 @@ const noop = () => {}
   .topic:hover, .r-more:hover { background: #1c1c1c; }
   .r-foot:hover { background: #1c1c1c; color: var(--t1); }
   .ph-back:hover { background: rgba(255, 255, 255, .12); }
-  .video .empty .retry:hover { background: rgba(255, 255, 255, .22); color: #fff; }
+  .video .empty :deep(.retry:hover) { background: rgba(255, 255, 255, .22); color: #fff; }
   .more { transition: opacity var(--dur-2) var(--ease-out); }
   .more:hover { opacity: .72; }
 }

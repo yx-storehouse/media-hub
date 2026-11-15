@@ -25,6 +25,17 @@ module.exports = {
   // 网页版靠它认出自己在 App 里（显示「切换服务器」、不显示「下载安卓 App」）
   appendUserAgent: `ReelApp/${pkg.version}`,
   loggingBehavior: 'debug',
+  /*
+   * 允许双指放大网页（看不清字的时候）。Capacitor 默认关掉缩放：安卓不开 WebView 的缩放手势，iOS 拦掉双指手势。
+   * 网页版的 viewport 已经不再禁止缩放（index.html），双击仍然不缩放（双击是点赞）。
+   * 字号：安卓 WebView 默认按系统「字体大小」设置放大文字（WebSettings 的 textZoom 跟着系统字体比例），外壳不改它。
+   * iOS：WKWebView 会遵守网页给 iPhone 加的 maximum-scale=1（挡输入框聚焦时的自动放大），要像 Safari 一样
+   * 照样能双指放大，原生代码里还要设 WKWebViewConfiguration.ignoresViewportScaleLimits = true；跟随系统
+   * 「更大字体」（Dynamic Type）要按 UIContentSizeCategory 设 WKWebView.pageZoom。这两处都要改原生代码、重新打包，
+   * 见 mobile/README.md。
+   * 改了这里要重新 cap sync、重新打包 App 才生效。
+   */
+  zoomEnabled: true,
   server: {
     // 启动页的地址：安卓 https://localhost/，iOS capacitor://localhost/（网页版「切换服务器」按这个跳回来）
     androidScheme: 'https',

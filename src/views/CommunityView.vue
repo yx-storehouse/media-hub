@@ -2,17 +2,22 @@
 import { ref, reactive, shallowRef, computed, watch, nextTick, onActivated, onDeactivated, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { getCommunityTabs, getPosts, isDemoId, apiStatus } from '@/api'
-import { toast } from '@/composables/useToast'
+import { toastError } from '@/composables/useToast'
 import { useKeepScroll } from '@/composables/useKeepScroll'
 import { useTabRetap } from '@/composables/useTabRetap'
 import { useAuthStore } from '@/stores/auth'
 import { usePostStore } from '@/stores/posts'
-import { createHomeFeed } from '@/components/home/list'
+import { createHomeFeed, afterPaint, feedError } from '@/components/home/list'
 import { PAGE } from '@/components/creator/feed'
 import Icon from '@/components/Icon.vue'
 import ListFoot from '@/components/home/ListFoot.vue'
+import WinList, { POST_WIN } from '@/components/home/WinList'
+import PullHint from '@/components/home/PullHint.vue'
+import LoadState from '@/components/common/LoadState.vue'
 import PostCard from '@/components/community/PostCard.vue'
 import PostSkeleton from '@/components/community/PostSkeleton.vue'
+import { usePullRefresh, useSwipeTabs } from '@/components/home/gestures'
+import { focusDeskSearch } from '@/components/desk/deskSearch'
 import { useSlider, under, vRise, scrollBehavior } from '@/components/home/motion'
 import { useScrollEdge } from '@/components/motion/scrollEdge'
 import { isDesktop } from '@/composables/useDesktop'
@@ -22,7 +27,9 @@ import { isDesktop } from '@/composables/useDesktop'
  *   - 第一次切到某个标签：先显示骨架，不会把上一个标签的内容留在下面；切回已加载过的标签原样恢复，
  *     数据旧了在后台静默刷新（在顶部时整体换新，往下翻过了只原地更新已显示的帖子）。
  *   - 关注 / 收藏要登录：未登录显示登录提示；登录、退出后按新账号重新取，退出时停在这两个标签就回到「最新」。
- *   - 再点一次底部「社区」或当前标签：滚动过就回到顶部，已经在顶部就刷新。
+ *   - 再点一次底部「社区」或当前标签：滚动过就回到顶部，已经在顶部就刷新；触屏上在顶部往下拉也刷新，
+ *     在列表上横着划一下换到相邻的标签（components/home/gestures.js）。
+ *   - 帖子很多时只渲染视口附近的几张卡片（WinList）；每个标签离开时记下哪些渲染着、各多高，切回来直接按原样摆好。
  */
 defineOptions({ name: 'CommunityView' })
 
@@ -67,6 +74,9 @@ const loadedAt = []
 /* 整体换过列表（刷新、换账号）就 +1：卡片重建并淡入，之前发出的后台刷新作废 */
 const gen = reactive({})
 const genOf = i => gen[i] || 0
+/* 各标签离开时 WinList 的样子（渲染着哪一段、每张卡片多高）：切回来时直接按它摆，不先把几百张卡片全挂上 */
+const win = ref(null)
+const tabWin = {}
 
 /* 拿到一页：记下时间，清掉这些帖子在请求发出前记下的收藏 / 阅读数（列表里已经是接口的最新值） */
 async function fetchPage(i, page) {
@@ -81,6 +91,57 @@ function feedOf(i) {
   return feeds[i] || (feeds[i] = createHomeFeed(page => fetchPage(i, page)))
 }
 const feed = computed(() => feedOf(active.value))
+
+/*
+ * 第一页刚回来（骨架 → 列表，从顶部开始的新列表）：先只挂第一张卡片（这一帧还要排整个页面），之后每帧再挂几张，直到挂完。
+ * 一下挂一整页（20 张）帖子卡片，第一次排版、画占位图要卡好几百毫秒（4 倍降速；第一次切到社区时最明显），
+ * 一屏其实只看得见两三张。每帧挂几张看上一帧用了多久：慢的机器（一帧超过 50ms）一帧一张，快的一帧多挂几张、早点挂完。
+ * 还没挂完时列表比实际短：只在滚动位置是顶部的新列表上这么做，挂完之前不看「滚到底取下一页」，
+ * 底部的「没有更多了」也等挂完再出。换标签、页面收起时直接全挂上（收起时不排版，不卡）。
+ */
+const STAGGER_FIRST = 1
+const staggerN = ref(Infinity)
+let staggerTab = -1
+let staggerRaf = 0
+let staggerAt = 0
+const staggering = () => staggerN.value !== Infinity
+function stopStagger() {
+  cancelAnimationFrame(staggerRaf)
+  staggerRaf = 0
+  if (!staggering()) return
+  staggerN.value = Infinity
+  afterPaint(checkMore)
+}
+function staggerStep(t) {
+  const dt = staggerAt ? t - staggerAt : 0
+  staggerAt = t
+  staggerN.value += dt > 50 ? 1 : dt > 30 ? 2 : 4
+  if (staggerN.value >= feed.value.list.length) stopStagger()
+  else staggerRaf = requestAnimationFrame(staggerStep)
+}
+function startStagger() {
+  cancelAnimationFrame(staggerRaf)
+  staggerTab = active.value
+  staggerN.value = STAGGER_FIRST
+  // 隔一帧再挂下一批：第一帧（画出第一张的那一帧）的 requestAnimationFrame 在画之前就跑，那时再加就又挤进同一帧了。
+  // 这一帧的时间记下来，下一批按它到下一帧之间用了多久（就是第一张卡片那一帧有多重）决定挂几张
+  staggerRaf = requestAnimationFrame(t => {
+    staggerAt = t
+    staggerRaf = requestAnimationFrame(staggerStep)
+  })
+}
+/* 同一个标签的列表从空变成有（第一页回来）才算；换到一个已经有内容的标签不算（那边要恢复滚动位置） */
+watch(() => [feed.value, feed.value.list.length], ([f, n], [f0, old]) => {
+  if (f !== f0 || old || n <= STAGGER_FIRST || !shown || tabWin[active.value]) return
+  if ((scroller.value?.scrollTop || 0) > 0) return
+  startStagger()
+})
+watch(active, () => stopStagger(), { flush: 'sync' })
+/* 交给 WinList 的列表：分批挂的时候只给前 staggerN 张 */
+const posts = computed(() => {
+  const list = feed.value.list
+  return staggerN.value < list.length && staggerTab === active.value ? list.slice(0, staggerN.value) : list
+})
 
 /* 未登录时的关注 / 收藏：显示登录提示，不请求 */
 const needLogin = computed(() => isPersonal(active.value) && auth.ready && !auth.loggedIn)
@@ -97,11 +158,13 @@ function resetTab(i) {
   tops[i] = 0
   loadedAt[i] = 0
   gen[i] = genOf(i) + 1
+  tabWin[i] = null
 }
 
 /* 整体换成新的第一页（之后的页滚到底再取） */
 function replaceList(i, list, fade) {
   feedOf(i).restore({ list, total: Infinity, done: list.length < PAGE })
+  tabWin[i] = null
   if (fade) gen[i] = genOf(i) + 1
 }
 
@@ -131,11 +194,14 @@ function checkMore() {
   const el = scroller.value
   const f = feed.value
   if (!el || !el.isConnected || !el.clientHeight) return
-  if (f.total === null || f.loading || f.done || f.error) return
+  if (f.total === null || f.loading || f.done || f.error || staggering()) return
   if (el.scrollHeight - el.scrollTop - el.clientHeight < PRELOAD) f.more()
 }
-/* 一页回来后内容可能还不满一屏：接着检查 */
-watch(() => feed.value.loading, busy => { if (!busy) nextTick(checkMore) })
+/*
+ * 一页回来后内容可能还不满一屏：接着检查。等这一帧画出来再量（第一次挂上时当场读 scrollHeight
+ * 会在挂载的这一下里逼浏览器把整个列表排一遍版，第一屏晚出来）
+ */
+watch(() => feed.value.loading, busy => { if (!busy) afterPaint(checkMore) })
 
 /* ---------- 切换标签 ---------- */
 
@@ -143,6 +209,7 @@ function selectTab(i) {
   if (i === active.value) return toTopOrRefresh()
   const el = scroller.value
   if (el) tops[active.value] = el.scrollTop
+  tabWin[active.value] = win.value?.snapshot() || null
   instant.value = true
   nextTick(() => { instant.value = false })
   active.value = i
@@ -199,7 +266,7 @@ async function silentRefresh(i) {
   else mergeList(i, list)
 }
 
-/* 再点一次：刷新当前标签的第一页，换掉整个列表；正在刷新的标签顶部显示「正在刷新」 */
+/* 再点一次 / 下拉：刷新当前标签的第一页，换掉整个列表；正在刷新的标签顶部显示「正在刷新」 */
 const refreshingTab = ref(-1)
 async function refresh() {
   const i = active.value
@@ -212,12 +279,19 @@ async function refresh() {
   try {
     const list = await fetchPage(i, { limit: PAGE, offset: 0 })
     if (g === genOf(i)) replaceList(i, list, true)
-  } catch {
-    toast('刷新失败，请检查网络')
+  } catch (e) {
+    toastError(e)
   } finally {
     if (refreshingTab.value === i) refreshingTab.value = -1
   }
 }
+
+/* 触屏：列表在顶部时往下拉刷新；在列表上横着划一下换到相邻的标签（到头了不绕回去） */
+const pull = usePullRefresh(scroller, { scroller: () => scroller.value, refresh, enabled: () => !needLogin.value && feed.value.total !== null })
+useSwipeTabs(scroller, dir => {
+  const next = active.value + dir
+  if (next >= 0 && next < tabs.value.length) selectTab(next)
+}, { scroller: () => scroller.value })
 
 /* 滚动过就平滑回到顶部，已经在顶部就刷新 */
 function toTopOrRefresh() {
@@ -249,10 +323,13 @@ onActivated(() => {
   if (pendingTop !== null && scroller.value) scroller.value.scrollTop = pendingTop
   pendingTop = null
   if (retryDemo(active.value)) return
-  nextTick(checkMore)
+  afterPaint(checkMore)
   silentRefresh(active.value)
 })
-onDeactivated(() => { shown = false })
+onDeactivated(() => {
+  shown = false
+  stopStagger()
+})
 
 /* ---------- 登录 / 退出 ---------- */
 
@@ -288,15 +365,9 @@ function login() {
 
 /* ---------- 断网 / 接口恢复 ---------- */
 
-const online = ref(typeof navigator === 'undefined' || navigator.onLine !== false)
-/* 网络恢复：当前标签之前没取到的（整页失败或下一页失败）自动重取 */
-function onOnline() {
-  online.value = true
-  const f = feed.value
-  if (f.error && !f.loading) f.more()
-}
-const onOffline = () => { online.value = false }
 /*
+ * 整页失败、下一页失败的自动重试（联网时、服务器恢复时）由出错提示 LoadState / ListFoot 自己做（composables/useReconnect.js）。
+ *
  * 开发环境 auto 模式：接口恢复后，正在看的标签如果是演示数据就马上重取（别的标签切过去时再取）。
  * 最多 5 秒一次：某个接口一直连不上、别的接口又能通时，不会来回重取、来回提示。
  */
@@ -305,17 +376,19 @@ function onApi(e) {
   if (e.detail?.offline || !shown || Date.now() - apiRetryAt < 5000) return
   if (retryDemo(active.value)) apiRetryAt = Date.now()
 }
-window.addEventListener('online', onOnline)
-window.addEventListener('offline', onOffline)
 window.addEventListener('reel:api', onApi)
 onUnmounted(() => {
-  window.removeEventListener('online', onOnline)
-  window.removeEventListener('offline', onOffline)
   window.removeEventListener('reel:api', onApi)
+  cancelAnimationFrame(staggerRaf)
 })
 
-/* 搜索框：进搜索页并默认搜帖子 */
-const openSearch = () => router.push({ path: '/search', query: { type: 'post' } })
+/* 第一页没取到时的重试（LoadState 的重试按钮和自动重试用它） */
+const retryFirst = () => feed.value.more()
+
+/* 搜索框：搜帖子。桌面布局直接聚焦顶栏的搜索框（占位文字变成「搜索帖子」，回车搜帖子）；手机上进搜索页的「帖子」 */
+function openSearch() {
+  if (!focusDeskSearch({ scope: 'post' })) router.push({ path: '/search', query: { type: 'post' } })
+}
 
 getCommunityTabs().then(list => { if (Array.isArray(list) && list.length) tabs.value = list }).catch(() => {})
 ensure(active.value)
@@ -357,9 +430,8 @@ ensure(active.value)
       </button>
     </header>
 
-    <Transition name="cm-pill">
-      <div v-if="refreshingTab === active" class="cm-refresh" role="status">正在刷新…</div>
-    </Transition>
+    <!-- 下拉刷新 / 再点一次刷新：压在列表顶部的小胶囊，不推动列表 -->
+    <PullHint :pull="pull" :busy="refreshingTab === active" />
 
     <div ref="scroller" class="scroll" :aria-busy="feed.total === null && !feed.error && !needLogin" @scroll.passive="checkMore">
       <!-- 关注 / 收藏未登录、第一页失败、骨架、空列表、帖子列表：骨架原地淡出，其余的自己入场 -->
@@ -371,10 +443,7 @@ ensure(active.value)
             <button type="button" class="cm-btn m-press" @click="login">登录</button>
           </div>
 
-          <div v-else-if="feed.total === null && feed.error" key="error" class="empty">
-            {{ online ? '加载失败，请检查网络后重试' : '网络已断开，连上网后会自动重新加载' }}
-            <button type="button" class="retry" @click="feed.more()">重试</button>
-          </div>
+          <LoadState v-else-if="feed.total === null && feed.error" key="error" :error="feedError(feed)" :retry="retryFirst" />
 
           <PostSkeleton v-else-if="feed.total === null" key="skeleton" :count="3" />
 
@@ -392,8 +461,11 @@ ensure(active.value)
           </div>
 
           <div v-else key="list">
-            <PostCard v-for="post in feed.list" :key="`${active}:${genOf(active)}:${post.id}`" :post="post" />
-            <ListFoot :feed="feed" />
+            <!-- 帖子很多时只渲染视口附近的（WinList）；换标签、刷新后是新的一份（key），切回来按离开时的样子摆（restore） -->
+            <WinList :key="`${active}:${genOf(active)}`" ref="win" v-slot="{ item: post, revived }" :min="POST_WIN" :items="posts" :restore="tabWin[active]">
+              <PostCard :key="`${active}:${genOf(active)}:${post.id}`" :post="post" :rise="!revived" />
+            </WinList>
+            <ListFoot v-if="staggerN === Infinity" :feed="feed" />
           </div>
         </Transition>
       </div>
@@ -414,29 +486,12 @@ ensure(active.value)
 .cm-empty { padding: 84px 32px 40px; text-align: center; }
 .cm-empty .t { color: var(--t1); font-size: 16px; font-weight: 600; line-height: 23px; }
 .cm-empty .s { margin-top: 8px; color: var(--t2); font-size: 13px; line-height: 20px; }
-.cm-btn { height: 38px; margin-top: 20px; padding: 0 26px; border-radius: 19px; background: var(--accent); color: var(--on-accent); font-size: 14px; font-weight: 700; }
+.cm-btn { position: relative; height: 38px; margin-top: 20px; padding: 0 26px; border-radius: 19px; background: var(--accent); color: var(--on-accent); font-size: 14px; font-weight: 700; }
+/* 38px 高：能点的范围上下各撑 3px（44px），外观不变 */
+.cm-btn::after { content: ''; position: absolute; top: -3px; right: 0; bottom: -3px; left: 0; }
 
-/* 刷新中：压在列表顶部的小胶囊，不推动列表 */
-.cm-refresh {
-  position: absolute;
-  top: calc(var(--safe-t) + 62px);
-  left: 50%;
-  z-index: 5;
-  height: 28px;
-  padding: 0 14px;
-  border-radius: 14px;
-  background: rgba(30, 30, 30, .92);
-  box-shadow: 0 2px 10px rgba(0, 0, 0, .4);
-  color: var(--t1);
-  font-size: 13px;
-  line-height: 28px;
-  transform: translateX(-50%);
-  pointer-events: none;
-}
-/* 「正在刷新」胶囊：从上面轻轻落下，收起时淡出 */
-.cm-pill-enter-active { transition: opacity var(--dur-2) var(--ease-out), transform var(--dur-2) var(--ease-out); }
-.cm-pill-leave-active { pointer-events: none; transition: opacity var(--dur-2) var(--ease-in), transform var(--dur-2) var(--ease-in); }
-.cm-pill-enter-from, .cm-pill-leave-to { opacity: 0; transform: translate(-50%, -8px); }
+/* 下拉刷新 /「正在刷新」胶囊（PullHint）的位置：标签栏下面 */
+.community { --pull-top: calc(var(--safe-t) + 62px); }
 
 /*
  * 桌面布局（≥ 1024px）：信息流是居中的一栏（--cm-col，680px），标签行和它左右对齐：
@@ -482,7 +537,7 @@ ensure(active.value)
   .cm-btn { height: 40px; margin-top: 24px; padding: 0 28px; border-radius: 20px; transition: opacity var(--dur-2) var(--ease-out); }
 
   /* 「正在刷新」压在标签行下沿 */
-  .cm-refresh { top: 74px; }
+  .community { --pull-top: 74px; }
   .community .pad-b { height: 40px; }
 }
 @media (min-width: 1024px) and (hover: hover) {

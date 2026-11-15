@@ -27,6 +27,8 @@ const d = new Date()
 const file = join(dir, `reel-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.db`)
 
 const db = new DatabaseSync(DB_PATH, { readOnly: true })
+// 只读连接一般不会被挡；万一碰上接口服务正在做检查点 / 恢复 WAL，最多等 5 秒，不直接报「database is locked」
+db.exec('PRAGMA busy_timeout = 5000')
 db.exec(`VACUUM INTO '${file.replace(/'/g, "''")}'`)
 db.close()
 console.log(`已备份：${file}`)

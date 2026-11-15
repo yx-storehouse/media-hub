@@ -32,9 +32,13 @@ import RollNum from '@/components/video/RollNum.vue'
  *   images 可以在开着的时候换：先只有封面（其余是没有 src、带 pending 的占位，卡住满 0.25 秒中间出转圈），
  *   取回图集后换成整组，同一下标的图不重新加载；
  *   caption：底部一行安静的说明文字（图集标题），往下拖、放大看细节时让开。
+ *
+ * 大图还没加载完（网慢、手机原图好几 MB）：图片带了缩略图（thumb，网格里用的那张，一般已经在缓存里）就先把它放大垫在下面，
+ * 大图下载完再盖上去；等满 0.25 秒还没好，中间出转圈（和播放器的缓冲转圈一个样子、一个规矩，计时器管等多久）。
+ * 打不开：显示「图片加载失败」和「重试」（重新建一个 <img> 再取一次），不再是一整屏黑。
  */
 const props = defineProps({
-  /** Cover[]：{ src, fallback, width?, height?, pending? }（pending：还在取的占位，没有 src） */
+  /** Cover[]：{ src, fallback, width?, height?, thumb?, pending? }（thumb：小图，加载中垫在下面；pending：还在取的占位，没有 src） */
   images: { type: Array, required: true },
   /** 打开时显示第几张 */
   index: { type: Number, default: 0 },
@@ -72,6 +76,15 @@ const cur = ref(Math.min(Math.max(0, props.index), Math.max(0, count.value - 1))
 /* 只渲染当前和左右各一张：长图集不会一次加载所有大图 */
 const near = i => Math.abs(i - cur.value) <= 1
 const failed = ref({})
+/* 已经加载完的（下标 → true）：没加载完的垫缩略图、等久了转圈 */
+const loaded = shallowRef({})
+/* 每张重试了几次：<img> 按它重新建（加载失败后点「重试」） */
+const tries = shallowRef({})
+/** 第 i 张垫在下面的缩略图：有、并且不是大图本身 */
+const underOf = i => {
+  const m = props.images[i]
+  return m && m.thumb && m.src && m.thumb !== m.src ? m.thumb : null
+}
 /* 每张图的原始宽高比（加载完读出），算放大后能拖多远 */
 const ratios = shallowRef({})
 /* 调用方给的宽高比（图集的图带 width / height）：图片还没加载完时先用它；没给（0 / 没有）返回 0 */
@@ -95,6 +108,7 @@ watch(() => props.images.map(m => (m && m.src) || ''), (now, before) => {
   }
   failed.value = drop(failed.value)
   ratios.value = drop(ratios.value)
+  loaded.value = drop(loaded.value)
 })
 
 const root = ref(null)
@@ -143,7 +157,39 @@ watch(cur, () => {
 function onImgLoad(i, e) {
   const { naturalWidth: w, naturalHeight: h } = e.target
   if (w && h) ratios.value = { ...ratios.value, [i]: w / h }
+  loaded.value = { ...loaded.value, [i]: true }
 }
+function onImgError(i) {
+  failed.value = { ...failed.value, [i]: true }
+}
+/* 加载失败的这张再取一次：重新建一个 <img>（同一个元素换回同一个地址不会重新请求） */
+function retryImg(i) {
+  const next = { ...failed.value }
+  delete next[i]
+  failed.value = next
+  tries.value = { ...tries.value, [i]: (tries.value[i] || 0) + 1 }
+}
+
+/*
+ * 当前这张还在等（图集还没取回来的占位、大图还没下载完）：等满 SPIN_MS 才出转圈，很快就好的什么也看不到。
+ * 用计时器不用 CSS 的 animation-delay：「减少动态效果」时那个延迟会被清零，每次翻页都会闪一下转圈
+ */
+const SPIN_MS = 250
+const curImg = computed(() => props.images[cur.value] || null)
+const curFailed = computed(() => !!curImg.value?.src && !!failed.value[cur.value])
+const curWaiting = computed(() => {
+  const m = curImg.value
+  if (!m) return false
+  if (m.pending) return true
+  return !!m.src && !loaded.value[cur.value] && !failed.value[cur.value]
+})
+const spin = ref(false)
+let spinTimer = 0
+watch([curWaiting, cur], ([wait]) => {
+  clearTimeout(spinTimer)
+  spin.value = false
+  if (wait) spinTimer = setTimeout(() => { spin.value = true }, SPIN_MS)
+}, { immediate: true })
 
 /* 图片按 contain 摆进舞台后的显示尺寸（还没读到宽高 / 占位图按 4:3 算） */
 function fitted() {
@@ -677,6 +723,7 @@ onMounted(async () => {
   window.addEventListener('resize', measure)
 })
 onBeforeUnmount(() => {
+  clearTimeout(spinTimer)
   clearTimeout(tapTimer)
   clearTimeout(wheelIdle)
   clearTimeout(wheelPan)
@@ -728,8 +775,19 @@ onBeforeUnmount(() => {
             :aria-hidden="i !== cur"
           >
             <template v-if="near(i)">
+              <!-- 大图还没加载完：先把缩略图（一般已经在缓存里）放大垫在下面，大图下完盖上来以后撤掉 -->
+              <img
+                v-if="underOf(i) && !loaded[i] && !failed[i]"
+                class="iv-under"
+                :class="{ anim: !dragging }"
+                :src="underOf(i)"
+                alt=""
+                draggable="false"
+                :style="i === cur ? imgStyle : undefined"
+              >
               <img
                 v-if="img && img.src && !failed[i]"
+                :key="tries[i] || 0"
                 class="iv-img"
                 :class="{ anim: !dragging }"
                 :src="img.src"
@@ -737,20 +795,25 @@ onBeforeUnmount(() => {
                 draggable="false"
                 :style="i === cur ? imgStyle : undefined"
                 @load="onImgLoad(i, $event)"
-                @error="failed = { ...failed, [i]: true }"
+                @error="onImgError(i)"
               >
-              <!-- 没有图片地址 / 加载失败：显示占位图；还在取的（pending，图集没取回来的那几张）中间有转圈，等满 0.25 秒才出现 -->
+              <!-- 没有图片地址（图集还没取回来的那几张）/ 加载失败：显示占位图（失败时上面另有「图片加载失败 · 重试」） -->
               <div
                 v-else
                 class="iv-fb"
-                :class="{ anim: !dragging, 'iv-wait': img && img.pending }"
+                :class="{ anim: !dragging, dim: img && img.src }"
                 :style="[{ backgroundImage: img?.fallback || undefined }, i === cur ? imgStyle : {}]"
-              >
-                <span v-if="img && img.pending" class="iv-spin" aria-hidden="true" />
-              </div>
+              />
             </template>
           </div>
         </div>
+      </div>
+
+      <!-- 当前这张还在等（满 0.25 秒）：舞台正中转圈；打不开：说明 + 重试（不跟着手势走，不挡手势，只有按钮接点击） -->
+      <span v-if="spin && !dragY" class="iv-spin" aria-hidden="true" />
+      <div v-if="curFailed && !dragY" class="iv-err" role="alert">
+        <p>图片加载失败</p>
+        <button type="button" class="iv-retry" @click="retryImg(cur)">重试</button>
       </div>
 
       <!-- 桌面布局：左右两边的 ‹ ›（翻到头的那一边藏起来；往下拖的时候和顶栏一起让开） -->
@@ -787,6 +850,8 @@ onBeforeUnmount(() => {
 /* transform-origin 0 0：打开时从缩略图放大的关键帧按左上角算 */
 .iv-slide { position: relative; display: grid; flex: 0 0 100%; place-items: center; height: 100%; overflow: hidden; transform-origin: 0 0; }
 .iv-img {
+  /* 定位：盖在垫底的缩略图（.iv-under，绝对定位）上面 */
+  position: relative;
   width: 100%;
   height: 100%;
   object-fit: contain;
@@ -795,8 +860,23 @@ onBeforeUnmount(() => {
   pointer-events: none;
 }
 .iv-fb { width: 100%; aspect-ratio: 4 / 3; background-color: #161616; background-position: center; background-size: cover; }
-/* 还在取的占位：中间一个转圈（和播放器的缓冲转圈一个样子），等满 0.25 秒还没取回来才淡入；减少动态效果时不转 */
-.iv-wait { position: relative; }
+/* 加载失败的那张：占位图压暗，上面是「图片加载失败 · 重试」 */
+.iv-fb.dim { filter: brightness(.45); }
+/* 垫在下面的缩略图：和大图一样摆（contain 居中、铺满这一格），大图逐行出来时盖在它上面 */
+.iv-under {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  transform-origin: 50% 50%;
+  -webkit-user-drag: none;
+  pointer-events: none;
+}
+/*
+ * 当前这张还在等：舞台正中一个转圈（和播放器的缓冲转圈一个样子），等满 0.25 秒（脚本里的计时器）才挂上，挂上时淡入。
+ * 不接手指：左右滑、往下拖照常
+ */
 .iv-spin {
   position: absolute;
   left: 50%;
@@ -807,14 +887,47 @@ onBeforeUnmount(() => {
   border: 3px solid rgba(255, 255, 255, .25);
   border-top-color: #fff;
   border-radius: 50%;
-  animation: iv-rot .8s linear infinite, iv-spin-in var(--dur-2) var(--ease-out) .25s backwards;
+  filter: drop-shadow(0 0 3px rgba(0, 0, 0, .45));
+  pointer-events: none;
+  animation: iv-rot .8s linear infinite, iv-spin-in var(--dur-2) var(--ease-out);
 }
 @keyframes iv-rot { to { transform: rotate(360deg); } }
 @keyframes iv-spin-in { from { opacity: 0; } }
 @media (prefers-reduced-motion: reduce) {
-  .iv-spin { animation: iv-spin-in var(--dur-2) linear .25s backwards; }
+  .iv-spin { animation: none; }
 }
-.iv-img.anim, .iv-fb.anim { transition: transform var(--dur-3) var(--ease-out); }
+/* 打不开：舞台正中一行说明 + 「重试」；只有按钮接点击，其余照样能滑、能拖 */
+.iv-err {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  color: rgba(255, 255, 255, .86);
+  font-size: 14px;
+  line-height: 20px;
+  text-align: center;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, .6);
+  transform: translateY(-50%);
+  pointer-events: none;
+  animation: m-fade var(--dur-2) var(--ease-out);
+}
+.iv-retry {
+  position: relative;
+  height: 34px;
+  padding: 0 20px;
+  border-radius: 17px;
+  background: rgba(255, 255, 255, .16);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+  pointer-events: auto;
+}
+.iv-retry::after { content: ''; position: absolute; top: -5px; right: -4px; bottom: -5px; left: -4px; }
+.iv-img.anim, .iv-fb.anim, .iv-under.anim { transition: transform var(--dur-3) var(--ease-out); }
 
 .iv-top {
   position: absolute;
@@ -897,6 +1010,7 @@ onBeforeUnmount(() => {
    * 这里让图片铺满整张舞台再按比例 contain（中心点不变，放大 / 拖动的算法照旧）；占位图按 4:3 放进窗口里居中。
    */
   .iv-img { position: absolute; inset: 0; }
+  .iv-spin { width: 44px; height: 44px; margin: -22px 0 0 -22px; }
   .iv-fb { position: absolute; inset: 0; width: min(100%, 133.3333vh); height: auto; margin: auto; }
   .iv-top { height: 64px; padding: 0 16px; }
   .iv-close { margin-left: auto; }
@@ -932,6 +1046,8 @@ onBeforeUnmount(() => {
   .iv-stage.zoomed { cursor: grab; }
   .iv-stage.zoomed.held { cursor: grabbing; }
   .iv-arrow:hover, .iv-close:hover svg { background: rgba(48, 48, 48, .72); }
+  .iv-retry { transition: background-color var(--dur-2) var(--ease-out); }
+  .iv-retry:hover { background: rgba(255, 255, 255, .26); }
   .iv-close svg { transition: transform var(--dur-2) var(--ease-spring), background-color var(--dur-2) var(--ease-out); }
 }
 </style>

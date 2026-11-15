@@ -14,6 +14,7 @@ import { fmtNum } from '../../utils/format'
 /*
  * 把当前文件夹建成一个图集：文件夹里的图片按文件名排序（2.jpg 排在 10.jpg 前面），第一张是封面。
  * 宽高不用在这里读：站内 /media/ 的图片由服务端读文件头补上。建好后可以「打开图集」继续调整顺序、写简介。
+ * 原图已经不在的小图（isThumb，<原图文件名>.thumb.jpg）不算；有小图的图片预览用小图。
  */
 const MAX = 100
 const props = defineProps({
@@ -28,7 +29,7 @@ const emit = defineEmits(['update:open', 'created'])
 const { creatorOptions, albumStatusOptions } = useMeta()
 
 const images = computed(() => props.entries
-  .filter(e => e.type === 'image')
+  .filter(e => e.type === 'image' && !e.isThumb)
   .sort((a, b) => a.name.localeCompare(b.name, 'zh', { numeric: true })))
 const taken = computed(() => images.value.slice(0, MAX))
 /* 一排 8 格：超过 8 张时显示 7 张 + 「+N」 */
@@ -97,7 +98,7 @@ async function submit() {
       </p>
       <ol class="strip" aria-label="前几张图片">
         <li v-for="(f, i) in shown" :key="f.path" :title="f.name">
-          <Thumb :src="f.url" :ratio="1" width="100%" />
+          <Thumb :src="f.thumb || f.url" :ratio="1" width="100%" />
           <span v-if="!i" class="cv">封面</span>
         </li>
         <li v-if="taken.length > shown.length" class="more num">+{{ fmtNum(taken.length - shown.length) }}</li>

@@ -7,6 +7,7 @@ import Thumb from './Thumb.vue'
 import SearchBox from './SearchBox.vue'
 import SelectInput from './SelectInput.vue'
 import StatusBadge from './StatusBadge.vue'
+import { confirmDialog } from './confirm'
 import { listVideos } from '../api'
 import { fmtDuration } from '../utils/format'
 
@@ -14,6 +15,7 @@ import { fmtDuration } from '../utils/format'
  * 选视频：
  *   <VideoPicker v-model:open="show" multiple :exclude-ids="已有的id" @select="list => …" />
  * 单选：点一行就选中并关闭；多选：勾选（翻页、换关键词都保留），点「确定」。
+ * 多选已经勾了视频时：点遮罩不关；Esc / × / 取消 先确认「放弃已选的 N 个视频？」（翻了几页挑的，误触一下就没了）。
  * select 事件参数是数组：[{ id, publicId, title, coverUrl, status, durationSec, topicName }]
  */
 const props = defineProps({
@@ -84,10 +86,28 @@ function confirmPick() {
   emit('select', [...picked.value.values()])
   emit('update:open', false)
 }
+
+const modal = ref(null)
+const beforeClose = () => !picked.value.size || confirmDialog({
+  title: '放弃已选的视频？',
+  message: `已经选了 ${picked.value.size} 个视频，关闭后要重新选。`,
+  confirmText: '放弃',
+  cancelText: '继续选',
+  danger: true
+})
 </script>
 
 <template>
-  <AModal :open="open" :title="title || (multiple ? '选择视频（可多选）' : '选择视频')" :width="720" flush @update:open="v => emit('update:open', v)">
+  <AModal
+    ref="modal"
+    :open="open"
+    :title="title || (multiple ? '选择视频（可多选）' : '选择视频')"
+    :width="720"
+    flush
+    :persistent="picked.size > 0"
+    :before-close="beforeClose"
+    @update:open="v => emit('update:open', v)"
+  >
     <div class="vp">
       <div class="bar">
         <SearchBox v-model="q" placeholder="搜索标题 / 编号 / 标签 / ID" :auto-key="false" :width="260" />
@@ -145,7 +165,7 @@ function confirmPick() {
     </div>
     <template v-if="multiple" #footer>
       <span class="muted picked">已选 <b class="num">{{ picked.size }}</b> 个</span>
-      <ABtn @click="emit('update:open', false)">取消</ABtn>
+      <ABtn @click="modal?.close()">取消</ABtn>
       <ABtn variant="primary" :disabled="!picked.size" @click="confirmPick">确定添加</ABtn>
     </template>
   </AModal>

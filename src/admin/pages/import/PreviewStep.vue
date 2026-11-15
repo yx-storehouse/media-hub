@@ -11,8 +11,9 @@ import SummaryTiles from './SummaryTiles.vue'
 import { downloadErrorReport } from './report'
 
 /*
- * 第 3 步：预检。服务端把每批数据按真实导入跑一遍再回滚，所以同一批内「新增 / 更新 / 跳过 / 错误」和真导入一致；
- * 预检每批 5000 行、真导入每批 1000 行，跨批的文件内重复见下方提示。数据或选项没变时不重复预检。
+ * 第 3 步：预检。服务端把每批数据按真实导入跑一遍再回滚，所以同一批内「新增 / 更新 / 无变化 / 跳过 / 错误」和真导入一致；
+ * 预检和真导入都是每批 1000 行，跨批的文件内重复见下方提示。数据或选项没变时不重复预检。
+ * 「无变化」（更新已有时和库里一样）的行不写库，不算进「开始导入（N 行）」。
  */
 const emit = defineEmits(['back', 'start'])
 const store = useImportStore()
@@ -36,9 +37,10 @@ function back() {
 async function start() {
   if (!writable.value) return
   if (p.value.failed) {
+    const same = p.value.unchanged ? `另有 ${fmtNum(p.value.unchanged)} 行和库里一样，不会改动。\n` : ''
     const ok = await confirmDialog({
       title: '有错误的行',
-      message: `${fmtNum(p.value.failed)} 行有错误，将被跳过。\n其余 ${fmtNum(writable.value)} 行会写入数据库（新增 ${fmtNum(p.value.created)}，更新 ${fmtNum(p.value.updated)}）。\n确定开始导入？`,
+      message: `${fmtNum(p.value.failed)} 行有错误，将被跳过。\n${fmtNum(writable.value)} 行会写入数据库（新增 ${fmtNum(p.value.created)}，更新 ${fmtNum(p.value.updated)}）。\n${same}确定开始导入？`,
       confirmText: '开始导入'
     })
     if (!ok) return
@@ -124,7 +126,7 @@ const list = arr => (arr.length > 20 ? arr.slice(0, 20).join('、') + ` 等 ${ar
     <div class="foot">
       <ABtn icon="chevron-left" @click="back">返回修改</ABtn>
       <span class="grow" />
-      <span v-if="p.status === 'done' && !writable" class="warn-text small">没有可以新增或更新的行</span>
+      <span v-if="p.status === 'done' && !writable" class="warn-text small">没有可以新增或更新的行{{ p.unchanged ? `（${fmtNum(p.unchanged)} 行和库里一样）` : '' }}</span>
       <ABtn variant="primary" icon="import" :disabled="running || p.status !== 'done' || !writable" @click="start">
         开始导入{{ p.status === 'done' && writable ? `（${fmtNum(writable)} 行）` : '' }}
       </ABtn>

@@ -19,18 +19,27 @@ import PostCard from '@/components/community/PostCard.vue'
 import PostSkeleton from '@/components/community/PostSkeleton.vue'
 import SkeletonGrid from '@/components/home/SkeletonGrid.vue'
 import ListFoot from '@/components/home/ListFoot.vue'
+import WinList, { POST_WIN } from '@/components/home/WinList'
+import LoadState from '@/components/common/LoadState.vue'
 import ContentSwap from '@/components/home/ContentSwap'
 import { createPagedFeed, feedCount, useScrollMore } from '@/components/search/paging'
 import { useRecentSearches } from '@/components/search/recent'
+import { takeKeyboard } from '@/components/search/keyboard'
+import { feedError } from '@/components/home/list'
 import { useBack } from '@/composables/useBack'
-import { toast } from '@/composables/useToast'
+import { useReconnect } from '@/composables/useReconnect'
+import { toast, toastError } from '@/composables/useToast'
+import { MSG } from '@/api/http'
 import { getHotWords, getCreators, searchVideos, searchPosts } from '@/api'
 import { cameBack, useSlider, under, cover, vRise, fadeIn, pin, scrollBehavior } from '@/components/home/motion'
 import { isDesktop } from '@/composables/useDesktop'
 
 /*
  * 搜索页（#/search?q=关键词&type=post）。
- * 没有关键词时是建议页：近期搜索（搜过的关键词，可删除）、热门搜索、热门创作者。
+ * 没有关键词时是建议页：近期搜索（搜过的关键词，可删除）、热门搜索、热门创作者（「查看全部」就地展开成全部的创作者，最多 50 位）。
+ * 热门搜索 / 热门创作者没取到时那一块不显示（不留一个空标题），两块都没取到时显示「加载失败 · 重试」，
+ * 网络恢复、服务器恢复后自动再取。
+ * 手机上从首页的搜索框点进来时直接弹出键盘（components/search/keyboard.js）。
  * 有关键词时是结果页：「视频 / 帖子」两个标签同时搜，标签上是各自的结果数，滚到底自动加载下一页。
  * 关键词和标签记在地址栏，刷新 / 返回还是同样的结果；type 省略 = 视频。
  * 从建议页搜索多一条历史（返回回到建议页），结果页里再换词、切标签不多。
@@ -104,6 +113,9 @@ const creators = shallowRef([])
 let hotPage = 0
 let hotLoaded = false
 let creatorsLoaded = false
+/* 热门搜索 / 热门创作者最近一次没取到的错误（取到了清掉）：都没取到时建议页说一声并给「重试」 */
+const hotErr = shallowRef(null)
+const creatorsErr = shallowRef(null)
 
 async function loadHotWords() {
   const page = hotPage
@@ -113,18 +125,53 @@ async function loadHotWords() {
     if (page === hotPage) {
       hotWords.value = words
       hotGen.value++
+      hotErr.value = null
     }
-  } catch {
-    if (page === hotPage) hotLoaded = false   // 下次显示时再试
+  } catch (e) {
+    if (page === hotPage) {
+      hotLoaded = false   // 下次显示时 / 网络恢复时再试
+      if (!hotWords.value.length) hotErr.value = e
+      else toastError(e)   // 换一批没换成：留着这一批
+    }
   }
 }
 
+/* 热门创作者：先取 5 位；「查看全部」再取全部（最多 50 位），就地展开 */
+const CREATORS_FIRST = 5
+const CREATORS_ALL = 50
+const creatorsAll = ref(false)
+/* 全部也就这么几位（不比先取的多）：不再显示「查看全部」 */
+const creatorsDone = ref(false)
 async function loadCreators() {
   creatorsLoaded = true
   try {
-    creators.value = await getCreators()
-  } catch {
+    const list = await getCreators(creatorsAll.value ? CREATORS_ALL : CREATORS_FIRST)
+    creators.value = list
+    creatorsErr.value = null
+    if (list.length < CREATORS_FIRST) creatorsDone.value = true
+  } catch (e) {
     creatorsLoaded = false
+    if (!creators.value.length) creatorsErr.value = e
+  }
+}
+let creatorsBusy = false
+async function toggleCreators() {
+  if (creatorsAll.value) {
+    creatorsAll.value = false
+    creators.value = creators.value.slice(0, CREATORS_FIRST)
+    return
+  }
+  if (creatorsBusy) return
+  creatorsBusy = true
+  try {
+    const list = await getCreators(CREATORS_ALL)
+    if (list.length <= CREATORS_FIRST) creatorsDone.value = true
+    creators.value = list
+    creatorsAll.value = list.length > CREATORS_FIRST
+  } catch (e) {
+    toastError(e, MSG.load)
+  } finally {
+    creatorsBusy = false
   }
 }
 
@@ -133,6 +180,11 @@ function loadSuggestions() {
   if (!creatorsLoaded) loadCreators()
   recent.load()
 }
+
+/* 两块都没取到：建议页上说一声（LoadState）；只要有一块没取到，网络 / 服务器恢复后自动再取 */
+const sugError = computed(() => (!hotWords.value.length && !creators.value.length ? hotErr.value || creatorsErr.value : null))
+const retrySuggestions = () => Promise.all([!hotLoaded && loadHotWords(), !creatorsLoaded && loadCreators()])
+useReconnect(retrySuggestions, () => !query.value && (!!hotErr.value || !!creatorsErr.value))
 
 /* 没结果时推荐的词：去掉正在搜的这个 */
 const hotForEmpty = computed(() => hotWords.value.filter(w => w.word !== query.value))
@@ -167,6 +219,11 @@ function openCreator(c) {
 
 /* ---------- 结果页 ---------- */
 
+/* 结果列表（WinList）：返回恢复时存下它们渲染着哪一段、每张卡片多高；换了关键词 / 恢复时换一份新的（winGen） */
+const wins = {}
+let restoredWin = null
+const winGen = ref(0)
+
 function showResults(q, t = type.value) {
   query.value = currentQ = q
   type.value = t
@@ -174,6 +231,8 @@ function showResults(q, t = type.value) {
   feeds.video.reset()
   feeds.post.reset()
   savedTop.video = savedTop.post = 0
+  restoredWin = null
+  winGen.value++
   resultKey.value++
   if (scroller.value) scroller.value.scrollTop = 0
   // 两个标签一起搜：标签上马上有各自的结果数，切过去也不用再等
@@ -297,6 +356,7 @@ function saveSnapshot() {
     q: query.value,
     video: feeds.video.snapshot(),
     post: feeds.post.snapshot(),
+    win: { video: wins.video?.snapshot() || null, post: wins.post?.snapshot() || null },
     top: { ...savedTop }
   })
   while (snapshots.size > SNAPSHOT_MAX) snapshots.delete(snapshots.keys().next().value)
@@ -314,6 +374,8 @@ function restoreSnapshot(q, t) {
   // 离开时第一页还没回来的列表：重新取
   for (const f of Object.values(feeds)) if (f.total === null) f.more()
   Object.assign(savedTop, s.top)
+  restoredWin = s.win || null
+  winGen.value++
   return true
 }
 
@@ -330,11 +392,19 @@ if (!restored) applyQuery(startQ, typeOf(route.query.type))
 
 onMounted(() => {
   if (restored) {
+    takeKeyboard(null)
     scrollToSaved()
     return
   }
-  // 只在有鼠标的设备上自动聚焦：触屏上会弹出键盘挡住建议。桌面布局里这一页的搜索栏不显示（用顶栏的搜索框，按「/」聚焦）
-  if (!query.value && !isDesktop.value && window.matchMedia('(hover: hover)').matches) inputEl.value?.focus()
+  // 桌面布局里这一页的搜索栏不显示（用顶栏的搜索框，按「/」聚焦）
+  if (query.value || isDesktop.value) {
+    takeKeyboard(null)
+    return
+  }
+  // 手机上从首页的搜索框点进来：点按时已经把键盘叫出来了，焦点交给这里的输入框（键盘不收起）
+  if (takeKeyboard(inputEl.value)) return
+  // 别的入口：只在有鼠标的设备上自动聚焦（触屏上自己弹键盘会挡住近期搜索和热门搜索）
+  if (window.matchMedia('(hover: hover)').matches) inputEl.value?.focus()
 })
 onBeforeUnmount(saveSnapshot)
 
@@ -419,10 +489,7 @@ watch(() => route.fullPath, () => {
             换关键词时上一次的结果留着等新的，快的直接换成新结果，慢了（250ms）才淡入骨架
           -->
           <ContentSwap :pending="feeds[t.key].total === null && !feeds[t.key].error">
-            <div v-if="feeds[t.key].total === null && feeds[t.key].error" class="empty">
-              加载失败，请检查网络
-              <button type="button" class="retry" @click="feeds[t.key].more()">重试</button>
-            </div>
+            <LoadState v-if="feeds[t.key].total === null && feeds[t.key].error" :error="feedError(feeds[t.key])" :retry="() => feeds[t.key].more()" />
             <!-- 桌面布局一行 4–6 张：12 张骨架铺满一屏，不会只剩半行 -->
             <SkeletonGrid v-else-if="feeds[t.key].total === null && t.key === 'video'" :count="isDesktop ? 12 : 6" gap="g16" />
             <!-- 帖子骨架：和社区、创作者主页同一个（桌面布局里也是一张张圆角卡片） -->
@@ -449,12 +516,17 @@ watch(() => route.fullPath, () => {
             </div>
 
             <div v-else :key="`res${resultKey}`">
+              <!-- 结果很多时只渲染视口附近的（WinList）；返回时按离开前的样子摆回去 -->
               <div v-if="t.key === 'video'" v-rise class="grid g16 sr-grid">
-                <VideoCard v-for="v in feeds.video.list" :key="v.id" :video="v" />
+                <WinList :key="winGen" :ref="el => { wins.video = el }" v-slot="{ item: v }" :items="feeds.video.list" :restore="restoredWin?.video">
+                  <VideoCard :video="v" />
+                </WinList>
               </div>
               <!-- sr-posts：桌面布局里帖子是一栏（最宽 --desk-col），左边和标签对齐；手机上没有样式 -->
               <div v-else class="sr-posts">
-                <PostCard v-for="p in feeds.post.list" :key="p.id" :post="p" />
+                <WinList :key="winGen" :ref="el => { wins.post = el }" v-slot="{ item: p, revived }" :min="POST_WIN" :items="feeds.post.list" :restore="restoredWin?.post">
+                  <PostCard :post="p" :rise="!revived" />
+                </WinList>
               </div>
               <ListFoot :feed="feeds[t.key]" :class="{ 'sr-pfoot': t.key === 'post' }" />
             </div>
@@ -505,12 +577,26 @@ watch(() => route.fullPath, () => {
           </div>
         </section>
 
-        <section key="stars" class="sh-blk">
+        <!-- 热门搜索、热门创作者都没取到：说一声，给「重试」（网络 / 服务器恢复后也会自动再取） -->
+        <section v-if="sugError" key="sug-fail" class="sh-blk">
+          <LoadState :error="sugError" :retry="retrySuggestions" inline />
+        </section>
+
+        <!-- 热门创作者：没取到 / 没有就整块不显示（不留一个空标题）；「查看全部」就地展开成全部的创作者 -->
+        <section v-if="creators.length" key="stars" class="sh-blk">
           <div class="sh-st">
             <div class="t">热门创作者</div>
-            <button type="button" class="pill r" @click="toast('创作者列表即将上线')">查看全部<Icon name="chevR" /></button>
+            <button
+              v-if="!creatorsDone || creatorsAll"
+              type="button"
+              class="pill r"
+              :aria-expanded="creatorsAll"
+              @click="toggleCreators"
+            >
+              {{ creatorsAll ? '收起' : '查看全部' }}<Icon :name="creatorsAll ? 'chevU' : 'chevR'" />
+            </button>
           </div>
-          <div v-if="creators.length" v-rise="!calm" class="stars">
+          <div v-rise="!calm" class="stars" :class="{ all: creatorsAll }">
             <div v-for="c in creators" :key="c.id ?? c.name" v-press class="st" :aria-label="c.id != null ? `${c.name} 的主页` : undefined" @click="openCreator(c)">
               <Cover class="av" v-bind="c.avatar" />
               <div class="nm">{{ c.name }}</div>
@@ -560,7 +646,7 @@ watch(() => route.fullPath, () => {
 .sh-field:focus-within > svg { color: var(--t1); }
 /* 输入的字用主文字色，和灰色的占位文字分得开；16px 让 iOS 聚焦时不自动放大页面 */
 .sh-field input { flex: 1; min-width: 0; height: 100%; border: 0; background: none; color: var(--t1); font-size: 16px; caret-color: #fff; }
-.sh-field input::placeholder { color: #6e6e6e; }
+.sh-field input::placeholder { color: var(--t-ph); }
 /* the custom .clr button replaces the browser's own clear button of type="search" */
 .sh-field input::-webkit-search-cancel-button { display: none; }
 .sh-field .clr { position: relative; display: grid; flex: none; place-items: center; width: 16px; height: 16px; border-radius: 50%; background: #3a3a3a; color: var(--bg); }
@@ -626,6 +712,10 @@ watch(() => route.fullPath, () => {
 /* transparent (not the Cover placeholder grey) so the round edge anti-aliases against the page */
 .stars .av { width: 55px; height: 55px; margin: 0 auto; border-radius: 50%; background-color: transparent; box-shadow: 0 0 0 1px rgba(255, 255, 255, .18); filter: var(--media); }
 .stars .nm { margin-top: 6px; color: #fff; font-size: 12px; line-height: 17px; }
+/* 「查看全部」展开后：一行 5 位，多的折到下一行；名字太长截成省略号 */
+.stars.all { flex-wrap: wrap; row-gap: 14px; }
+.stars.all .st { flex: 0 0 20%; min-width: 0; }
+.stars.all .nm { overflow: hidden; padding: 0 2px; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ---- results ---- */
 .sr-tabs { position: relative; display: flex; flex: none; gap: 28px; height: 42px; padding: 0 18px; border-bottom: 1px solid var(--line); }

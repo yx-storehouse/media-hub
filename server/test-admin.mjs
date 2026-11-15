@@ -133,6 +133,16 @@ const dbq = (sql, ...args) => {
   roDb ??= new DatabaseSync(TEST_DB, { readOnly: true })
   return roDb.prepare(sql).all(...args)
 }
+/* 直接改测试库（另开一个连接，改完就关），用来摆好接口做不到的前提 */
+const dbw = (sql, ...args) => {
+  const w = new DatabaseSync(TEST_DB)
+  try {
+    w.exec('PRAGMA busy_timeout = 5000')
+    return w.prepare(sql).run(...args)
+  } finally {
+    w.close()
+  }
+}
 
 /* 上传：PUT 原始字节 */
 const upload = (path, bytes, { overwrite, token = adminToken } = {}) =>
@@ -194,14 +204,20 @@ function rawHttp(port, lines, body = '') {
   return { socket, closed }
 }
 
-/** 第二个服务实例：同一个库、同一个素材目录，但几个超时调得很短，用来测「卡住的连接会被断开」 */
-async function withShortTimeouts(fn) {
+/**
+ * 第二个服务实例：同一个库、同一个素材目录，但几个超时调得很短，用来测「卡住的连接会被断开」；
+ * 导出上限也调成 5 行，用来测「导出被截断」。extraEnv 可以再加 / 覆盖环境变量。
+ */
+async function withShortTimeouts(fn, extraEnv = {}) {
   const port = PORT + 1
   if (await fetch(`http://127.0.0.1:${port}/api/health`, { signal: AbortSignal.timeout(800) }).then(() => true, () => false)) {
     throw new Error(`端口 ${port} 已被占用`)
   }
   const p = spawn(process.execPath, [join(here, 'index.mjs')], {
-    env: { ...process.env, PORT: String(port), DB_PATH: TEST_DB, MEDIA_DIR, MAX_UPLOAD_MB: String(MAX_UPLOAD_MB), BODY_TIMEOUT_SEC: '1.5', IDLE_TIMEOUT_SEC: '3', UPLOAD_IDLE_SEC: '1.5' },
+    env: {
+      ...process.env, PORT: String(port), DB_PATH: TEST_DB, MEDIA_DIR, MAX_UPLOAD_MB: String(MAX_UPLOAD_MB), BODY_TIMEOUT_SEC: '1.5', IDLE_TIMEOUT_SEC: '3', UPLOAD_IDLE_SEC: '1.5',
+      ADMIN_EXPORT_MAX: '5', ...extraEnv
+    },
     stdio: 'ignore'
   })
   try {
@@ -389,6 +405,46 @@ await t('视频列表：筛选 / 排序 / 分页上限', async () => {
   return '全部正确'
 })
 
+await t('后台-04：列表先查 id 再取整行，各种排序 / 筛选 / 翻页的结果和直接按 SQL 排出来的完全一致', async () => {
+  const cols = { publishedAt: 'published_at', createdAt: 'created_at', playCount: 'play_count', likeCount: 'like_count', favCount: 'fav_count', durationSec: 'duration_sec', title: 'title', id: 'id' }
+  // 种子数据的播放 / 点赞 / 时长有大量重复值：同值按 id 同方向排，翻页不重不漏
+  let n = 0
+  for (const [key, col] of Object.entries(cols)) {
+    for (const order of ['asc', 'desc']) {
+      for (const page of [1, 7, 23]) {
+        const d = await get(`/api/admin/videos?sort=${key}&order=${order}&page=${page}&pageSize=20`)
+        const want = dbq(`SELECT id FROM videos ORDER BY ${col} ${order}, id ${order} LIMIT 20 OFFSET ?`, (page - 1) * 20).map(r => r.id)
+        must(d.total === 458 && d.list.map(v => v.id).join() === want.join(), `${key} ${order} 第 ${page} 页：${d.list.map(v => v.id).slice(0, 5)} … ≠ ${want.slice(0, 5)} …`)
+        n++
+      }
+    }
+  }
+  // 关键词：标题 / 编号 / 标签任一包含，纯数字再按 ID；和其他筛选组合；超出页码返回空列表、总数照旧
+  const like = s => '%' + s + '%'
+  for (const [q, extra, where, args] of [
+    ['治愈', '', 'title LIKE ? OR public_id LIKE ? OR tags LIKE ?', [like('治愈'), like('治愈'), like('治愈')]],
+    ['12', '&status=1', '(title LIKE ? OR public_id LIKE ? OR tags LIKE ? OR id = 12) AND status = 1', [like('12'), like('12'), like('12')]],
+    ['VID-10', '&sort=playCount&order=asc', 'title LIKE ? OR public_id LIKE ? OR tags LIKE ?', [like('VID-10'), like('VID-10'), like('VID-10')]],
+    ['旅', '&topicId=2', '(title LIKE ? OR public_id LIKE ? OR tags LIKE ?) AND topic_id = 2', [like('旅'), like('旅'), like('旅')]]
+  ]) {
+    const ob = extra.includes('playCount') ? 'play_count ASC, id ASC' : 'published_at DESC, id DESC'
+    const want = dbq(`SELECT id FROM videos WHERE ${where} ORDER BY ${ob}`, ...args).map(r => r.id)
+    const d = await get(`/api/admin/videos?q=${encodeURIComponent(q)}${extra}&pageSize=200`)
+    must(d.total === want.length && d.list.map(v => v.id).join() === want.slice(0, 200).join(), `q=${q}${extra}：${d.total} 条 ≠ ${want.length} 条`)
+    n++
+  }
+  const far = await get('/api/admin/videos?page=999&pageSize=20')
+  must(far.total === 458 && far.list.length === 0, '超出页码 ' + JSON.stringify({ total: far.total, n: far.list.length }))
+  const miss = await get('/api/admin/videos?missing=playback&sort=title&order=asc&page=3&pageSize=10')
+  must(miss.list.map(v => v.id).join() === dbq("SELECT id FROM videos WHERE playback_url IS NULL OR playback_url = '' ORDER BY title, id LIMIT 10 OFFSET 20").map(r => r.id).join(), '缺播放地址 + 标题排序 + 翻页')
+  const dur = await get('/api/admin/videos?missing=duration&pageSize=50')
+  const durWant = dbq('SELECT id FROM videos WHERE duration_sec = 0 ORDER BY published_at DESC, id DESC').map(r => r.id)
+  must(dur.total === durWant.length && dur.list.map(v => v.id).join() === durWant.join(), `缺时长 ${dur.total} ≠ ${durWant.length}`)
+  const nothing = await get('/api/admin/videos?q=' + encodeURIComponent('没有这个词zz'))
+  must(nothing.total === 0 && nothing.list.length === 0, '没有命中')
+  return `${n + 4} 组都一致`
+})
+
 let V1 = null
 await t('视频新建：最少字段 + 自动编号 + 占位图', async () => {
   V1 = await post('/api/admin/videos', { title: '最简视频' })
@@ -396,7 +452,8 @@ await t('视频新建：最少字段 + 自动编号 + 占位图', async () => {
   must(V1.status === 1 && V1.quality === 'hd' && V1.durationSec === 0 && V1.tags.length === 0 && V1.isShort === false, JSON.stringify(V1))
   must(Math.abs(V1.publishedAt - Date.now() / 1000) < 60, '发布时间默认当前')
   const fb = dbq('SELECT cover_fallback FROM videos WHERE id = ?', V1.id)[0].cover_fallback
-  must(typeof fb === 'string' && fb.startsWith("url('data:image/svg+xml"), '没有生成占位封面')
+  // 占位图是 CSS background-image 的值：以前是内联 SVG（url('data:image/svg+xml…')），现在是纯 CSS 渐变
+  must(typeof fb === 'string' && /^(url\(|(linear|radial)-gradient\()/.test(fb), '没有生成占位封面：' + String(fb).slice(0, 60))
   must(fb.length <= 1500, `后台新建的占位封面应 ≤ 1.5 KB，实际 ${fb.length}`)
   return `#${V1.id} ${V1.publicId}，占位图 ${fb.length} 字节`
 })
@@ -556,6 +613,30 @@ await t('视频批量：参数错误 + 删除', async () => {
   must(d.affected === 1, 'affected ' + d.affected)
   must((await get(`/api/admin/topics/${TB.id}`)).videoCount === 3, '删除后计数')
   return 'ok'
+})
+
+await t('后台-01：批量删除分块执行——几百条一次删干净，观看历史 / 点赞 / 收藏 / 短视频级联删除，帖子关联置空，专题视频数重算', async () => {
+  const rows = Array.from({ length: 300 }, (_, i) => ({ title: `批量删除 ${i}`, publicId: `BDEL-${i}`, topic: String(TB.id), isShort: i % 60 === 0 ? '是' : '否' }))
+  const imp = await importRows('videos', rows, { autoCreate: false })
+  must(imp.created === 300, JSON.stringify(imp.results.filter(r => r.status !== 'created').slice(0, 3)))
+  const ids = imp.results.map(r => r.id)
+  must((await get(`/api/admin/topics/${TB.id}`)).videoCount === 303, '导入后专题视频数')
+  for (const id of ids.slice(0, 4)) {
+    okData(await req('POST', '/api/me/history', { body: { videoId: id, progressSec: 3 }, token: userToken }))
+    okData(await req('POST', `/api/videos/${id}/like`, { body: { on: true }, token: userToken }))
+    okData(await req('POST', `/api/videos/${id}/fav`, { body: { on: true }, token: userToken }))
+  }
+  const linked = await post('/api/admin/posts', { creatorId: 1, text: '关联了待删视频的帖子', videoId: ids[0] })
+  const left = tbl => dbq(`SELECT COUNT(*) n FROM ${tbl} WHERE video_id IN (SELECT value FROM json_each(?))`, JSON.stringify(ids))[0].n
+  must(left('watch_history') === 4 && left('video_likes') === 4 && left('video_favs') === 4 && left('short_clips') === 5, '准备数据')
+  const d = await post('/api/admin/videos/batch', { ids: [...ids, 99999998], action: 'delete' })
+  must(d.affected === 300, 'affected ' + d.affected)
+  must(dbq('SELECT COUNT(*) n FROM videos WHERE id IN (SELECT value FROM json_each(?))', JSON.stringify(ids))[0].n === 0, '视频应全部删掉')
+  for (const tbl of ['watch_history', 'video_likes', 'video_favs', 'short_clips']) must(left(tbl) === 0, tbl + ' 应级联删除')
+  must((await get(`/api/admin/posts/${linked.id}`)).videoId === null, '帖子的关联视频应置空')
+  must((await get(`/api/admin/topics/${TB.id}`)).videoCount === 3, '删除后专题视频数应重算')
+  await del(`/api/admin/posts/${linked.id}`)
+  return `删除 ${d.affected} 条`
 })
 
 /* ================================================================ */
@@ -1307,7 +1388,9 @@ await t('导入：重复数据 skip / error / update', async () => {
   const err = await importRows('videos', rows, { onDuplicate: 'error' })
   must(err.failed === 2 && err.results[0].field === 'publicId' && err.results[1].field === 'playbackUrl', JSON.stringify(err.results))
   const upd = await importRows('videos', [{ publicId: 'IMP-001', title: '更新后的标题', description: '' }], { onDuplicate: 'update' })
-  must(upd.updated === 1, JSON.stringify(upd))
+  must(upd.updated === 1 && upd.unchanged === 0, JSON.stringify(upd))
+  // 后台-05：写明改了哪些字段（description 本来就是空的，不算）
+  must(upd.results[0].message === `按编号匹配到 ID ${IMP.a.id}，已更新：标题` && upd.results[0].changed.join() === 'title', JSON.stringify(upd.results))
   const a = await get(`/api/admin/videos/${IMP.a.id}`)
   must(a.title === '更新后的标题' && a.durationSec === 3723 && a.topicName === '自动专题A' && a.status === 2, '空单元格应保持不变 ' + JSON.stringify(a))
   return 'ok'
@@ -1351,6 +1434,39 @@ await t('导入：坏行不影响其他行 + 显式 ID 不存在', async () => {
   return '2 成功 / 4 失败 / 1 空行'
 })
 
+/*
+ * R-AR-04 / RP-03：导入时别的进程（容器里跑 create-admin.mjs、开着事务的 sqlite3 命令行）拿着写锁、不到 2 秒（BUSY_TIMEOUT_MS）就放开。
+ * 以前导入开的是普通 BEGIN，先读后写，马上报「忙」：几十毫秒就回 503（或者每一行都记成「服务器内部错误」）。
+ * 现在应该等锁放开再照常写入；等的时候读请求照常响应（不在事件循环上干等）。预检也一样。
+ */
+await t('导入时别的进程拿着写锁：等锁放开后照常写入（预检也一样），等的时候读请求照常响应', async () => {
+  const hold = async (ms, fn) => {
+    const w = new DatabaseSync(TEST_DB)
+    w.exec('BEGIN IMMEDIATE')
+    w.prepare('UPDATE search_keywords SET weight = weight WHERE id = (SELECT MIN(id) FROM search_keywords)').run()
+    const t0 = performance.now()
+    const released = new Promise(r => setTimeout(() => { w.exec('COMMIT'); w.close(); r(performance.now() - t0) }, ms))
+    const job = fn().then(out => ({ out, ms: performance.now() - t0 }))
+    const reads = []
+    while (performance.now() - t0 < ms - 100) {
+      const s = performance.now()
+      must((await req('GET', '/api/admin/videos?pageSize=1')).status === 200, '锁着时读请求失败')
+      reads.push(performance.now() - s)
+    }
+    const [{ out, ms: doneMs }, relMs] = await Promise.all([job, released])
+    return { out, doneMs, relMs, reads: reads.length, slowest: Math.max(...reads) }
+  }
+  const before = await vCount()
+  const dry = await hold(500, () => importRows('videos', [{ title: '锁测试预检' }], {}, true))
+  must(dry.out.created === 1 && dry.out.failed === 0, '预检 ' + JSON.stringify(dry.out.results))
+  const real = await hold(600, () => importRows('videos', [{ title: '锁测试一' }, { title: '锁测试二' }]))
+  must(real.out.created === 2 && real.out.failed === 0, JSON.stringify(real.out.results))
+  must(real.doneMs >= real.relMs - 5, `导入应等到锁放开（${Math.round(real.relMs)} ms）才写，实际 ${Math.round(real.doneMs)} ms 就返回了`)
+  must(await vCount() === before + 2, '应写入 2 条（预检不落库）')
+  for (const x of [dry, real]) must(x.reads >= 3 && x.slowest < 250, `锁着时读了 ${x.reads} 次，最慢 ${Math.round(x.slowest)} ms`)
+  return `锁 ${Math.round(real.relMs)} ms：导入 ${Math.round(real.doneMs)} ms 时写入 2 条；等的时候读了 ${real.reads} 次，最慢 ${Math.round(real.slowest)} ms`
+})
+
 await t('导入：参数校验', async () => {
   mustFail(await req('POST', '/api/admin/videos/import', { body: { rows: 'x' } }), 'rows')
   mustFail(await req('POST', '/api/admin/videos/import', { body: { rows: [], options: { onDuplicate: 'merge' } } }), 'onDuplicate')
@@ -1391,7 +1507,7 @@ await t('导入 / 导出：帖子正文（多行、留空不改、超长报错�
   must(ex.rows.length === 1 && ex.rows[0].text === '导入正文帖' && ex.rows[0].content === '第一段\n\n第二段', JSON.stringify(ex.rows[0]))
   // 原样导回去：不改
   const same = await importRows('posts', ex.rows, { onDuplicate: 'update' })
-  must(same.updated === 1 && (await get(`/api/admin/posts/${id}`)).content === '第一段\n\n第二段', '原样导回不应改')
+  must(same.unchanged === 1 && same.updated === 0 && (await get(`/api/admin/posts/${id}`)).content === '第一段\n\n第二段', '原样导回不应改 ' + JSON.stringify(same.results))
   // 正文列留空 = 不改（只改了标题）
   await importRows('posts', [{ id: String(id), text: '导入正文帖（改标题）', content: '  ' }], { onDuplicate: 'update' })
   let p = await get(`/api/admin/posts/${id}`)
@@ -1454,11 +1570,12 @@ await t('导入：图集（创作者 id / 名称 / @账号，图片用 | 或换�
   must(st(dry) === 'c c c e:images e:images e:creator c s e:status e:id', '预检 ' + st(dry))
   must(dry.created === 4 && dry.failed === 5 && dry.skipped === 1 && aCount() === before && dry.autoCreated.creators.join() === '图集新作者', JSON.stringify({ ...dry, results: undefined }))
   must(dry.results.map(r => r.row).join() === '2,3,4,5,6,7,8,9,10,11', '行号应用 _row')
-  must(dry.results[7].message === `已存在（按第一张图片匹配到 ID ${dry.results[1].id}），已跳过`, dry.results[7].message)
+  must(dry.results[7].message === `已存在（按第一张图片匹配到 ID ${dry.results[1].id}），将跳过`, '预检用「将跳过」：' + dry.results[7].message)
   must(dry.results[9].message === 'ID 不存在' && /至少要有一张图片/.test(dry.results[3].message), JSON.stringify([dry.results[3], dry.results[9]]))
   must(!dbq('SELECT 1 x FROM creators WHERE name = ?', '图集新作者').length, '预检不应留下自动创建的创作者')
   const d = await importRows('albums', rows)
   must(st(d) === st(dry) && aCount() === before + 4, '真导入 ' + st(d))
+  must(d.results[7].message === `已存在（按第一张图片匹配到 ID ${d.results[1].id}），已跳过`, '真导入用「已跳过」：' + d.results[7].message)
   const [a, b, c] = await Promise.all([0, 1, 2].map(i => get(`/api/admin/albums/${d.results[i].id}`)))
   must(a.creatorHandle === 'trip' && a.title === '导入图集一' && a.description === '第一行\n第二行' && JSON.stringify(a.tags) === '["街拍","雨天"]' &&
     a.status === 1 && a.publishedAt === localTs(2026, 2, 4, 5, 6, 7), JSON.stringify(a).slice(0, 300))
@@ -1473,7 +1590,7 @@ await t('导入：图集（创作者 id / 名称 / @账号，图片用 | 或换�
   const err = await importRows('albums', again, { onDuplicate: 'error' })
   must(err.failed === 1 && err.results[0].field === 'images', JSON.stringify(err.results))
   const upd = await importRows('albums', again, { onDuplicate: 'update' })
-  must(upd.updated === 1 && upd.results[0].message === `按第一张图片匹配到 ID ${a.id}，已更新`, JSON.stringify(upd.results))
+  must(upd.updated === 1 && upd.results[0].message === `按第一张图片匹配到 ID ${a.id}，已更新：图片`, JSON.stringify(upd.results))
   const a2 = await get(`/api/admin/albums/${a.id}`)
   must(a2.title === '导入图集一' && a2.description === '第一行\n第二行' && a2.images.length === 2 && a2.images[0].width === 1200 && a2.status === 1,
     '空单元格不改、图片整体替换、宽高保留 ' + JSON.stringify(a2).slice(0, 300))
@@ -1512,18 +1629,23 @@ const snapshot = async type => {
 }
 
 for (const type of ['videos', 'posts', 'topics', 'creators', 'keywords', 'albums']) {
-  await t(`导出 → 再导入（${type}）：updated = n，数据不变`, async () => {
+  await t(`导出 → 再导入（${type}）：全部 unchanged，数据不变`, async () => {
     const ex = await get(`/api/admin/${type}/export`)
     must(ex.fields.join() === SCHEMA[type].fields.map(f => f.key).join(), 'fields 应为 schema 顺序')
     must(ex.rows.length > 0 && ex.rows.every(r => Object.values(r).every(v => typeof v === 'string')), '导出值都应是字符串')
+    must(ex.total === ex.rows.length && ex.truncated === false && ex.limit === 50000, '导出带总数 / 是否截断 ' + JSON.stringify({ ...ex, rows: undefined, fields: undefined }))
     const before = await snapshot(type)
     const mediaRows = () => JSON.stringify(dbq('SELECT id, url, fallback, duration_sec FROM post_media ORDER BY id').map(r => [r.id, r.url, r.fallback?.length, r.duration_sec]))
     const mediaBefore = mediaRows()
     const coversBefore = JSON.stringify(dbq('SELECT id, url FROM topic_covers ORDER BY id'))
     const albumImageRows = () => JSON.stringify(dbq('SELECT id, album_id, url, width, height, sort FROM album_images ORDER BY id'))
     const albumImagesBefore = albumImageRows()
+    // 后台-05：原样导回，每一行都是「没有变化」，不再算成「已更新」
+    const dry = await importRows(type, ex.rows.map((r, i) => ({ ...r, _row: i + 2 })), { onDuplicate: 'update' }, true)
+    must(dry.unchanged === ex.rows.length && dry.updated === 0, '预检 ' + JSON.stringify({ ...dry, results: dry.results.filter(r => r.status !== 'unchanged').slice(0, 3) }))
     const d = await importRows(type, ex.rows.map((r, i) => ({ ...r, _row: i + 2 })), { onDuplicate: 'update' })
-    must(d.updated === ex.rows.length && d.failed === 0 && d.created === 0, JSON.stringify({ ...d, results: d.results.filter(r => r.status !== 'updated').slice(0, 3) }))
+    must(d.unchanged === ex.rows.length && d.updated === 0 && d.failed === 0 && d.created === 0, JSON.stringify({ ...d, results: d.results.filter(r => r.status !== 'unchanged').slice(0, 3) }))
+    must(d.results.every(r => r.status === 'unchanged' && /，没有变化$/.test(r.message) && r.id > 0), '每行带 id 和「没有变化」 ' + d.results[0].message)
     must(await snapshot(type) === before, '再导入后数据变了')
     must(JSON.stringify((await get(`/api/admin/${type}/export`)).rows) === JSON.stringify(ex.rows), '再导出结果不同')
     must(mediaRows() === mediaBefore, '帖子媒体行（含主图时长）被改了')
@@ -1541,6 +1663,63 @@ await t('导出：筛选 + 导入格式', async () => {
   const p = (await get('/api/admin/posts/export?q=' + encodeURIComponent('导入帖子一'))).rows[0]
   must(p.kind === '文档' && p.isHot === '是' && p.images === '/i/1.jpg\n/i/2.jpg' && p.video === 'VID-1002' && p.creator === 'aijc', JSON.stringify(p))
   return 'ok'
+})
+
+await t('后台-05：导出 → 改其中几行 → 更新已有：只有真改了的算「更新」并写明改了什么，其余是「没有变化」', async () => {
+  const ex = (await get('/api/admin/keywords/export')).rows
+  const rows = ex.map((r, i) => ({ ...r, _row: i + 2 }))
+  rows[0] = { ...rows[0], weight: String(Number(rows[0].weight) + 7) }
+  rows[2] = { ...rows[2], isHot: rows[2].isHot === '是' ? '否' : '是', sortOrder: String(Number(rows[2].sortOrder) + 1) }
+  const dry = await importRows('keywords', rows, { onDuplicate: 'update' }, true)
+  must(dry.updated === 2 && dry.unchanged === ex.length - 2 && dry.created === 0 && dry.failed === 0 && dry.skipped === 0, JSON.stringify({ ...dry, results: undefined }))
+  const r0 = dry.results[0], r2 = dry.results[2]
+  must(r0.status === 'updated' && r0.changed.join() === 'weight' && /，将更新：权重$/.test(r0.message), '预检用「将更新」并列出字段 ' + JSON.stringify(r0))
+  must(r2.changed.join() === 'isHot,sortOrder' && /，将更新：火焰标、排序$/.test(r2.message), JSON.stringify(r2))
+  must(dry.results[1].status === 'unchanged' && dry.results[1].message === `按热词匹配到 ID ${dry.results[1].id}，没有变化`, JSON.stringify(dry.results[1]))
+  // updated_at 只精确到秒：先把它往前拨 10 秒，免得这些行上一次被写和这次导入落在同一秒、看不出动没动（R-AR-06）
+  dbw('UPDATE search_keywords SET updated_at = updated_at - 10')
+  const beforeTs = dbq('SELECT id, updated_at FROM search_keywords ORDER BY id')
+  const real = await importRows('keywords', rows, { onDuplicate: 'update' })
+  must(real.updated === 2 && real.unchanged === ex.length - 2 && /，已更新：权重$/.test(real.results[0].message), JSON.stringify(real.results.slice(0, 3)))
+  // 没变的行一行都没写（updated_at 不动）
+  const afterTs = new Map(dbq('SELECT id, updated_at FROM search_keywords ORDER BY id').map(r => [r.id, r.updated_at]))
+  const touched = beforeTs.filter(r => afterTs.get(r.id) !== r.updated_at).map(r => r.id).sort((a, b) => a - b)
+  must(touched.join() === [real.results[0].id, real.results[2].id].sort((a, b) => a - b).join(), '只有改了的行动了 updated_at：' + touched)
+  // 再导一次（已经是新值）：全部没有变化
+  const again = await importRows('keywords', rows, { onDuplicate: 'update' })
+  must(again.unchanged === ex.length && again.updated === 0, JSON.stringify({ ...again, results: undefined }))
+  // 视频：只改「短视频」一列也能看出来；帖子换配图
+  const v = (await get('/api/admin/videos/export?q=IMP-001')).rows[0]
+  const vs = await importRows('videos', [{ ...v, isShort: v.isShort === '是' ? '否' : '是' }], { onDuplicate: 'update' }, true)
+  must(vs.updated === 1 && vs.results[0].changed.join() === 'isShort' && /：短视频$/.test(vs.results[0].message), JSON.stringify(vs.results))
+  const pr = (await get('/api/admin/posts/export?q=' + encodeURIComponent('导入帖子一'))).rows[0]
+  const ps = await importRows('posts', [{ ...pr, images: '/i/1.jpg\n/i/3.jpg' }], { onDuplicate: 'update' }, true)
+  must(ps.updated === 1 && ps.results[0].changed.join() === 'images' && /：配图$/.test(ps.results[0].message), JSON.stringify(ps.results))
+  return `${real.updated} 行更新、${real.unchanged} 行没有变化`
+})
+
+await t('后台-07：导出被截断时返回总数和 truncated（上限调成 5 行的实例）', async () => {
+  return withShortTimeouts(async port => {
+    const g = async path => {
+      const r = await fetch(`http://127.0.0.1:${port}${path}`, { headers: { authorization: 'Bearer ' + adminToken } })
+      return (await r.json()).data
+    }
+    const all = await get('/api/admin/videos?pageSize=1')
+    const ex = await g('/api/admin/videos/export')
+    must(ex.rows.length === 5 && ex.truncated === true && ex.total === all.total && ex.limit === 5, JSON.stringify({ ...ex, rows: ex.rows.length, fields: undefined }))
+    // 截断时和列表同样的顺序：前 5 条就是列表的前 5 条
+    const first = (await get('/api/admin/videos?pageSize=5')).list.map(v => String(v.id))
+    must(ex.rows.map(r => r.id).join() === first.join(), '导出顺序应和列表一致')
+    const small = await g('/api/admin/videos/export?topicId=' + TB.id)
+    must(small.rows.length === 3 && small.truncated === false && small.total === 3, '没截断 ' + JSON.stringify({ ...small, rows: small.rows.length, fields: undefined }))
+    const kw = await g('/api/admin/keywords/export')
+    const kwTotal = (await get('/api/admin/keywords?pageSize=1')).total
+    must(kw.rows.length === 5 && kw.truncated === true && kw.total === kwTotal, '其他类型同样 ' + JSON.stringify({ ...kw, rows: kw.rows.length, fields: undefined }))
+    const exact = await g('/api/admin/posts/export')
+    const postTotal = (await get('/api/admin/posts?pageSize=1')).total
+    must(exact.truncated === (postTotal > 5) && exact.total === postTotal, '帖子 ' + JSON.stringify({ ...exact, rows: exact.rows.length, fields: undefined }))
+    return `视频 ${ex.total} 条只导出 5 条，truncated`
+  })
 })
 
 /* ================================================================ */
@@ -1763,6 +1942,181 @@ await t('素材删除：被引用需 force / 非空文件夹 / 空文件夹', as
   return 'ok'
 })
 
+const mediaFile = rel => join(MEDIA_DIR, ...rel.split('/'))
+
+await t('后台-08：新建已经存在的文件夹 / 和文件同名报错；路径不合法时说清楚哪里不对', async () => {
+  must((await post('/api/admin/media/folder', { path: 'videos/已存在' })).path === 'videos/已存在', '第一次新建')
+  mustFail(await req('POST', '/api/admin/media/folder', { body: { path: 'videos/已存在' } }), 'path', 400, /文件夹「videos\/已存在」已经存在/)
+  mustFail(await req('POST', '/api/admin/media/folder', { body: { path: '/videos/已存在/' } }), 'path', 400, /已经存在/)
+  okData(await upload('videos/同名.mp4', VIDEO_BYTES))
+  mustFail(await req('POST', '/api/admin/media/folder', { body: { path: 'videos/同名.mp4' } }), 'path', 400, /已有同名文件/)
+  mustFail(await req('POST', '/api/admin/media/folder', { body: { path: 'videos/同名.mp4/子目录' } }), 'path', 400, /上级路径里有同名文件/)
+  mustFail(await req('POST', '/api/admin/media/folder', { body: { path: '../etc' } }), 'path', 400, /名称不能是 \. 或 \.\./)
+  mustFail(await req('POST', '/api/admin/media/folder', { body: { path: 'videos/./x' } }), 'path', 400, /名称不能是 \. 或 \.\./)
+  mustFail(await req('POST', '/api/admin/media/folder', { body: { path: 'videos//x' } }), 'path', 400, /空的层级/)
+  must((await post('/api/admin/media/folder', { path: 'videos/多级/第二级' })).path === 'videos/多级/第二级' && existsSync(mediaFile('videos/多级/第二级')), '上级不存在时一起建')
+  for (const p of ['videos/多级/第二级', 'videos/多级', 'videos/已存在', 'videos/同名.mp4']) await del('/api/admin/media?path=' + encodeURIComponent(p))
+  return 'ok'
+})
+
+await t('创作者-01 / R-AR-03：小图 <原图文件名>.thumb.jpg 挂在原图上（列表不单独列出），上传小图总是覆盖，删 / 换原图时一起删；同主名的 x.jpg、x.png 各有各的小图', async () => {
+  const dir = 'images/thumbs'
+  okData(await upload(`${dir}/p1.jpg`, jpegHead(4000, 3000)))
+  okData(await upload(`${dir}/p1.jpg.thumb.jpg`, jpegHead(480, 360)))
+  const again = okData(await upload(`${dir}/p1.jpg.thumb.jpg`, jpegHead(480, 360, 1, 64)))
+  must(again.path === `${dir}/p1.jpg.thumb.jpg`, '小图应覆盖同名文件、不自动改名：' + again.path)
+  must(readFileSync(mediaFile(`${dir}/p1.jpg.thumb.jpg`)).length === again.size, '内容是第二次上传的')
+  okData(await upload(`${dir}/orphan.jpg.thumb.jpg`, jpegHead(10, 10)))
+  okData(await upload(`${dir}/plain.png`, pngHead(10, 10)))
+  const list = await get('/api/admin/media?dir=' + encodeURIComponent(dir))
+  const names = list.entries.map(e => e.name).sort().join()
+  must(names === 'orphan.jpg.thumb.jpg,p1.jpg,plain.png', '挂在原图上的小图不单独列出：' + names)
+  const p1 = list.entries.find(e => e.name === 'p1.jpg')
+  must(p1.thumb === urlOf(`${dir}/p1.jpg.thumb.jpg`) && list.entries.find(e => e.name === 'plain.png').thumb === null, JSON.stringify(p1))
+  must(list.entries.find(e => e.name === 'orphan.jpg.thumb.jpg').isThumb === true && !('isThumb' in p1), '原图不在的小图照常列出、标 isThumb')
+  const images = await get('/api/admin/media?dir=images')
+  must(images.entries.find(e => e.name === 'thumbs').items === 3, '文件夹的 items 不含挂在原图上的小图 ' + JSON.stringify(images.entries.find(e => e.name === 'thumbs')))
+  // R-AR-03：同一个文件夹里再传一张主名相同的 p1.png —— 它没有小图，不能借用 p1.jpg 的；传了自己的小图也不会把 p1.jpg 的覆盖掉
+  okData(await upload(`${dir}/p1.png`, pngHead(10, 10)))
+  const thumbOfEntry = async name => (await get('/api/admin/media?dir=' + encodeURIComponent(dir))).entries.find(e => e.name === name)?.thumb
+  must(await thumbOfEntry('p1.png') === null && await thumbOfEntry('p1.jpg') === urlOf(`${dir}/p1.jpg.thumb.jpg`), '同主名的 p1.png 没有小图')
+  okData(await upload(`${dir}/p1.png.thumb.jpg`, jpegHead(10, 10)))
+  must(await thumbOfEntry('p1.png') === urlOf(`${dir}/p1.png.thumb.jpg`) && readFileSync(mediaFile(`${dir}/p1.jpg.thumb.jpg`)).length === again.size, 'p1.png 的小图是它自己的，p1.jpg 的没被覆盖')
+  // 旧写法的 p1.thumb.jpg（不带原图扩展名）谁的小图都不是，照常列出、标 isThumb
+  okData(await upload(`${dir}/p1.thumb.jpg`, jpegHead(5, 5)))
+  must((await get('/api/admin/media?dir=' + encodeURIComponent(dir))).entries.find(e => e.name === 'p1.thumb.jpg')?.isThumb === true, '旧写法的小图是孤儿')
+  await del('/api/admin/media?path=' + encodeURIComponent(`${dir}/p1.thumb.jpg`))
+  // 删 p1.png 只删它自己的小图
+  await del('/api/admin/media?path=' + encodeURIComponent(`${dir}/p1.png`))
+  must(!existsSync(mediaFile(`${dir}/p1.png.thumb.jpg`)) && existsSync(mediaFile(`${dir}/p1.jpg.thumb.jpg`)), '删 p1.png 删它的小图，p1.jpg 的留着')
+  await del('/api/admin/media?path=' + encodeURIComponent(`${dir}/p1.jpg`))
+  must(!existsSync(mediaFile(`${dir}/p1.jpg.thumb.jpg`)), '删原图应一起删小图')
+  // 新传（或覆盖）一张原图时，旁边旧的同名小图是以前那张图的，删掉，等后台传新的小图
+  okData(await upload(`${dir}/orphan.jpg`, jpegHead(20, 20)))
+  must(!existsSync(mediaFile(`${dir}/orphan.jpg.thumb.jpg`)), '传原图时旧的小图应删掉')
+  okData(await upload(`${dir}/orphan.jpg.thumb.jpg`, jpegHead(5, 5)))
+  must(await thumbOfEntry('orphan.jpg') === urlOf(`${dir}/orphan.jpg.thumb.jpg`), '再传的小图挂上')
+  // 改名到一个留着旧小图的名字：没有小图的图改过去，旧的小图删掉（不然会被当成它的）；有小图的图改过去，小图换成它自己的
+  okData(await upload(`${dir}/q.png`, pngHead(6, 6)))
+  okData(await upload(`${dir}/stale.png.thumb.jpg`, jpegHead(7, 7)))
+  await post('/api/admin/media/rename', { path: `${dir}/q.png`, name: 'stale.png' })
+  must(!existsSync(mediaFile(`${dir}/stale.png.thumb.jpg`)) && await thumbOfEntry('stale.png') === null, '没有小图的图改名后不应挂上旧小图')
+  const own = okData(await upload(`${dir}/orphan.jpg.thumb.jpg`, jpegHead(5, 5, 1, 32)))
+  okData(await upload(`${dir}/old.jpg.thumb.jpg`, jpegHead(9, 9)))
+  await post('/api/admin/media/rename', { path: `${dir}/orphan.jpg`, name: 'old.jpg' })
+  must(readFileSync(mediaFile(`${dir}/old.jpg.thumb.jpg`)).length === own.size && !existsSync(mediaFile(`${dir}/orphan.jpg.thumb.jpg`)), '有小图的图改名后小图是它自己的')
+  for (const n of ['old.jpg', 'plain.png', 'stale.png']) await del('/api/admin/media?path=' + encodeURIComponent(`${dir}/${n}`))
+  must(readdirSync(mediaFile(dir)).length === 0, '都删干净了（小图跟着原图）：' + readdirSync(mediaFile(dir)))
+  return 'ok'
+})
+
+await t('后台-06：批量删除——被使用的文件不带 force 整批不删并列出来；带 force 删掉；连文件夹带里面的文件一起选中能删掉；失败的单独列出', async () => {
+  const dir = 'batch-del'
+  for (const n of ['a.mp4', 'b.mp4', 'sub/c.jpg', 'sub/c.jpg.thumb.jpg', 'full/d.mp4']) okData(await upload(`${dir}/${n}`, n.endsWith('.jpg') ? jpegHead(10, 10) : VIDEO_BYTES))
+  const v = await post('/api/admin/videos', { title: '用着 a.mp4', playbackUrl: `/media/${dir}/a.mp4?v=2` })
+  const paths = [`${dir}/a.mp4`, `${dir}/b.mp4`, `${dir}/sub`, `${dir}/sub/c.jpg`, `${dir}/full`, `${dir}/nope.mp4`]
+  mustFail(await req('POST', '/api/admin/media/delete', { body: { paths } }), 'usedBy', 400, /有 1 个文件正被使用：a\.mp4（1 个视频）/)
+  must(existsSync(mediaFile(`${dir}/b.mp4`)) && existsSync(mediaFile(`${dir}/a.mp4`)), '没带 force 时整批都不删')
+  const d = await post('/api/admin/media/delete', { paths, force: true })
+  must(d.deleted.slice().sort().join() === [`${dir}/a.mp4`, `${dir}/b.mp4`, `${dir}/sub`, `${dir}/sub/c.jpg`].sort().join(), JSON.stringify(d))
+  must(d.failed.length === 2 && /不为空（里面还有 1 项）/.test(d.failed.find(f => f.path === `${dir}/full`)?.message) &&
+    /不存在/.test(d.failed.find(f => f.path === `${dir}/nope.mp4`)?.message), JSON.stringify(d.failed))
+  must(!existsSync(mediaFile(`${dir}/sub`)) && !existsSync(mediaFile(`${dir}/a.mp4`)), '文件夹和里面的文件（含小图）都删掉了')
+  const list = await get('/api/admin/media?dir=' + dir)
+  must(list.entries.map(e => `${e.name}:${e.items}`).join() === 'full:1', '非空文件夹的 items ' + JSON.stringify(list.entries))
+  for (const bad of [undefined, [], 'a.mp4', [1], Array.from({ length: 1001 }, (_, i) => `x${i}.mp4`), ['../x.mp4'], ['']]) {
+    mustFail(await req('POST', '/api/admin/media/delete', { body: { paths: bad } }), 'paths')
+  }
+  must((await post('/api/admin/media/delete', { paths: [`${dir}/full/d.mp4`, `${dir}/full`, dir] })).deleted.length === 3, '清理')
+  await del(`/api/admin/videos/${v.id}`)
+  return `删掉 ${d.deleted.length} 项、失败 ${d.failed.length} 项`
+})
+
+await t('后台-06：改名——视频 / 图集 / 帖子 / 专题头图 / 头像里的地址一起改（编码、未编码、带 ?v= 都认），小图跟着改；文件夹改名按前缀改', async () => {
+  const dir = 'rename'
+  okData(await upload(`${dir}/老 名字.jpg`, jpegHead(100, 80)))
+  okData(await upload(`${dir}/老 名字.jpg.thumb.jpg`, jpegHead(48, 38)))
+  okData(await upload(`${dir}/clip.mp4`, VIDEO_BYTES))
+  const enc = urlOf(`${dir}/老 名字.jpg`), raw = `/media/${dir}/老 名字.jpg`
+  const v1 = await post('/api/admin/videos', { title: '改名封面', coverUrl: raw + '?v=3', playbackUrl: urlOf(`${dir}/clip.mp4`) })
+  const v2 = await post('/api/admin/videos', { title: '改名封面 2', coverUrl: enc })
+  const al = await post('/api/admin/albums', { creatorId: TRIP, images: [enc, 'https://e.com/x.jpg'] })
+  const po = await post('/api/admin/posts', { creatorId: 1, text: '改名帖子', mainImage: raw, images: [enc] })
+  const tp = await post('/api/admin/topics', { name: '改名专题', covers: [enc] })
+  const oldAvatar = (await get('/api/admin/creators/2')).avatarUrl
+  await patch('/api/admin/creators/2', { avatarUrl: raw })
+  const r = await post('/api/admin/media/rename', { path: `${dir}/老 名字.jpg`, name: '新名字.jpeg' })
+  const nu = urlOf(`${dir}/新名字.jpeg`)
+  must(r.from === `${dir}/老 名字.jpg` && r.to === `${dir}/新名字.jpeg` && r.url === nu && r.type === 'image', JSON.stringify(r))
+  must(JSON.stringify(r.refs) === JSON.stringify({ videos: 2, albums: 1, posts: 1, topics: 1, creators: 1, users: 0, episodes: 0 }), JSON.stringify(r.refs))
+  must((await get(`/api/admin/videos/${v1.id}`)).coverUrl === nu + '?v=3', '带 ?v= 的保留查询串')
+  must((await get(`/api/admin/videos/${v2.id}`)).coverUrl === nu, '编码写法')
+  must((await get(`/api/admin/albums/${al.id}`)).images.map(m => m.url).join() === `${nu},https://e.com/x.jpg`, '图集')
+  const p2 = await get(`/api/admin/posts/${po.id}`)
+  must(p2.mainImage === nu && p2.images.join() === nu, '帖子主图 / 配图 ' + JSON.stringify([p2.mainImage, p2.images]))
+  must((await get(`/api/admin/topics/${tp.id}`)).covers[0] === nu && (await get('/api/admin/creators/2')).avatarUrl === nu, '专题头图 / 头像')
+  must(existsSync(mediaFile(`${dir}/新名字.jpeg.thumb.jpg`)) && !existsSync(mediaFile(`${dir}/老 名字.jpg.thumb.jpg`)), '小图跟着改名')
+  must((await get(`/api/admin/videos/${v1.id}`)).playbackUrl === urlOf(`${dir}/clip.mp4`), '别的地址不动')
+  must((await req('GET', nu)).status === 200 && (await req('GET', enc)).status === 404, '新地址能访问、旧地址没了')
+  // 冲突 / 校验
+  okData(await upload(`${dir}/占用.jpeg`, jpegHead(1, 1)))
+  const rn = (path, name) => req('POST', '/api/admin/media/rename', { body: { path, name } })
+  mustFail(await rn(`${dir}/新名字.jpeg`, '占用.jpeg'), 'name', 400, /已经有同名文件「占用\.jpeg」/)
+  mustFail(await rn(`${dir}/新名字.jpeg`, '新名字.mp4'), 'name', 400, /不能改文件类型/)
+  mustFail(await rn(`${dir}/新名字.jpeg`, 'a/b.jpeg'), 'name', 400, /不能有 \//)
+  mustFail(await rn(`${dir}/新名字.jpeg`, '新名字.jpeg'), 'name', 400, /和原来一样/)
+  mustFail(await rn(`${dir}/新名字.jpeg`, 'x.thumb.jpg'), 'name', 400, /留给小图/)
+  mustFail(await rn(`${dir}/新名字.jpeg`, 'bad?.jpeg'), 'name')
+  mustFail(await rn(`${dir}/新名字.jpeg`, '..'), 'name')
+  mustFail(await rn(`${dir}/没有.jpg`, 'x.jpg'), 'path', 400, /不存在/)
+  mustFail(await rn('../x.jpg', 'y.jpg'), 'path')
+  // 只改大小写（Windows 上新名字 stat 出来就是它自己，也要能改）
+  const c = await post('/api/admin/media/rename', { path: `${dir}/占用.jpeg`, name: '占用.JPEG' })
+  must(c.to === `${dir}/占用.JPEG` && readdirSync(mediaFile(dir)).includes('占用.JPEG'), '只改大小写 ' + readdirSync(mediaFile(dir)))
+  // 文件夹改名：下面所有文件的地址按前缀改
+  const fr = await post('/api/admin/media/rename', { path: dir, name: '改过 名' })
+  must(fr.type === 'dir' && fr.refs.videos === 2 && fr.refs.albums === 1 && fr.refs.posts === 1, JSON.stringify(fr))
+  const v1b = await get(`/api/admin/videos/${v1.id}`)
+  must(v1b.playbackUrl === urlOf('改过 名/clip.mp4') && v1b.coverUrl === urlOf('改过 名/新名字.jpeg') + '?v=3', JSON.stringify([v1b.playbackUrl, v1b.coverUrl]))
+  must((await get(`/api/admin/albums/${al.id}`)).images[0].url === urlOf('改过 名/新名字.jpeg'), '图集跟着文件夹改')
+  await patch('/api/admin/creators/2', { avatarUrl: oldAvatar })
+  for (const p of [`/api/admin/videos/${v1.id}`, `/api/admin/videos/${v2.id}`, `/api/admin/albums/${al.id}`, `/api/admin/posts/${po.id}`, `/api/admin/topics/${tp.id}`]) await del(p)
+  const rest = (await get('/api/admin/media?dir=' + encodeURIComponent('改过 名'))).entries.map(e => '改过 名/' + e.name)
+  must((await post('/api/admin/media/delete', { paths: [...rest, '改过 名'], force: true })).failed.length === 0, '清理')
+  return 'ok'
+})
+
+await t('后台-06：移动——多个文件 / 文件夹移到另一个文件夹，地址一起改；重名 / 已经在目标里 / 移到自己里面的单独列为失败', async () => {
+  for (const [rel, bytes] of [['mv/src/a.mp4', VIDEO_BYTES], ['mv/src/c.mp4', VIDEO_BYTES], ['mv/src/pic.png', pngHead(5, 5)], ['mv/src/pic.png.thumb.jpg', jpegHead(5, 5)],
+    ['mv/src/deep/b.mp4', VIDEO_BYTES], ['mv/dst/a.mp4', VIDEO_BYTES]]) okData(await upload(rel, bytes))
+  const v = await post('/api/admin/videos', { title: '移动素材', playbackUrl: urlOf('mv/src/deep/b.mp4'), coverUrl: '/media/mv/src/pic.png' })
+  const d = await post('/api/admin/media/move', { paths: ['mv/src/a.mp4', 'mv/src/pic.png', 'mv/src/deep', 'mv/src/deep/b.mp4', 'mv/src/c.mp4', 'mv/dst/a.mp4'], to: 'mv/dst' })
+  must(d.moved.map(m => m.to).sort().join() === 'mv/dst/c.mp4,mv/dst/deep,mv/dst/pic.png', '移动的 ' + JSON.stringify(d.moved))
+  must(d.moved.every(m => m.url === urlOf(m.to)) && d.moved.find(m => m.to === 'mv/dst/deep').type === 'dir', JSON.stringify(d.moved))
+  must(d.failed.length === 2 && /已经有同名文件「a\.mp4」/.test(d.failed.find(f => f.path === 'mv/src/a.mp4')?.message) &&
+    /已经在这个文件夹里/.test(d.failed.find(f => f.path === 'mv/dst/a.mp4')?.message), JSON.stringify(d.failed))
+  must(d.refs.videos === 1, '同一个视频只算一次 ' + JSON.stringify(d.refs))
+  const vv = await get(`/api/admin/videos/${v.id}`)
+  must(vv.playbackUrl === urlOf('mv/dst/deep/b.mp4') && vv.coverUrl === urlOf('mv/dst/pic.png'), JSON.stringify([vv.playbackUrl, vv.coverUrl]))
+  must(existsSync(mediaFile('mv/dst/pic.png.thumb.jpg')) && !existsSync(mediaFile('mv/src/pic.png.thumb.jpg')), '小图跟着原图移动')
+  must(existsSync(mediaFile('mv/src/a.mp4')) && existsSync(mediaFile('mv/dst/deep/b.mp4')), '失败的不动、文件夹里的跟着走')
+  const self = await post('/api/admin/media/move', { paths: ['mv/dst'], to: 'mv/dst/deep' })
+  must(self.moved.length === 0 && /不能把文件夹移到它自己里面/.test(self.failed[0]?.message), JSON.stringify(self))
+  mustFail(await req('POST', '/api/admin/media/move', { body: { paths: ['mv/src/a.mp4'], to: 'mv/nope' } }), 'to', 400, /目标文件夹不存在/)
+  mustFail(await req('POST', '/api/admin/media/move', { body: { paths: ['mv/src/a.mp4'], to: '../x' } }), 'to')
+  mustFail(await req('POST', '/api/admin/media/move', { body: { paths: [], to: 'mv/dst' } }), 'paths')
+  // 移到根目录（to 为空）再移回去
+  const root = await post('/api/admin/media/move', { paths: ['mv/dst/c.mp4'], to: '' })
+  must(root.moved[0]?.to === 'c.mp4' && existsSync(mediaFile('c.mp4')), JSON.stringify(root))
+  must((await post('/api/admin/media/move', { paths: ['c.mp4'], to: 'mv' })).moved.length === 1, '移回去')
+  await del(`/api/admin/videos/${v.id}`)
+  const all = []
+  const walk = rel => { for (const e of readdirSync(mediaFile(rel), { withFileTypes: true })) { const p = `${rel}/${e.name}`; if (e.isDirectory()) walk(p); all.push(p) } }
+  walk('mv')
+  must((await post('/api/admin/media/delete', { paths: [...all, 'mv'], force: true })).failed.length === 0, '清理')
+  return `移动 ${d.moved.length} 项、失败 ${d.failed.length} 项`
+})
+
 /* ================================================================ */
 /*  请求体上限                                                       */
 /* ================================================================ */
@@ -1927,6 +2281,23 @@ await t('回归 R1-06：列表排序走索引、统计在写操作后立即更�
   return `占位图最大：视频 ${v}、专题 ${tc}、帖子 ${pm} 字节`
 })
 
+await t('后台-04：列表「只查 id」那一步按排序列的索引走（没有临时排序），关键词扫覆盖索引、不读整行', async () => {
+  const plan = (sql, ...a) => dbq('EXPLAIN QUERY PLAN ' + sql, ...a).map(r => r.detail).join(' | ')
+  for (const col of ['published_at', 'created_at', 'play_count', 'like_count', 'fav_count', 'title', 'duration_sec', 'id']) {
+    for (const dir of ['ASC', 'DESC']) {
+      const p = plan(`SELECT v.id FROM videos v ORDER BY v.${col} ${dir}, v.id ${dir} LIMIT 20 OFFSET 400`)
+      must(!/TEMP B-TREE/.test(p), `${col} ${dir} 排序没走索引：${p}`)
+    }
+  }
+  // 和 db/admin.mjs 的 videoWhere 同样的写法（LIKE … ESCAPE '\'）
+  const sub = "SELECT id FROM videos WHERE title LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\' UNION ALL SELECT id FROM videos WHERE public_id LIKE ? ESCAPE '\\'"
+  const q = plan(sub, '%治愈%', '%治愈%', '%治愈%')
+  must((q.match(/COVERING INDEX/g) || []).length === 2 && !/SCAN videos($| \|)/.test(q), '关键词子查询应两段都扫覆盖索引：' + q)
+  const list = plan(`SELECT v.id FROM videos v WHERE +v.id IN (${sub}) ORDER BY v.published_at DESC, v.id DESC LIMIT 20`, '%治愈%', '%治愈%', '%治愈%')
+  must(/SCAN v USING COVERING INDEX/.test(list) && !/TEMP B-TREE/.test(list), '只有关键词时顺着发布时间的索引走：' + list)
+  return '排序 16 种、关键词都走索引'
+})
+
 await t('回归 R1-07 / R3-01：专题引用按 ID → 名称 → 标识，导出再导入不换专题', async () => {
   const news = await post('/api/admin/topics', { name: '新闻频道', slug: 'dailyx' })
   const daily = await post('/api/admin/topics', { name: 'Dailyx' })                      // 名称 = 别的专题的标识（大小写不同）
@@ -1949,7 +2320,7 @@ await t('回归 R1-07 / R3-01：专题引用按 ID → 名称 → 标识，导�
   for (const [id, w] of Object.entries(want)) must(cell('TREF-' + id) === w, `专题 #${id} 导出为「${cell('TREF-' + id)}」，应为「${w}」`)
   const before = JSON.stringify((await get('/api/admin/videos?q=TREF-&pageSize=50&sort=id&order=asc')).list.map(v => [v.id, v.topicId]))
   const re = await importRows('videos', ex, { onDuplicate: 'update' })
-  must(re.updated === ex.length && re.failed === 0, JSON.stringify(re.results.filter(r => r.status !== 'updated')))
+  must(re.unchanged === ex.length && re.failed === 0, JSON.stringify(re.results.filter(r => r.status !== 'unchanged')))
   const after = JSON.stringify((await get('/api/admin/videos?q=TREF-&pageSize=50&sort=id&order=asc')).list.map(v => [v.id, v.topicId]))
   must(after === before, `再导入后专题变了：${before} → ${after}`)
   return `${ex.length} 行专题不变`

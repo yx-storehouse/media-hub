@@ -11,7 +11,8 @@ defineOptions({ name: 'LoginPage' })
 
 /*
  * 管理员登录。只有 role = admin 的账号能进；普通账号会被提示「该账号不是管理员」。
- * 第一次部署还没有管理员时：node server/create-admin.mjs <登录名> <密码>
+ * 第一次部署还没有管理员时由部署人员建（README「部署」：docker compose exec reel node server/create-admin.mjs …）；
+ * 这页谁都能打开，所以只写「联系管理员」，不放服务器命令。
  */
 const route = useRoute()
 const router = useRouter()
@@ -73,7 +74,7 @@ onMounted(() => uidEl.value?.focus())
       </FormField>
 
       <ABtn class="go" variant="primary" type="submit" :loading="busy">登录</ABtn>
-      <p class="tip">还没有管理员账号？在服务器上运行 <code>node server/create-admin.mjs 登录名 密码</code></p>
+      <p class="tip">忘记密码或还没有账号，请联系管理员。</p>
     </form>
   </div>
 </template>
@@ -93,5 +94,4 @@ h1 { font-size: 18px; font-weight: 650; }
 .eye:hover { color: var(--t1); }
 .go { width: 100%; height: 38px; margin-top: 4px; font-size: 14px; }
 .tip { color: var(--t3); font-size: 12px; line-height: 1.6; }
-code { padding: 1px 5px; border-radius: 4px; background: #1d1d1d; color: var(--t2); font-family: var(--mono); font-size: 11.5px; white-space: nowrap; }
 </style>

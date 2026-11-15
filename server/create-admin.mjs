@@ -15,6 +15,8 @@ import { hashPassword, checkPasswordStrength } from './auth.mjs'
 const here = dirname(fileURLToPath(import.meta.url))
 const DB_PATH = process.env.DB_PATH || join(here, 'db', 'reel.db')
 const db = new DatabaseSync(DB_PATH)
+// 接口服务正在写库时最多等 5 秒（服务那边的写事务都很短），不会直接报「database is locked」
+db.exec('PRAGMA busy_timeout = 5000')
 db.exec('PRAGMA foreign_keys = ON')
 
 const args = process.argv.slice(2)

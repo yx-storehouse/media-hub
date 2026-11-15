@@ -17,9 +17,17 @@
  *
  * 同一个 key 再次 upload 会先取消上一个。在 ADrawer 里使用时，有上传进行中关抽屉会先确认（见 UPLOAD_GUARD）。
  * 返回 reactive 对象：模板里直接写 up.busy / up.percent。
+ *
+ * 图片（jpg / png / webp / avif，不含 GIF 和动图）上传前自动处理（utils/imagePrep.js）：
+ *   大图先缩小再传（长边到 2048，长图按短边保 1080，规则见 imagePrep.js）；原图传完后再传一张小图「<最终文件名>.thumb.jpg」
+ *   （服务端重名自动改名时，小图跟着用改过的名字），App 的网格 / 头图用它。小图传失败不算上传失败（App 退回用原图）。
+ *   结果多带 { width, height }（上传的那张图的像素尺寸）和 thumb（小图地址，没有为 null）。
+ *   onPrepare({ size, width, height, resized })：处理完、开始传之前调用（size 是实际要传的字节数）。
+ *   不想处理（比如要原样保留的文件）传 image: false。
  */
 import { reactive, computed, markRaw, inject, getCurrentInstance, onBeforeUnmount } from 'vue'
 import { uploadFile } from '../api'
+import { prepareImage, isPreparable, thumbPathOf } from '../utils/imagePrep'
 
 /** ADrawer provide 的计数器：{ add(), remove() }，用来在关闭前提醒「还有文件在上传」 */
 export const UPLOAD_GUARD = Symbol('a-upload-guard')
@@ -33,7 +41,7 @@ export function useUploader() {
   let seq = 0
   let disposed = false
 
-  function upload(path, file, { overwrite = false, onProgress, key } = {}) {
+  function upload(path, file, { overwrite = false, onProgress, onPrepare, key, image = true } = {}) {
     if (disposed) return Promise.reject(cancelError())
     const k = key ?? `auto-${++seq}`
     tasks.get(k)?.ctrl.abort()
@@ -43,14 +51,31 @@ export function useUploader() {
     tasks.delete(k) // 重新插入，保证「最近发起的」排在最后
     tasks.set(k, task)
     guard?.add()
-    return uploadFile(path, file, {
-      overwrite,
-      signal: ctrl.signal,
-      onProgress: p => { task.percent = p.percent; onProgress?.(p) }
-    }).finally(() => {
+    return send(path, file, { overwrite, onProgress, onPrepare, image, ctrl, task }).finally(() => {
       if (tasks.get(k)?.ctrl === ctrl) tasks.delete(k)
       guard?.remove()
     })
+  }
+
+  async function send(path, file, { overwrite, onProgress, onPrepare, image, ctrl, task }) {
+    let prep = null
+    if (image && isPreparable(file, path)) {
+      prep = await prepareImage(file, { path })
+      if (ctrl.signal.aborted) throw cancelError()
+      if (prep) onPrepare?.({ size: prep.blob.size, width: prep.width, height: prep.height, resized: prep.resized })
+    }
+    const res = await uploadFile(path, prep ? prep.blob : file, {
+      overwrite,
+      signal: ctrl.signal,
+      onProgress: p => { task.percent = p.percent; onProgress?.(p) }
+    })
+    if (!prep) return res
+    let thumb = null
+    // 小图：原图已经传完，用它的最终名字（可能被自动改名成「x (1).jpg」）；只有几十 KB，不跟着取消
+    if (prep.thumb && res?.path) {
+      try { thumb = (await uploadFile(thumbPathOf(res.path), prep.thumb, { overwrite: true }))?.url || null } catch { thumb = null }
+    }
+    return { ...res, width: prep.width, height: prep.height, thumb }
   }
 
   function cancel(key) {

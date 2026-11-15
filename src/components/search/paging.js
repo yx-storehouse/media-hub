@@ -1,6 +1,7 @@
-import { nextTick, watch } from 'vue'
+import { watch } from 'vue'
 import { isDemoId } from '@/api'
 import { createFeed } from '@/components/creator/feed'
+import { afterPaint } from '@/components/home/list'
 
 /*
  * 搜索结果、专题视频的分页列表：和创作者主页同一套 createFeed，每次取 20 条，滚到底再取下一页。
@@ -33,7 +34,7 @@ const PRELOAD = 800
 /**
  * 滚到离底部不到 PRELOAD 时取当前列表的下一页；一页回来后内容还不满一屏，就接着取。
  * getFeed() 返回当前显示的那个列表（搜索页有视频 / 帖子两个，只翻当前那个）。
- * 第一页由页面自己取（total 为 null 时不自动取）；取失败后等用户点「重试」，不自动反复请求。
+ * 第一页由页面自己取（total 为 null 时不自动取）；取失败后不在这里反复请求（出错提示 LoadState 会在联网 / 服务器恢复时自动重试）。
  * 返回 check()，页面换了列表 / 恢复了滚动位置后可以手动调一次。
  */
 export function useScrollMore(scroller, getFeed) {
@@ -49,6 +50,7 @@ export function useScrollMore(scroller, getFeed) {
     old?.removeEventListener('scroll', check)
     el?.addEventListener('scroll', check, { passive: true })
   }, { immediate: true, flush: 'post' })
-  watch(() => getFeed()?.loading, busy => { if (!busy) nextTick(check) })
+  // 一页刚挂上时不当场量（会在挂载的这一下里逼浏览器把整个列表排一遍版）：等这一帧画出来再看
+  watch(() => getFeed()?.loading, busy => { if (!busy) afterPaint(check) })
   return check
 }

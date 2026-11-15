@@ -13,7 +13,7 @@ mock-fallback.js  演示数据：mock 模式，以及开发时某次列表读取
 
 | 值 | 行为 |
 |---|---|
-| `http`（线上） | 只用接口，失败直接报错，页面显示「加载失败 + 重试」。线上永远不出现演示数据 |
+| `http`（线上） | 只用接口，失败直接报错，页面显示统一的出错说法和「重试」（见下面「出错的说法、登录过期」）。线上永远不出现演示数据（也不打包） |
 | `auto`（开发默认） | 每次读取都**先请求接口**。只有**列表类**读取（路径里不带具体 id）这一次连不上（网络失败、超时、5xx、回话的不是接口服务）时，这一次退回 `mock-fallback.js`；第一次退回时提示「接口未连接，当前展示演示数据」。之后的请求照样先打接口：任何一次请求成功（或浏览器发出 `online` 事件）就提示「已重新连接」。断开期间读取的超时缩短到 5 秒 |
 | `mock` | 只用本地演示数据，完全不发请求（切页面、离线演示、写样式时用）；「我的」相关接口返回空列表 |
 
@@ -69,15 +69,40 @@ export const getSomething = (id) =>
 `call()` 负责模式判断和降级，页面只管 await 结果。路径里用到的 id 要放进 `ids: [id]`（演示 id 的读取 / 写入靠它拦下，
 带 id 的读取也靠它不退回演示数据）；个人数据的读取加 `personal: true`；页面关闭时的上报加 `keepalive: true`。
 
+## 出错的说法、登录过期
+
+- 失败时抛 `ApiError`，`message` 已经是给用户看的话，全 App 一套说法（`http.js` 的 `MSG` / `errorText(e)`）：
+  断网 / 连不上「网络连接失败，请检查网络」，超时「请求超时，请检查网络」，5xx 和网关回的错误页（反向代理正在重启的 502 页面）
+  「服务器开小差了，请稍后重试」；只有 4xx 用接口自己的说明（「帖子不存在或已下架」）。页面不要再自己拼一套文案：
+  出错页用 `components/common/LoadState.vue`（统一的说法 + 「重试」，断网 / 服务器出错时联网或每隔一会儿自动重试），
+  自己画出错状态的页面用 `errorText(e)` + `composables/useReconnect.js`，操作失败的提示用 `useToast.js` 的 `toastError(e)`。
+  `isNetworkError(e)` 判断是不是「连不上 / 服务器出错」这一类（值得自动重试）。
+- 带着令牌却收到 401（令牌过期、在别处退出、改了密码、被停用）：默认弹登录框并说明「登录已过期，请重新登录」，
+  用户重新登录后**这个请求用新令牌自动再发一次**，调用方拿到的就是重发的结果（点赞、收藏、个人页面的读取都不用自己处理）；
+  用户关掉登录框时抛 `code: 'unauthorized'`（`toastError` 不为它再提示）。改密码这类不该自动重做的传 `{ unauthorized: 'prompt' }`，
+  启动核对令牌、退出登录传 `'ignore'`（见 `request()` 的注释）。别的标签页已经换了新令牌时直接用新令牌重发，不弹登录框。
+- `whenApiIdle(quiet)`：等到没有进行中的请求、并且安静了 `quiet` 毫秒（首屏数据回来后才预取别的页面，见 `router/index.js`）。
+- 线上（`VITE_API_MODE=http`）不打包演示数据：`mock-fallback.js` 和 `src/mock/` 不进任何代码块；手动输入演示 id 的地址时按「内容不存在」处理。
+
 ## 约定
 
-- 所有函数返回 Promise，失败时抛 `ApiError`（`message` 可直接展示给用户）。
+- 所有函数返回 Promise，失败时抛 `ApiError`（`message` 可直接展示给用户，统一的说法见上一节）。
 - 后端统一返回 `{ code: 0, data }` / `{ code: 1, message }`，`code !== 0` 会被当成错误抛出。
 - 列表统一支持 `limit` / `offset`，暂不支持游标分页。
 - 互动类接口（点赞、收藏、关注）请求体是 `{ on }`（想要的最终状态），返回 `{ active: boolean }` 表示最新状态（关注另外带 `followers` 最新粉丝数，演示数据里可能没有）。
 - 只为计数的写操作（帖子阅读数 `viewPost`）不等结果、失败直接吞掉（返回 `null`），不提示也不退回 mock。
 - 演示数据的 id 是字符串（如视频 `demo:rec0:3`），拼进路径时用 `encodeURIComponent`。
-- 分页列表新接口统一返回 `{ total, list }`，`limit` 1～50（默认 20）。
+- 分页列表新接口统一返回 `{ total, list }`，`limit` 1～50（默认 20）。服务端对所有公开列表都限了范围（`limit` 1～50，`offset` 再大也只是空页），传 `-1`、几万也拿不到整张表。
+
+## 图片、占位图和小图
+
+- `Cover` = `{ src, fallback, thumb }`：`src` 原图地址；`fallback` 是 CSS 背景值，图还没来 / 来不了时垫在下面——
+  生成的风景图和创作者首字头像是短地址 `url(/api/art/<hash>.svg)`（缓存一年），后台新建的内容是几百字节的 CSS 渐变，
+  用户头像是内联的首字 SVG；`Cover.vue` 一律直接当 `background-image` 用，照片淡入后不再画它。
+- `thumb`：小图地址（没有时为 `null`）。素材目录里的图旁边有 `<原图文件名>.thumb.jpg`（后台上传时生成，长边约 480、短边至少 360）就是它，
+  `picsum.photos` 的地址按比例缩到长边 480，其余就是原图。照片墙、图集格子、头图、帖子卡片缩略图、「下一篇」用 `<Cover v-bind="cover" grid />`（`grid` 时优先用 `thumb`），
+  全屏看大图（`ImageViewer`）用 `src`，并把 `thumb` 垫在下面。图集的图（`AlbumPic`）由 `albumPic()` 换成 `Cover` + `{ width, height }`，`thumb` 原样带着。
+- 服务端的 `Video` 多一个 `hasSrc`（有没有片源；演示数据没有，看 `src`，见 `components/video/playlist.js` 的 `playable`）：播放页播完的「下一个」、自动连播只挑 `hasSrc` 的；相似推荐里服务端已经把有片源的排在前面。
 
 ## 我的：收藏 / 关注 / 观看历史
 
@@ -116,7 +141,8 @@ clearSearchHistory(keyword?)         // 不传 = 清空，传了只删这一个�
 
 - `getPosts(tab)`：tab 2 关注 / 3 收藏没登录时接口返回 `[]`（不是全部帖子），页面按 `auth.loggedIn` 给登录提示。
 - `getLatestFilters({ date })`：`regions[0]` 是「全部」（默认选它），每个地区带 `counts[7]`（按天），`count = counts[date]`；
-  `dates[d].count === regions[0].counts[d]`。`getLatestVideos({ date, region })` 的 `region` 是 `regions` 的下标（0 = 全部）。
+  `dates[d].count === regions[0].counts[d]`；`latestAt` 是最近一次上新的时间（秒，没有为 `null`）。`getLatestVideos({ date, region })` 的 `region` 是 `regions` 的下标（0 = 全部）；
+  `date: 'recent'` 是不限日期的「最近上新」（7 天都是 0 时「最新」页用它兜底；演示数据照样给一页）。
 - `getTopic(id)`：`plays` / `playCount` 取后台填的播放数和专题内视频播放数之和的较大值，`favs` 含专题内视频的收藏，`faved` 是当前用户收藏过没有。
 
 ## 短视频推荐流

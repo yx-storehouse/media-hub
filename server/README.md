@@ -15,9 +15,9 @@ node server/index.mjs                        # 启动接口服务，默认 http:
 测试：
 
 ```bash
-node server/test-api.mjs     # 107 项接口测试（含帖子详情、创作者主页、图集、短视频推荐流、我的收藏 / 关注 / 历史、搜索记录、压缩与缓存、老库补列 / 补建图集表）
-node server/test-auth.mjs    # 37 项鉴权测试
-node server/test-admin.mjs   # 108 项管理后台测试（图集 / 导入 / 导出 / 素材文件 / 首页分区 / 超时…）
+node server/test-api.mjs     # 119 项接口测试（含帖子详情、创作者主页、图集、短视频推荐流、我的收藏 / 关注 / 历史、搜索记录、压缩与缓存、老库补列 / 补建图集表、占位图迁移与回滚）
+node server/test-auth.mjs    # 40 项鉴权测试（含数据库被别的进程锁住时的等待 / 503）
+node server/test-admin.mjs   # 119 项管理后台测试（图集 / 导入 / 导出 / 素材文件 / 首页分区 / 超时 / 导入时等写锁…）
 ```
 
 三套测试各用自己的库（`server/db/*-test.db`）和端口（3178 / 3179 / 3180；管理后台测试另起一个短超时实例用 3181，接口测试另起「老库补列」「老库补建图集表」实例，先后用 3182，库建在系统临时目录），不会碰 `reel.db`。
@@ -35,6 +35,8 @@ server/
   api.mjs          接口层：函数名与 src/api/index.js 一一对应
   auth.mjs         鉴权：口令哈希（scrypt）、会话令牌、失败次数限制
   create-admin.mjs 建 / 重置管理员账号
+  backup-db.mjs    备份数据库（部署前 scripts/deploy.sh 调用）
+  inline-art.mjs   回滚到老版本前把占位图换回内联写法（见「启动时的自动补建 → 回滚到老版本」）
   test-api.mjs     接口冒烟测试
   test-auth.mjs    鉴权测试
   test-admin.mjs   管理后台测试
@@ -53,7 +55,8 @@ server/
     reel.db        SQLite 数据库文件（自动生成，已在 .gitignore）
   lib/             随机数与占位图（art.mjs 与 src/mock 同步，保证前后端图片一致；lite-art.mjs 是后台新建数据用的轻量占位图）、
                    地址比较（urls.mjs：编码 / 未编码算同一个文件）、InputError（errors.mjs）、响应压缩（compress.mjs）、
-                   图片宽高（image-size.mjs：读 PNG / JPEG（含 EXIF 方向）/ GIF / WebP / AVIF 的文件头，零依赖）
+                   图片宽高（image-size.mjs：读 PNG / JPEG（含 EXIF 方向）/ GIF / WebP / AVIF 的文件头，零依赖）、
+                   占位图仓库（art-store.mjs：art_blobs 与 /api/art 短地址）、小图地址（thumbs.mjs）
 ```
 
 ## 设计要点
@@ -94,10 +97,19 @@ server/
 | 其他 | `video_uploads` `daily_stats` |
 
 关键索引：
-- `videos(status, topic_id, published_at DESC)` — 专题页
+- `videos(status, topic_id, published_at DESC)` — 专题页；`(status, topic_id, play_count DESC, fav_count)` / `(status, topic_id, fav_count DESC)` — 专题按播放 / 收藏排序、专题头部的播放 / 收藏之和
 - `videos(status, category_key, published_at DESC)` — 分类页
 - `videos(status, play_count DESC)` — 最热排序
+- `videos(creator_id, status, published_at DESC)` / `(creator_id, status, play_count DESC)`、`posts(creator_id, status, published_at DESC)` — 创作者主页计数、最新 / 最热
+- `videos(status, published_at DESC, title, tags)` / `posts(status, published_at DESC, text, tags)` — 一两个字的搜索、热词「有没有结果」（覆盖索引，不回表）
+- `videos(status, published_at DESC, region)` — 「最新」7 天 × 地区计数（覆盖索引）
+- `video_favs` / `post_favs` / `topic_favs` / `user_follows` 的 `(user_id, created_at DESC, …)` — 「我的」收藏 / 关注按时间倒序翻页
+- 外键子列（`watch_history(video_id)`、`posts(video_id)`、`comments(user_id)` …）— 删视频 / 用户时级联删除不用扫整表
 - `home_section_items(section_id, batch_key, sort_order)` — 换一批
+
+所有索引的定义都在 `schema.sql`，老库启动时由 `db/index.mjs` 的 `INDEXES` 补建（见文末「启动时的自动补建」）。
+库里**没有**跑 `ANALYZE`，也不要跑：没有统计信息时 SQLite 按「等值列多的索引更好」选，上面这些索引都是按这个规则设计的；
+跑了 `ANALYZE` 反而会让分类页按播放排序、相似推荐、关注 tab 改走别的索引变慢（审计时实测）。`server/test-api.mjs` 里用 `EXPLAIN QUERY PLAN` 锁住了这些查询的执行计划。
 
 ## 接口一览
 
@@ -107,7 +119,7 @@ server/
 | GET | `/api/home/recommend` | `getRecommendSections()` |
 | GET | `/api/home/section/:id/videos?batch=` | `getVideos()` |
 | GET | `/api/home/latest/filters?date=` | `getLatestFilters()`：地区第一项是「全部」，每个地区带 7 天的 `counts`（见下面「最新」） |
-| GET | `/api/home/latest/videos?date=&region=` | `getLatestVideos()`：`region` 0 = 全部，也可以传地区 code |
+| GET | `/api/home/latest/videos?date=&region=` | `getLatestVideos()`：`region` 0 = 全部，也可以传地区 code；`date=recent` = 不限日期的最近上新 |
 | GET | `/api/category/:tab/filters` | `getCategoryFilters()` |
 | GET | `/api/category/:tab/videos?filter=` | `getCategoryVideos()` |
 | GET | `/api/search/hot?page=` | `getHotWords()`：只列搜得到东西的词（见下面「搜索」） |
@@ -120,7 +132,7 @@ server/
 | GET | `/api/topic/:id/videos?sort=` | `getTopicVideos()` |
 | GET | `/api/library` | `getLibrary()` |
 | GET | `/api/videos/:id` | `getVideo()`：播放页详情（含 `src` 播放地址、标签、热榜名次；登录时带上次看到的 `progressSec` / `watchedAt`） |
-| GET | `/api/videos/:id/related?batch=&limit=` | `getRelatedVideos()`：相似推荐，`batch` 递增 = 换一批 |
+| GET | `/api/videos/:id/related?batch=&limit=` | `getRelatedVideos()`：相似推荐，`batch` 递增 = 换一批；有片源（`hasSrc`）的排在最前，其次同专题、同分类，再按播放量 |
 | GET | `/api/shorts?seed=&offset=&limit=&exclude=` | `getShorts()`：短视频推荐流（见下面「短视频推荐流」） |
 | GET | `/api/community/posts?tab=` | `getPosts()`：`tab` 2 关注 / 3 收藏没登录时是 `[]` |
 | GET | `/api/community/posts/:id` | `getPost()`：帖子详情（见下面「帖子详情」） |
@@ -143,6 +155,13 @@ server/
 | DELETE | `/api/me/history[/:videoId]` | `clearHistory()` / `removeHistory()` → `{ removed, total }`（要登录） |
 | GET | `/api/me/favs?type=video\|post\|topic&limit=&offset=` | `getMyFavs()` → `{ total, list }`（要登录） |
 | GET | `/api/me/follows?limit=&offset=` | `getMyFollows()` → `{ total, list }`（要登录） |
+| GET | `/api/art/<hash>.svg` | 生成的占位图（列表里 `Cover.fallback` 的 `url(/api/art/…)`，见下面「占位图」），一年 `immutable` 缓存 |
+
+**分页**：所有公开列表（最新、分类、专题、社区、直播、同城、搜索、创作者主页、我的…）的 `limit` 都是 1～50（默认 20），`offset` 0～10 亿；
+不是数字、负数、`1e20`、`Infinity` 都按默认处理，不会报错，也拉不走整张表（以前 `?limit=-1` 能一次拿到全部帖子，几十 MB）。
+另外 `/api/search/creators?limit=` 1～50（默认 5）、首页分区 `size` 1～60（默认 4）、相似推荐 `limit` 1～20（默认 6）；`tab` / `filter` / `sort` 这类下标认不出时按 0。
+
+**Video 结构**（所有视频列表、详情通用）多了 `hasSrc`：有没有片源（播放地址）。播放页的「下一个」/ 自动连播据此跳过只有封面的视频。
 
 响应统一：
 
@@ -151,7 +170,7 @@ server/
 { "code": 1, "message": "缺少 q 参数" }
 ```
 
-400 = 参数问题，404 = 路由不存在，405 = 方法不对，500 = 服务端异常。
+400 = 参数问题，404 = 路由不存在，405 = 方法不对，500 = 服务端异常，503 = 数据库被别的进程锁住（`create-admin.mjs`、开着事务的 sqlite3 命令行拿着写锁，写请求等了 2 秒还拿不到），提示「服务器忙，请稍后再试」。等锁的时候读请求照常返回（见「数据库连接与稳定性」）。
 
 ### 帖子详情
 
@@ -204,6 +223,7 @@ server/
 ```
 
 - **头图**：取他最近的作品图——视频封面、帖子主图（没有主图的图文 / 视频帖取第一张配图，文档帖的配图是文档页、不要）、图集封面（第一张图，`fallback` 为 `null`），草稿 / 下架的不算。
+  每张 `{ src, fallback, thumb }`，`thumb` 是小图地址（见下面「缩略图」）。
   视频、帖子、图集三边各先按发布时间取 3 条再合并，作品很多时也不用整表排序；同一时间视频在前、帖子其次、图集最后。
 - `GET /api/creators/:id/videos?sort=0|1&limit=&offset=` → `{ total, list }`：只含已发布的视频，`sort` 0 = 发布时间倒序（默认，其他值也按它）、1 = 播放数倒序；
   同值再按发布时间、id 排，翻页不重复不遗漏。列表带当前用户的 `liked` / `faved`。
@@ -217,6 +237,11 @@ server/
     `title` 是图集标题（可能是 `''`），`cover` 是 `{ src: 图片地址, fallback: null }`。点开后可以用 `GET /api/albums/:albumId` 取整个图集、从第 `albumIndex` 张看起。
   - 排序：发布时间倒序，同一时间视频在前、帖子的图其次、图集的图最后，再按所属内容、图的顺序排（全序，翻页不重复不遗漏）。
 - 分页：`limit` 1～50（默认 20），`offset` 从 0 起，非法值按默认处理；`offset` 再大（`1e20`、`Infinity`）也只是空页，不会报错。
+- **缩略图**：照片墙每格的 `cover`、图集列表的 `cover`、图集详情的每张图、头图、帖子的 `media.main` / `media.thumbs` 都多一个 `thumb`（小图地址）。
+  网格、头图横幅用 `thumb`，全屏看大图才用原图（`src` / `url`，不变）。规则（`lib/thumbs.mjs`）：
+  素材目录里的图（`/media/…/x.jpg`）旁边有 `x.jpg.thumb.jpg`（后台上传图片时在浏览器里生成，长边约 480、短边至少 360）就用它，查文件的结果记 30 秒；
+  小图名字带着原图的扩展名，同一个文件夹里的 `x.jpg` 和 `x.png` 各有各的小图（按主名共用一张 `x.thumb.jpg` 的话，一张会显示成另一张）；
+  `picsum.photos` 的地址把路径里的宽高按比例缩到长边 480；其余（外链、没有小图的老图）就是原图地址。没有图片地址时为 `null`。
 - 创作者不存在、已停用，或 id 不是正整数（如演示数据的账号 `aijc`）：五个接口（主页头部、视频、帖子、媒体、图集）都回 `400 { code: 1, message: '创作者不存在' }`（不会 500）。
 - 社区列表 / 搜索帖子的每条多了 `creatorId`（发布者 id，创作者被删除时为 `null`），App 的帖子卡片据此把头像和名字链到主页。
 - 关注接口现在多返回一个 `followers`（最新粉丝数），主页关注 / 取消后直接用它刷新；关注已停用或不存在的创作者回 400「创作者不存在」（取消关注总是可以）。
@@ -265,7 +290,10 @@ server/
 - `exclude`：逗号分隔的视频 id，最多 100 个，非法的忽略。App 把本机最近刷到过的 id 带上，未登录也能每次打开都不一样。
 - `limit` 1～50（默认 10），`offset` 从 0 起。翻过整个候选池后用派生 seed（`seed:r1`、`seed:r2`…）再排一轮接着给，所以 `hasMore` 恒为 `true`（库里一条已上架视频都没有时是 `false`、`list` 为空）；新一轮的开头会避开上一轮末尾的几条。
 - 每条是 `Video` + `{ src, like, fav, likes, favs }`，`creator` 是 `{ id, name, handle, avatar }`（没有创作者时为 `null`）。这一页里刚被下架 / 删除的视频直接跳过，`list` 可能比 `limit` 短，下一页照样从 `offset + limit` 开始。
-- 性能：整个排序按「用户 + seed + 轮次」只算一次，放在内存里（最多 64 份，5 分钟没人翻就丢），翻页只是切片。排序只读 `videos` 的几个数字列 + 短视频 id + 当前用户 30 天内的观看记录，2 万条视频约 70 ms。
+- 性能：候选池（全部已上架视频打分要用的几列，以及和 seed 无关的那部分分数）常驻内存，最多用 60 秒、后台任何写操作后立刻作废；
+  换一个新 seed 只要加上随机扰动、减去这个人的罚分、用原生数值排序整体排一次（不再每次读一遍 `videos` 全表、逐行打分）。
+  4.5 万条已上架视频时新 seed 约 7 ms（登录用户约 11 ms，审计时是 260–430 ms、期间整个服务卡住）；重建候选池约 50 ms，一分钟最多一次。
+  整个排序按「用户 + seed + 轮次」只算一次，放在内存里（最多 64 份，5 分钟没人翻就丢），翻页只是切片。
   缓存期间 `exclude`、观看记录的变化不影响这一份顺序（「不喜欢」例外，出页时实时跳过）；后台加入短视频后，新打开的 App（新 seed）马上能看到。
 
 ### 最新
@@ -274,13 +302,19 @@ server/
   - `dates`：最近 7 天 `[{ label: '今天' | '昨天' | '10/9', count }]`，`count` 是这一天全部地区的视频数（按服务器本地日期分天）。
   - `regions`：**第一项是「全部」**（`code: 'all'`，默认选它），后面是 `regions` 表里的地区。每项 `{ code, label, count, counts }`，
     `counts[d]` 是这个地区第 `d` 天的视频数，`count = counts[date]`（`date` 是当前选中的日期），所以地区上的数字和列表的条数对得上；
-    `regions[0].counts[d] === dates[d].count`。没填地区、或地区不在表里的视频算「其他」。一条 `GROUP BY` 查完，不按地区逐个 COUNT。
+    `regions[0].counts[d] === dates[d].count`。没填地区、或地区不在表里的视频算「其他」。一条 `GROUP BY` 查完（覆盖索引，几万条视频约 1 ms），不按地区逐个 COUNT。
+  - `latestAt`：最近一次上新的时间（秒，已发布、不晚于明天 0 点的视频里最新的一条；一条都没有为 `null`）。7 天都是 0 时 App 据此提示「最近一次上新是 x 月 x 日」。
 - `GET /api/home/latest/videos?date=0&region=0&limit=&offset=`：`region` 是上面 `regions` 的下标（0 = 全部），也可以直接传地区 code（`all` / `cn` / `jk` / `other`），认不出的按全部。
   按发布时间倒序（同一秒按 id），翻页稳定。
+  `date=recent`：不限日期的「最近上新」（同样按地区筛、同样分页），7 天里一条都没有时 App 用它兜底，不再整页空白。
 
 ### 搜索
 
 - **热门搜索** `GET /api/search/hot?page=` → `[{ word, hot }]`，每批 8 个：只列没屏蔽、而且**搜得到东西**的词（已发布的视频或帖子至少命中一条，和下面的搜索同一套匹配），App 里点热词不会是 0 条结果；后台加了搜不到内容的词，前台不显示。`page` 是「换一批」的次数，翻到末尾接回开头，每批都是满的；能显示的词不到 8 个时全部返回。
+  每个词只问「有没有」（命中第一条就停），筛好的词表在内存里记 60 秒，**后台任何写操作之后立刻作废**（所以后台改了热词、上下架视频马上生效）；
+  重新筛的时候每 8 ms 让出一次事件循环，几百个热词也不会把别的请求堵住。审计时 200 个热词、4.5 万条视频要 7–17 秒（期间全站卡死），现在第一次约 30 ms、之后从内存取。
+- 一两个字的搜索（LIKE）走覆盖索引 `(status, published_at DESC, title, tags)`：先在索引上数总数、按发布时间挑出这一页的 id，再回来取整行；
+  4.5 万条视频时搜得到的词约 6 ms、搜不到的约 8 ms（审计时 270 / 530 ms）。
 - `GET /api/search?q=`（视频）、`GET /api/search/posts?q=`（帖子标题 + 话题标签）→ `{ total, list }`，公开；`q` 为空或全是空白回 400「缺少 q 参数」。
   帖子搜索 3 个字以上走 FTS5 trigram（按相关度，同分新的在前），1～2 个字退回 LIKE（新的在前），只算已发布的；每条和社区列表结构一样（含 `media`、`time`、`faved`）。
 - **搜索记录**：登录用户搜第一页（`offset` 0）时记一次关键词，**没有结果也记**；同一个词只留最新一条，每人最多 50 条，关键词最长 100 字。翻页不重复记。
@@ -301,6 +335,7 @@ server/
 ```
 
 - 计数由 `v_users` **实时统计**（子查询，只算已上架的视频 / 帖子 / 专题、正常状态的创作者），和下面各列表的 `total` 一致；
+  一万多条历史 / 几千条收藏的用户 `/api/me` 约 4 ms（视频行不再带着大块占位图，按主键查状态很快），收藏 / 关注列表按 `(user_id, created_at DESC)` 索引翻页，不再整体临时排序；
   不再读 `user_stats` 里没人维护的 `fav_count` / `follow_count`（收藏、关注以前恒为 0）。「离线缓存」功能没做，不再返回这一格。
   老库启动时按 `views.sql` 里的定义自动重建 `v_users`（见「启动时的自动补建」）。
 - 下面几个都要登录（未登录 401），分页 `limit` 1～50（默认 20）、`offset` 从 0 起，返回 `{ total, list }`，新的在前：
@@ -400,6 +435,25 @@ server: {
 - **迁移工具**：现在靠 `schema.sql` 全量重建（`seed.mjs --reset`）。上线前建议接入迁移工具（如 `node-pg-migrate` 之于 Postgres，SQLite 可用简单的 `migrations/` 目录 + 版本表）。
 
 
+### 数据库连接与稳定性
+
+- 打开数据库时：`synchronous = NORMAL`（WAL 模式下不会损坏数据库，断电时最多丢最后几笔写入；每次写入不再在事件循环上等落盘）、
+  `journal_size_limit` 16 MB（检查点后 WAL 截短，批量删除后不再一直停在几十 MB）、页缓存 32 MB。写事务用 `BEGIN IMMEDIATE`（一开始就拿写锁；拿不到时什么都还没做，可以整个重来）。
+- **别的进程拿着写锁时**（部署时容器里跑 `create-admin.mjs`、开着事务的 sqlite3 命令行）：写请求最多等 2 秒（`DB_BUSY_TIMEOUT_MS` 可改，上限 30 秒），
+  还拿不到就回 `503 { code: 1, message: '服务器忙，请稍后再试' }`（带 `Retry-After: 2`），不是 500；App 会重发播放记录 / 进度。
+  - 等是**异步**的（`db/index.mjs` 的 `whenWritable` / `retryBusy`）：写请求（POST / PATCH / PUT / DELETE）进处理函数之前先探一下写锁
+    （`BEGIN IMMEDIATE` 马上 `ROLLBACK`，约 6 微秒，不写任何东西），拿不到就隔 2 → 5 → 10 → … → 100 毫秒再探，**等的时候读请求照常处理**。
+  - SQLite 自己的 `busy_timeout` 只在启动迁移时用（10 秒，这时还没开始接请求），开始监听后设成 0：它是在调用里同步睡眠，
+    以前设成 2 秒时，锁一直不放、App 又不停在写的话，整个服务连读请求都处理不了（大库实测锁 6 秒期间读请求一个都没回）。
+  - 分块删除、改名 / 移动后改引用、导入（读文件头时让出过事件循环）每次写库前各自异步等；GET 里顺带的写（续会话、记搜索词）拿不到锁就跳过这一次，读照常返回。
+  - 代价：等锁期间写请求在排队，锁一放开最多 100 毫秒内接着写；处理函数在「探到能写」和「真正写」之间不让出事件循环，别的进程恰好在这几微秒里插进来时照旧回 503。
+  - `create-admin.mjs` / `backup-db.mjs` 是单独跑的脚本，自己同步等最多 5 秒。登录时碰上数据库忙 / 服务端出错，不算一次「密码错误」。
+- 前台查询的 SQL 只编译一次（语句缓存，最多 500 条）；一页帖子的图一条查询取完（以前每个帖子单独查一次）；按一串 id 取视频整行走主键（`json_each` + `CROSS JOIN`）。
+- **慢请求日志**：接口处理超过 100 ms（`SLOW_REQUEST_MS` 可改，0 = 不记）记一行 `[慢请求] 312 ms GET /api/…`，同一路径 10 秒内只记一次（附上这段时间里又慢了几次）。上传不算。
+- **保活连接**：空闲 65 秒才关（Node 默认 5 秒：某个请求把事件循环卡住超过 5 秒时，复用连接上的请求会收到 ECONNRESET）。
+  不读请求体就回绝的请求（401 / 403 / 404 / 405）回完以后空闲 5 秒就断开，发一半就停的大请求体不会占着连接。
+- 内存里的短缓存（热门搜索词 60 秒、短视频候选池 60 秒）在**任何后台写操作之后**立刻作废（`server/index.mjs` 统一调 `invalidateCaches()`）。
+
 ## 鉴权
 
 内网程序，用最省事的方案：账号由管理员创建，口令加盐哈希存在本地，会话令牌走 `Authorization: Bearer`。
@@ -437,14 +491,14 @@ node server/create-admin.mjs admin 你的密码
 | POST | `/api/admin/users/:id/role` | 改角色（管理员） |
 | DELETE | `/api/admin/users/:id` | 删除账号（管理员） |
 
-状态码：`401` 未登录、`403` 权限不够、`400` 参数或校验错误（`message` 可直接展示）、`500` 服务端异常。
+状态码：`401` 未登录、`403` 权限不够、`400` 参数或校验错误（`message` 可直接展示）、`503` 数据库正忙（别的进程拿着写锁，见「数据库连接与稳定性」）、`500` 服务端异常。
 
 ### 安全上的取舍
 
 内网环境，做了这些：
 
 - 口令用 Node 内置 `scrypt` 加盐哈希，不存明文，也不引入 bcrypt 这类依赖。
-- 登录失败连续 8 次锁定 10 分钟（内存计数，重启清零），防止内网里被猜密码。
+- 登录失败连续 8 次锁定 10 分钟（内存计数，重启清零），防止内网里被猜密码；锁定期间回 400「尝试次数过多，请 N 分钟后再试」（以前第 8 次回 500）。数据库忙 / 服务端出错导致的失败不计数。
 - 「账号不存在」和「密码错误」返回同样的提示，避免探测账号。
 - 令牌是 32 字节随机串，存 `sessions` 表，默认 30 天滑动过期。
 - 停用账号、重置密码会立刻作废该账号的所有会话。
@@ -485,12 +539,12 @@ node server/create-admin.mjs admin 你的密码
 | GET | `/api/admin/stats` | 概览统计（各类数量、缺播放地址 / 封面 / 时长的视频数、素材文件数、最近新增；图集 `albums: { total, published, offline, images }` + 最近新建的 5 个 `recentAlbums`）。结果缓存 5 秒，任何后台写操作后立即失效 |
 | GET | `/api/admin/schema` | 导入 / 导出字段定义（列名、别名、类型、示例、说明） |
 | GET | `/api/admin/:type` | 列表：`?page=1&pageSize=20&sort=&order=asc\|desc` + 各自的筛选，返回 `{ total, page, pageSize, list }` |
-| GET | `/api/admin/:type/export` | 导出（筛选同列表，最多 5 万行）→ `{ fields, rows }` |
+| GET | `/api/admin/:type/export` | 导出（筛选同列表）→ `{ fields, rows, total, truncated, limit }`（最多 5 万行，`ADMIN_EXPORT_MAX` 可改；截断时 `truncated: true`、`total` 是符合筛选的总数） |
 | GET | `/api/admin/:type/:id` | 单条 |
 | POST | `/api/admin/:type` | 新建 |
 | PATCH | `/api/admin/:type/:id` | 修改：只改传了的字段，`null` 清空可空字段 |
 | DELETE | `/api/admin/:type/:id` | 删除（专题返回 `deletedSections / detachedVideos`，创作者返回 `deletedPosts / detachedVideos`） |
-| POST | `/api/admin/:type/batch` | 批量操作 `{ ids, action, value? }` → `{ affected }` |
+| POST | `/api/admin/:type/batch` | 批量操作 `{ ids, action, value? }` → `{ affected }`（删除是分块提交的，见「批量操作」） |
 | POST | `/api/admin/:type/import` | 批量导入，见下 |
 | PUT | `/api/admin/topics/order` | 专题排序 `{ ids }`（sort_order = 下标） |
 | GET / POST | `/api/admin/sections` | 首页推荐分区列表 `{ list }` / 新建 |
@@ -498,9 +552,12 @@ node server/create-admin.mjs admin 你的密码
 | PUT | `/api/admin/sections/order` | 分区排序 `{ ids }` |
 | GET / PUT | `/api/admin/sections/:id/items` | 分区内容 `{ batches: [[videoId…]…] }`（最多 20 批、每批 60 个） |
 | POST | `/api/admin/sections/:id/rebuild` | 自动生成 `{ source: 'topic'\|'hot'\|'latest', batches = 4, size = 首屏数量 }` |
-| GET | `/api/admin/media?dir=` | 列素材目录 |
+| GET | `/api/admin/media?dir=` | 列素材目录（文件夹带 `items`，图片带小图地址 `thumb`，见「素材文件」） |
 | PUT | `/api/admin/media/upload?path=videos/a.mp4&overwrite=0\|1` | 上传：请求体就是文件字节（不是 JSON） |
-| POST | `/api/admin/media/folder` | 新建文件夹 `{ path }` |
+| POST | `/api/admin/media/folder` | 新建文件夹 `{ path }`（上级不存在时一起建；已经有这个文件夹 / 同名文件时 400） |
+| POST | `/api/admin/media/delete` | 批量删除 `{ paths, force }` → `{ deleted, failed }`：没带 `force` 时只要有一个文件正被使用就整批不删（400，`field: 'usedBy'`，列出是哪几个）；其余逐个删，删不掉的（不存在、文件夹不为空、正被占用）放进 `failed: [{ path, message }]` |
+| POST | `/api/admin/media/rename` | 改名 `{ path, name }` → `{ from, to, url, type, refs }`：留在原来的文件夹，文件不能换类型（同类之间换扩展名可以，如 `.jpeg` → `.jpg`） |
+| POST | `/api/admin/media/move` | 移动 `{ paths, to }` → `{ moved: [{ from, to, url, type }], failed, refs }`：`to` 为空 = 根目录；目标里已有同名的、移到自己里面的、本来就在目标里的放进 `failed` |
 | DELETE | `/api/admin/media?path=&force=0\|1` | 删除文件或空文件夹；被视频或图集引用的文件要 `force=1` |
 | POST | `/api/admin/media/scan` | 扫描视频文件 `{ dir, recursive }`：带同名封面、是否已入库 |
 
@@ -563,6 +620,10 @@ node server/create-admin.mjs admin 你的密码
 注意两处级联：**删专题会连带删掉用它的首页分区**，它下面的视频变成「无专题」；**删创作者会连带删掉他的帖子和图集**，他的视频变成「无创作者」。
 删除接口会返回受影响的数量（删创作者：`deletedPosts` / `deletedAlbums` / `detachedVideos`）。删图集只删库里的行（连带它的图片行），**素材文件不动**。
 
+**批量删除（`action: 'delete'`）是分块执行的**：每块一个事务、各自提交，块之间让出事件循环（块大小按上一块的耗时调整，目标约 40 ms），
+删几千条时 App 的请求最多等一块，不再整批卡住服务。代价是**不再是全有或全无**：万一中途出错（比如别的进程一直拿着写锁、等满 2 秒），
+已经删掉的块不会恢复，返回的错误之前删掉的就是删掉了，再删一次剩下的即可；总耗时比一个大事务长一些（2000 条视频约 2.3 秒，原来约 1 秒）。
+
 ### 批量导入
 
 `POST /api/admin/{videos|posts|topics|creators|keywords|albums}/import`，一次最多 20000 行（JSON 请求体上限 32 MB、60 秒内要传完）。后台页面会把 CSV / Excel / 粘贴的表格解析好再分批调这个接口；脚本也可以直接调：
@@ -591,19 +652,26 @@ curl -X POST http://localhost:3000/api/admin/videos/import \
 返回：
 
 ```json
-{ "total": 4, "created": 1, "updated": 1, "skipped": 1, "failed": 1,
+{ "total": 5, "created": 1, "updated": 1, "unchanged": 1, "skipped": 1, "failed": 1,
   "results": [ { "row": 2, "status": "created", "id": 501 },
                { "row": 3, "status": "skipped", "id": 12, "message": "已存在（按编号匹配到 ID 12），已跳过" },
-               { "row": 4, "status": "updated", "id": 15, "message": "按播放地址匹配到 ID 15，已更新" },
-               { "row": 5, "status": "error", "message": "时长格式不正确…", "field": "duration" } ],
+               { "row": 4, "status": "updated", "id": 15, "changed": ["title", "tags"], "message": "按播放地址匹配到 ID 15，已更新：标题、标签" },
+               { "row": 5, "status": "unchanged", "id": 16, "message": "按编号匹配到 ID 16，没有变化" },
+               { "row": 6, "status": "error", "message": "时长格式不正确…", "field": "duration" } ],
   "autoCreated": { "topics": ["新专题"], "creators": [] } }
 ```
 
 `results[].field` 是**导入字段 key**（如 `topic`、`duration`），方便标到对应的列。
 
+- `status` 是 `created` / `updated` / `unchanged` / `skipped` / `error` 之一，计数分别在 `created` / `updated` / `unchanged` / `skipped` / `failed`。
+- 「更新已有」时先和库里的比：**一项都没变的行是 `unchanged`（「没有变化」），不写库**、`updatedAt` 不动；
+  真改了的行是 `updated`，带 `changed: [字段 key]`，`message` 写明改了哪几项（「…，已更新：标题、标签」）。所以「导出 → 改几行 → 导回」能看出到底改了哪几行。
+- 预检（`dryRun`）的说明用将来时：「…，将更新：标题」「已存在（…），将跳过」；真导入用「已更新」「已跳过」。
+
 规则：
 
-- 整个请求一个事务、每行一个 SAVEPOINT：坏行回滚并报错，不影响其他行；同一个文件里的重复行也能识别（后一行能看到前一行的写入）。
+- 整个请求一个事务（`BEGIN IMMEDIATE`，预检也一样）、每行一个 SAVEPOINT：坏行回滚并报错，不影响其他行；同一个文件里的重复行也能识别（后一行能看到前一行的写入）。
+  别的进程拿着写锁时先异步等它放开（最多 2 秒，见「数据库连接与稳定性」），等不到回 503、整批没写；不会把每一行都记成「服务器内部错误」。
 - 判断「已存在」的顺序：视频 `id → 编号 → 播放地址`，帖子 `id`，专题 `id → 标识 → 名称`，创作者 `id → 账号`，热词 `热词`，
   图集 `id → 第一张图片`（「图片」列的第一个地址和某个图集的封面是同一个文件，就算同一个图集；比较规则同下面的播放地址）。填了 `id` 但库里没有 → 报「ID 不存在」（不会按指定 id 插入）。
 - 视频只用**第一个非空的键**：填了编号但库里没有，就当新视频新建，不会再退到播放地址去匹配（否则几条共用同一个占位视频文件的新视频会互相覆盖）。只填了播放地址的行才按播放地址查重。
@@ -638,6 +706,8 @@ curl -X POST http://localhost:3000/api/admin/videos/import \
 | 清晰度 | `标清 / 高清 / 超清`、`sd / hd / fhd`、`480p / 720p / 1080p / 4k` |
 
 导出（`GET /api/admin/:type/export`）的值就是这些写法：专题 → 名称（按上面的规则读不回同一个专题时——重名、纯数字等——改用标识，标识也不行就用 id）、创作者 → 账号（纯数字账号加 `@`）、时长 `hh:mm:ss`、状态 → 中文（图集是「上架 / 下架」）、时间 `YYYY-MM-DD HH:mm:ss`、布尔 `是 / 否`、多个地址用换行（图集的图片只导出地址，再导入时宽高沿用库里的）。所以「导出 → Excel 里改 → 按『更新已有』再导入」不需要手动对应列，没改的数据保持不变。后台页面生成 CSV 时会给 `= + - @` 开头的单元格加 `'` 防公式注入，导入时服务端会去掉。
+一次最多导出 5 万行（`ADMIN_EXPORT_MAX` 可改）：超出时只返回前 5 万行，`truncated: true`、`total` 是符合筛选的总数、`limit` 是上限，后台据此提示「请加筛选分批导出」。
+视频按 id 分块取整行，块之间让出事件循环，导出几万条时 App 的请求不用排在后面等。
 
 ### 素材文件（media/）
 
@@ -659,6 +729,16 @@ curl -X POST http://localhost:3000/api/admin/videos/import \
 - 站内地址形如 `/media/videos/%E6%97%A5%E8%90%BD.mp4`（每段 URL 编码）；视频的播放地址 / 封面写成编码、未编码、带 `?v=` 参数的形式都能被「被 N 个视频使用」统计到。
 - 图集：列目录的每项除了 `usedBy`（被几个视频用到）还有 `usedByAlbums`（被几个图集用到，同样的比较规则，只统计图片）；
   删被图集用到的文件同样要 `force=1`，提示是「该文件被 2 个图集使用」或「该文件被 1 个视频、2 个图集使用」（`field: 'usedBy'`）。
+- 文件夹带 `items`：里面列表能看到的项数（不含隐藏 / 临时文件和挂在原图上的小图），删除前据此提示「里面还有 N 项」。
+- **小图（缩略图）**：图片 `x.jpg` 的小图是同一个文件夹里的 `x.jpg.thumb.jpg`（`<原图完整文件名>.thumb.jpg`，后台上传图片时在浏览器里生成，长边 ≤ 480；
+  App 的网格、头图横幅用它，见「创作者主页 → 缩略图」）。名字带着原图的扩展名，所以同一个文件夹里的 `x.jpg` 和 `x.png` 各有各的小图。
+  - 列目录时挂在原图上、不单独列出：图片带 `thumb`（小图地址，没有为 `null`）；原图已经不在的「孤儿」小图照常列出，带 `isThumb: true`，可以删掉
+    （以前按主名命名的 `x.thumb.jpg` 也算孤儿）。
+  - 上传名字以 `.thumb.jpg` 结尾的文件总是覆盖同名文件（不自动改名）；新传（或覆盖）一张原图时，旁边早于这次上传的同名小图是旧图的，删掉，等后台传新的。
+  - 删除 / 改名 / 移动原图时小图跟着删、改名、移动；改名 / 移动到的新名字旁边已经有小图（以前同名的图留下的）时换成这张图自己的，这张图没有小图就把它删掉。
+  - 不能把文件改名成以 `.thumb.jpg` 结尾的名字（留给小图用）。
+- 改名 / 移动时库里引用这些文件的地址一起改（视频的播放地址 / 封面、图集的图片、帖子的主图 / 配图、专题头图、创作者 / 用户头像；编码、未编码、带 `?v=` 的写法都认，
+  查询串保留），返回 `refs`：各类数据改了几条。文件夹按前缀改它下面所有文件的地址，一个事务改完（被 5 万个视频引用的文件夹约 0.4 秒）；改库失败就把文件挪回去。
 - 开发时 Vite 把 `/media` 和 `/api` 一起代理到接口服务。
 
 ### 连接超时
@@ -672,11 +752,27 @@ curl -X POST http://localhost:3000/api/admin/videos/import \
 
 ### 占位图
 
-后台新建的视频 / 帖子 / 专题会生成一张轻量占位图（`lib/lite-art.mjs`：渐变 + 柔光 + 山丘或光斑，按 id / 编号决定配色，每张约 1.1 KB），导入几万条也不会让库明显变大。种子数据仍用 `lib/art.mjs` 的风景图，已有的行不改。
+`Cover.fallback` 是 CSS `background-image` 的值（图片没来 / 来不了时垫在下面），现在有三种，App 的 `Cover.vue` 都是直接当背景用：
+
+- **`url(/api/art/<16 位十六进制>.svg)`**：生成的风景图（种子数据、老版本后台建的内容）和创作者的首字头像。SVG 原文存在 `art_blobs` 表（按内容哈希，同样的只存一份），
+  `GET /api/art/<hash>.svg` 返回原来那张图（画面一模一样），一年 `immutable` 缓存 + ETag，带 `Content-Security-Policy: default-src 'none'`。
+  以前这些 SVG 整段内联在每一条里（种子数据 2–21 KB 一张）：分类页一页 20 条 230 KB、手机上每追加一页都要同步解析十几个 SVG 文档（100–200 ms 的长任务），
+  `videos` 表一半以上是占位图、扫表要顺着溢出页读。现在一页约 11 KB，图片异步加载、同一张只解析一次。
+- **纯 CSS 渐变**（`lib/lite-art.mjs`，200～400 字节）：后台新建的视频 / 帖子 / 专题头图。画面和以前的 SVG 版一样（同一个 seed 取同样的随机数：天空渐变 + 太阳柔光 + 两道山丘，或对角渐变 + 两团光斑），
+  没有 SVG，导入几万条也不会让库变大。
+- 用户头像（`users.avatar_fallback`）照旧是内联的首字 SVG（不到 1 KB；后台刚新建 / 改名的创作者头像也先是内联的，下次启动时挪进 `art_blobs`）。
 
 ### 启动时的自动补建
 
 老库不用重建，接口服务启动时会自动补上：
+
+- **占位图挪进 `art_blobs`**（见上面「占位图」）：行里内联的 SVG 占位图换成 `url(/api/art/…)` 短地址，SVG 原文按内容哈希存进新表 `art_blobs`；每 500 行一个事务，重复执行没有副作用。
+  **这是唯一会改写已有行的一步**（`videos.cover_fallback`、`post_media.fallback`、`topic_covers.fallback`、`live_rooms.cover_fallback`、`places.cover_fallback`、`creators.avatar_fallback` 六列；
+  画面和数据内容不变，只是写法变了），别的补建都是只增不删。退回老版本前要先换回来，见下面「回滚到老版本」。
+  第一次挪完（挪走的超过 1 MB）会整理一次库（`VACUUM`）：行在原地变短后，原来的数据页八成是空的，不整理的话扫表照样要读那么多页。
+  线上几百条视频的库不到 1 秒；4.5 万条视频的库第一次启动约 5 秒（挪 8.2 万张图 + 整理 + 建索引，库从 172 MB 变成 145 MB，要临时多占一份库大小的磁盘），之后每次启动不到 1 秒。日志里提示一次「已把 N 张内联的占位图挪进 art_blobs」。
+- **前台查询的索引**（`db/index.mjs` 的 `INDEXES`，和 `schema.sql` 一致，全是 `CREATE INDEX IF NOT EXISTS`）：专题按播放 / 收藏排序、「最新」计数、搜索、创作者主页、「我的」收藏 / 关注、外键子列、后台列表排序
+  （`idx_videos_admin_play` / `_like` / `_fav`：`(列 DESC, id DESC)`，`idx_videos_admin_title` / `_dur`：`(列, id)`）。4.5 万条视频的库上一共一两秒。
 
 - `posts.content` 列（帖子详情正文，`TEXT NOT NULL DEFAULT ''`）：老库没有这一列时 `ALTER TABLE` 补上，日志里提示一次；已有的帖子正文为空，可在后台补写或用导入批量填。
 - 图集表 `albums` / `album_images` 和它们的 4 个索引：按 `schema.sql` 里「图集」那一段原样执行（全是 `CREATE … IF NOT EXISTS`，定义只写在那一处），
@@ -685,3 +781,17 @@ curl -X POST http://localhost:3000/api/admin/videos/import \
 - 索引：`idx_videos_playback` / `idx_videos_cover`（按地址查重、统计素材引用、统计缺播放地址 / 封面）、`idx_videos_pubtime` / `idx_videos_created`（列表按发布 / 创建时间排序，几万条视频时不用临时排序）、`idx_videos_nodur`（缺时长）、`idx_creators_name`（按名称找创作者）。
 - 修复读不出来的时长：早期版本导入时可能写进超过 2^53 的整数或超大小数，读这一行会让列表、导出、App 详情页报错。启动时把这类时长清零（变成「缺时长」，可在后台重填），并在日志里提示条数。
 - `v_users` 视图：老库的定义还读 `user_stats` 里没人维护的收藏 / 关注计数时，按 `views.sql` 里的新定义重建（「我的」页计数改为实时统计），日志里提示一次。
+
+#### 回滚到老版本
+
+新加的表、列、索引、触发器老版本都不认识也不碍事，**只有占位图那一步要先换回来**：老版本（`52ac38d` 及以前）没有 `/api/art` 接口，
+只把代码退回去的话，没有真封面的视频、帖子图、专题头图只剩一块深色底，没有头像的创作者是空圈。两种办法：
+
+1. **换回内联写法（推荐，不丢数据）**：新版本还在跑的时候执行
+   `docker exec reel node server/inline-art.mjs`（本地：`DB_PATH=… node server/inline-art.mjs`；先加 `--check` 只看要换多少行），
+   它按 `art_blobs` 把那六列里的 `url(/api/art/…)` 换回原来的 `url('data:image/svg+xml;utf8,…')`（和迁移前逐字节一样），每 500 行一个小事务，服务开着也能跑，可以重复执行。
+   然后直接部署老版本的代码（在老代码上跑 `scripts/deploy.sh`），**中间不要再启动新版本**（它启动时又会挪回去）。
+   容器已经换成老镜像时，用仓库里这份喂进去：`docker exec -i reel node --input-type=module - < server/inline-art.mjs`（脚本不依赖仓库里别的文件）。
+   `art_blobs` 表留着，以后再升级时直接复用。
+2. **恢复部署前的备份**：`scripts/deploy.sh` 每次部署前把库备份到容器的 `/data/backups`（`reel-<时间>.db`，保留最近 10 份），停掉容器、把它拷回 `/data/reel.db` 再起老版本。
+   简单，但**升级之后的写入（新账号、收藏、播放记录、后台改的内容）都会丢**。

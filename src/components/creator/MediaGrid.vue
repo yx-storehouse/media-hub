@@ -14,6 +14,7 @@ import { rememberVideo } from '@/components/video/preview'
  *
  * 结构（给动效挂钩子用）：.mg 网格 > .mg-t 一格（按住时全局 m-hold 加 .m-pressed）> .mg-cv 封面 + .mg-meta 视频角标。
  * 正方形用 padding 撑高（iOS 14 不认 aspect-ratio）。
+ * 格子里放小图（接口的 cover.thumb，长边约 480、短边至少 360；没有小图时用原图），原图只在全屏看大图时用（ImageViewer 拿的是 cover.src）。
  */
 defineProps({
   /** MediaItem[]：{ id, kind: 'image' | 'video', cover, title, postId, videoId, albumId, albumIndex, dur }（见 src/api/index.js） */
@@ -29,6 +30,9 @@ function setTile(id, el) {
   else tiles.delete(id)
 }
 defineExpose({ tile: id => tiles.get(id) || null })
+
+/* 格子里的图：有小图用小图（一格一百多 CSS 像素，原图动辄一两千像素、几百 KB），占位图照旧 */
+const small = c => c?.thumb || c?.src || null
 
 const videoTo = m => `/video/${encodeURIComponent(m.videoId)}`
 const remember = m => rememberVideo({ id: m.videoId, title: m.title, cover: m.cover, dur: m.dur })
@@ -46,7 +50,7 @@ const videoLabel = m => `播放视频：${m.title || '未命名'}${m.dur ? `，�
         :aria-label="videoLabel(m)"
         @click="remember(m)"
       >
-        <Cover class="mg-cv" v-bind="m.cover || {}" />
+        <Cover class="mg-cv" :src="small(m.cover)" :fallback="m.cover?.fallback || null" />
         <span class="mg-meta" aria-hidden="true">
           <Icon name="play" />
           <span v-if="m.dur">{{ m.dur }}</span>
@@ -60,7 +64,7 @@ const videoLabel = m => `播放视频：${m.title || '未命名'}${m.dur ? `，�
         :aria-label="`查看大图：${m.title || '图片'}`"
         @click="emit('open', m)"
       >
-        <Cover class="mg-cv" v-bind="m.cover || {}" />
+        <Cover class="mg-cv" :src="small(m.cover)" :fallback="m.cover?.fallback || null" />
       </button>
     </template>
   </div>

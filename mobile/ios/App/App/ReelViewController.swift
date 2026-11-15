@@ -17,6 +17,7 @@ import Capacitor
  *   - 服务器上 target=_blank 的链接（「我的 → 管理后台」）：在 App 里弹出 Safari 页面，点「完成」回来。
  *     iPhone 没有返回键，留在主 WebView 里就回不去了
  *   - 回到前台、系统弹窗（比如第一次连内网时的「本地网络」权限）关掉后：通知启动页，连不上时自动重试
+ *   - 双指放大不受网页的 maximum-scale=1 限制（ignoresViewportScaleLimits），整页跟随系统「更大字体」（pageZoom）
  *
  * 状态栏（深色底、浅色字）由 SystemBars 插件按 capacitor.config.js 设置；安全区交给网页的 env(safe-area-inset-*)
  * （ios.contentInset = never）；横竖屏、视频全屏、播放时屏幕常亮都是 WebView / 系统自己处理的。
@@ -51,6 +52,35 @@ class ReelViewController: CAPBridgeViewController {
 
         NotificationCenter.default.addObserver(self, selector: #selector(appDidBecomeActive),
                                                name: UIApplication.didBecomeActiveNotification, object: nil)
+
+        // 跟随系统「更大字体」（Dynamic Type）：整页按比例放大
+        applyTextScale()
+        NotificationCenter.default.addObserver(self, selector: #selector(contentSizeDidChange),
+                                               name: UIContentSizeCategory.didChangeNotification, object: nil)
+    }
+
+    /// 像 Safari 一样：网页给 iPhone 加的 maximum-scale=1（挡住点进输入框时整页自动放大）不挡双指放大（全局-03）。
+    /// WKWebView 默认遵守 maximum-scale，要在建 WebView 之前改 configuration
+    override func webViewConfiguration(for instanceConfiguration: InstanceConfiguration) -> WKWebViewConfiguration {
+        let configuration = super.webViewConfiguration(for: instanceConfiguration)
+        configuration.ignoresViewportScaleLimits = true
+        return configuration
+    }
+
+    @objc private func contentSizeDidChange() {
+        applyTextScale()
+    }
+
+    /// 系统「更大字体」：整页按比例放大（最多 1.35 倍；放大后网页宽度不小于 320，网页最窄按 320 排版）。
+    /// 安卓的 WebView 默认就按系统字体比例放大文字（textZoom），不用这里处理
+    private func applyTextScale() {
+        guard let webView = webView else { return }
+        // capacitorDidLoad 时 WebView 还没进窗口、没排版：字号取系统设置，宽度取屏幕（不读 view 的尺寸和 traitCollection）
+        let traits = UITraitCollection(preferredContentSizeCategory: UIApplication.shared.preferredContentSizeCategory)
+        let scale = UIFontMetrics(forTextStyle: .body).scaledValue(for: 17, compatibleWith: traits) / 17
+        let width = min(UIScreen.main.bounds.width, UIScreen.main.bounds.height)
+        let zoom = min(max(scale, 1), 1.35, max(width / 320, 1))
+        if abs(webView.pageZoom - zoom) > 0.01 { webView.pageZoom = zoom }
     }
 
     deinit {

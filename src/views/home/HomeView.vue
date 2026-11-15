@@ -9,6 +9,9 @@ import BottomSheet from '@/components/BottomSheet.vue'
 import { useTabRetap } from '@/composables/useTabRetap'
 import { useSlider, under, fadeIn, scrollBehavior } from '@/components/home/motion'
 import { useScrollEdge } from '@/components/motion/scrollEdge'
+import { usePullRefresh, useSwipeTabs } from '@/components/home/gestures'
+import PullHint from '@/components/home/PullHint.vue'
+import { holdKeyboard } from '@/components/search/keyboard'
 import RecommendTab from './RecommendTab.vue'
 import LatestTab from './LatestTab.vue'
 import CategoryTab from './CategoryTab.vue'
@@ -52,6 +55,24 @@ const activeTab = computed(() => CATEGORY_VIEWS[tab.value] || CategoryTab)
 /* 再点一次底部「首页」：当前分类页滚动过就平滑回到顶部，已经在顶部就刷新（推荐页整页换一批） */
 const body = ref(null)
 useTabRetap('home', () => body.value?.retap?.())
+
+/*
+ * 触屏手势（和短视频的下拉刷新、创作者主页的横划换标签一样，见 components/home/gestures.js）：
+ *   - 分类内容停在最顶上时往下拉，松手刷新（推荐页整页换一批，其余分类重新取第一页）；
+ *   - 在分类内容上横着划一下，换到左 / 右相邻的分类（到头了不绕回去；横着滚的筛选、日期行上划不算）。
+ */
+const bodyScroller = () => {
+  const el = body.value?.$el
+  return el instanceof Element ? el.querySelector(':scope > .scroll') : null
+}
+const pull = usePullRefresh(body, { scroller: bodyScroller, refresh: () => body.value?.refresh?.() })
+useSwipeTabs(body, dir => {
+  const next = HOME_TABS[HOME_TABS.findIndex(t => t.id === tab.value) + dir]
+  if (next) router.replace(`/home/${next.id}`)
+}, { scroller: bodyScroller })
+
+/* 点顶部的搜索框：进搜索页并直接弹出键盘（iOS 要在这一下点按里先把键盘叫出来，见 components/search/keyboard.js） */
+const onSearchTap = () => holdKeyboard()
 
 /*
  * 分类标签栏跟着滚动变化：内容往上滚过去时底边细线变亮、下面一道淡阴影（components/motion/scrollEdge.js）。
@@ -103,6 +124,29 @@ onMounted(syncSb)
 onActivated(syncSb)
 onBeforeUnmount(() => sbRo?.disconnect())
 
+/*
+ * 桌面布局：8 个分类一行全摆得下时（平时都是），「全部分类」只是把它们再列一遍，不显示；
+ * 窗口太窄、标签行真的放不下时才显示（量最后一个标签的右边缘，和标签行的左边距对称留白）。
+ */
+const tabsFit = ref(true)
+function checkFit() {
+  const row = tabRow.value
+  if (!row || !isDesktop.value || !row.isConnected || !row.clientWidth) return
+  const tabs = row.querySelectorAll('.tab')
+  const last = tabs[tabs.length - 1]
+  if (!last) return
+  const pad = parseFloat(getComputedStyle(row).paddingLeft) || 0
+  tabsFit.value = last.offsetLeft + last.offsetWidth <= row.clientWidth - pad
+}
+const fitRo = typeof ResizeObserver === 'function' ? new ResizeObserver(() => checkFit()) : null
+watch(tabRow, (el, old) => {
+  if (old) fitRo?.unobserve(old)
+  if (el) fitRo?.observe(el)
+}, { immediate: true, flush: 'post' })
+watch(isDesktop, () => checkFit(), { flush: 'post' })
+onActivated(checkFit)
+onBeforeUnmount(() => fitRo?.disconnect())
+
 const sheetOpen = ref(false)
 function chooseTab(id) {
   sheetOpen.value = false
@@ -115,12 +159,12 @@ function chooseTab(id) {
     <!-- 桌面布局里 Logo、搜索、历史、片库都在顶栏和左侧导航上：这一行不显示（m-only） -->
     <header class="hd m-only">
       <AppLogo />
-      <RouterLink to="/search" class="sbox m-hold"><Icon name="search" />搜您想搜,看您所想</RouterLink>
-      <button class="hi m-hold" @click="router.push('/history')"><Icon name="history" />历史</button>
-      <button class="hi m-hold" @click="router.push('/library')"><Icon name="library" />片库</button>
+      <RouterLink to="/search" class="sbox m-hold" @click="onSearchTap"><Icon name="search" />搜您想搜,看您所想</RouterLink>
+      <button type="button" class="hi m-hold" @click="router.push('/history')"><Icon name="history" />历史</button>
+      <button type="button" class="hi m-hold" @click="router.push('/library')"><Icon name="library" />片库</button>
     </header>
 
-    <nav ref="tabsEl" class="tabs m-edge">
+    <nav ref="tabsEl" class="tabs m-edge" :class="{ fit: isDesktop && tabsFit }">
       <div ref="tabRow" class="row hs">
         <span ref="tabBar" class="m-bar tab-bar" aria-hidden="true" />
         <!-- replace: top tabs page within home like a pager, so back leaves home instead of walking the tabs -->
@@ -145,6 +189,8 @@ function chooseTab(id) {
     <KeepAlive>
       <component :is="activeTab" ref="body" :key="tab" :tab="tab" class="tab-body" />
     </KeepAlive>
+    <!-- 下拉刷新的提示（压在分类标签行下面，不推动列表） -->
+    <PullHint :pull="pull" />
 
     <BottomSheet v-model:open="sheetOpen" title="全部分类">
       <div class="opts">
@@ -188,6 +234,7 @@ function chooseTab(id) {
 /* 按下的那一帧就亮一点（m-hold 加的 .m-pressed），松手淡回去 */
 .sbox.m-pressed { background: #202020; transition-duration: var(--dur-1); }
 .hi {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -198,6 +245,13 @@ function chooseTab(id) {
   line-height: 12px;
 }
 .sbox + .hi { margin-left: 8px; }
+/*
+ * 图标 + 两个字只有 34 × 33，两个紧挨着：能点的范围上下撑到 45px 高；「历史」往搜索框那边撑到间距的一半（4px），
+ * 往右叠在「片库」上 4px（z-index 盖住它），「片库」往右撑到屏幕边（右边距 11px）。两个各 41–42px 宽，位置、外观不变
+ */
+.hi::after { content: ''; position: absolute; top: -6px; right: 0; bottom: -6px; left: 0; }
+.sbox + .hi::after { right: -4px; left: -4px; z-index: 1; }
+.hi:last-child::after { right: -11px; }
 .hi svg { width: 17px; height: 17px; transition: transform var(--dur-2) var(--ease-spring); }
 /* 按下（全局按压反馈加上 .m-pressed）：图标缩一下，松手回弹 */
 .hi.m-pressed svg { transform: scale(var(--press-scale-sm)); transition: transform var(--dur-1) var(--ease-out); }
@@ -242,6 +296,8 @@ function chooseTab(id) {
 
 /* ---- tab bodies: fill the rest of the page, each owns its .scroll ---- */
 .tab-body { display: flex; flex: 1; flex-direction: column; min-height: 0; }
+/* 下拉刷新提示条的位置：分类标签行下面 */
+.home { --pull-top: calc(var(--safe-t) + 112px); }
 
 /*
  * ---- 桌面布局（≥ 1024px）----
@@ -278,6 +334,10 @@ function chooseTab(id) {
     font-weight: 500;
   }
   .tabs .more svg { width: 16px; height: 16px; }
+  /* 标签一行摆得下（平时都是）：不要「全部分类」，标签行右边也不用给它留地方 */
+  .tabs.fit .more { display: none; }
+  .tabs.fit .row { padding-right: var(--home-x); }
+  .home { --pull-top: 74px; }
 }
 @media (min-width: 1024px) and (hover: hover) {
   .tabs .more { transition: background-color var(--dur-2) var(--ease-out), color var(--dur-2) var(--ease-out); }

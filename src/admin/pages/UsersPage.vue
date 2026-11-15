@@ -16,8 +16,16 @@ import TextInput from '../components/TextInput.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import { fmtDate, fmtShortDate } from '../utils/format'
 import { rovingKeydown, rovingTabindex } from '../utils/roving'
+import { copyText } from './media/files'
 
 defineOptions({ name: 'UsersPage' })
+
+/* 忘了密码时的重置命令（表格下面的提示）：整段不换行，旁边一个「复制」 */
+const RESET_CMD = 'docker compose exec reel node server/create-admin.mjs 登录名 新密码 --reset'
+async function copyResetCmd() {
+  if (await copyText(RESET_CMD)) toast('已复制命令，记得把「登录名」「新密码」换成实际的', { type: 'ok' })
+  else toast('复制失败，请手动复制：' + RESET_CMD, { type: 'error', duration: 8000 })
+}
 
 /*
  * 账号管理：建号、重置密码、启用 / 停用、设为 / 取消管理员、删除。
@@ -278,8 +286,10 @@ const lockTip = u => (u.id === meId.value ? '不能对自己执行此操作' : a
       </DataTable>
       <p class="foot dim small">
         <AIcon name="info" :size="13" />
-        至少要保留一个可用的管理员；不能停用、降级或删除自己。忘记管理员密码时，可在服务器上运行
-        <code>node server/create-admin.mjs 登录名 新密码 --reset</code>
+        <span class="grow">
+          至少要保留一个可用的管理员；不能停用、降级或删除自己。所有管理员都忘了密码时，请部署人员在服务器的项目目录里运行
+          <span class="cmd"><code>{{ RESET_CMD }}</code><button type="button" class="copy" title="复制命令" aria-label="复制重置密码的命令" @click="copyResetCmd"><AIcon name="copy" :size="13" /></button></span>（不用 Docker 部署时去掉前面的 <code>docker compose exec reel</code>）
+        </span>
       </p>
     </div>
 
@@ -354,8 +364,14 @@ const lockTip = u => (u.id === meId.value ? '不能对自己执行此操作' : a
 @media (max-width: 1100px) {
   .tip { display: none; }
 }
-.foot { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 12px 0 18px; line-height: 1.6; }
-code { padding: 1px 5px; border-radius: 4px; background: #1d1d1d; color: var(--t2); font-family: var(--mono); font-size: 11.5px; }
+.foot { display: flex; align-items: flex-start; gap: 6px; padding: 12px 0 18px; line-height: 1.6; }
+.foot > svg { flex: none; margin-top: 4px; }
+/* 命令不在「create-」这类连字符处断开：放不下时整段换到下一行（和登录页一样） */
+code { padding: 1px 5px; border-radius: 4px; background: #1d1d1d; color: var(--t2); font-family: var(--mono); font-size: 11.5px; white-space: nowrap; }
+.cmd { white-space: nowrap; }
+/* 负的上下外边距：按钮比文字行高一点，但不把这一行撑高 */
+.copy { display: inline-grid; place-items: center; width: 22px; height: 22px; margin: -2px 0 -2px 2px; border-radius: 5px; color: var(--t3); vertical-align: middle; }
+.copy:hover { background: var(--hover); color: var(--t1); }
 .pwd { position: relative; }
 .pwd :deep(.a-input) { padding-right: 38px; }
 .eye { position: absolute; top: 50%; right: 4px; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 5px; color: var(--t3); transform: translateY(-50%); }

@@ -165,8 +165,10 @@ watch(() => route.query.id, v => {
 
 /* ---------------- 保存设置 / 新建 / 删除 ---------------- */
 
+/* 错误写在表单项下面（role=alert）；表单里没有这一项时才弹提示框 */
 function showFieldError(field, message) {
   errors.value = { ...errors.value, [field]: message }
+  if (!settingsEl.value?.querySelector(`[data-field="${CSS.escape(field)}"]`)) toast(message, { type: 'error' })
   nextTick(() => {
     const box = settingsEl.value?.querySelector(`[data-field="${CSS.escape(field)}"]`)
     box?.querySelector('input:not([type="hidden"]), textarea, button, [tabindex]')?.focus()
@@ -191,7 +193,6 @@ async function saveSettings() {
   if (bad) {
     const [k] = Object.keys(bad)
     showFieldError(k, bad[k])
-    toast(bad[k], { type: 'error' })
     return
   }
   const body = { title: f.title.trim(), subtitle: f.subtitle.trim(), topicId: f.topicId ?? null, isFeatured: !!f.isFeatured, cardSize: f.cardSize, status: f.status }
@@ -216,7 +217,7 @@ async function saveSettings() {
       toast(patch.isFeatured ? '设置已保存（其他分区的大卡已关闭）' : '设置已保存', { type: 'ok' })
     }
   } catch (e) {
-    if (e?.field) { showFieldError(e.field, e.message); toast(e.message, { type: 'error' }) }
+    if (e?.field) showFieldError(e.field, e.message)
     else toastError(e, '保存失败')
   } finally {
     savingSettings.value = false

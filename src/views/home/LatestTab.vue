@@ -1,9 +1,11 @@
 <script setup>
-import { ref, shallowRef, watch } from 'vue'
+import { ref, shallowRef, computed, watch } from 'vue'
 import { getLatestFilters, getLatestVideos } from '@/api'
 import VideoCard from '@/components/VideoCard.vue'
 import SkeletonGrid from '@/components/home/SkeletonGrid.vue'
 import ListFoot from '@/components/home/ListFoot.vue'
+import WinList from '@/components/home/WinList'
+import LoadState from '@/components/common/LoadState.vue'
 import ContentSwap from '@/components/home/ContentSwap'
 import { createHomeFeed, useAutoMore, refreshFeed, toTopOrRefresh } from '@/components/home/list'
 import { useKeepScroll } from '@/composables/useKeepScroll'
@@ -14,16 +16,39 @@ import { isDesktop } from '@/composables/useDesktop'
 /*
  * 最新：最近 7 天 × 地区。地区第一项是「全部」（默认）；地区上的数字是所选那一天的条数，
  * 来自接口的 counts[日期]，和下面列表的条数一致。
+ *
+ * 最近 7 天一条新视频都没有（管理员一周没上新）时不让整页空着：默认改看「最近上新」（date = RECENT，
+ * 接口的 date=recent：不限日期、最新的在前，地区照样筛），日期一个都不选中，列表上面一行说明
+ * 「最近 7 天没有新视频，下面是最近上新的（x月x日）」，地区上不显示数字（数字是 7 天里的）；
+ * 点某一天照常看那一天，那一天是空的时候空状态里有「看最近上新」回来。
  */
-/* { dates: [{ label, count }], regions: [{ code, label, count, counts: [7] }] }；null = 还没拿到 */
+/* { dates: [{ label, count }], regions: [{ code, label, count, counts: [7] }], latestAt }；null = 还没拿到 */
 const filters = shallowRef(null)
 const filtersFailed = ref(false)
+const filtersErr = shallowRef(null)
+const RECENT = -1
 const date = ref(0)
 const region = ref(0)
-const regionCount = r => r.counts?.[date.value] ?? r.count
+const regionCount = r => (date.value === RECENT ? null : r.counts?.[date.value] ?? r.count)
+
+/* 7 天全是 0、库里又有更早的视频：可以看「最近上新」 */
+const quiet = computed(() => {
+  const f = filters.value
+  return !!f && f.latestAt != null && Array.isArray(f.dates) && f.dates.length > 0 && f.dates.every(d => !d.count)
+})
+/* 最近上新那一天（x月x日；不是今年的带上年份） */
+const latestDay = computed(() => {
+  const at = Number(filters.value?.latestAt)
+  if (!Number.isFinite(at) || at <= 0) return ''
+  const d = new Date(at * 1000)
+  const md = `${d.getMonth() + 1}月${d.getDate()}日`
+  return d.getFullYear() === new Date().getFullYear() ? md : `${d.getFullYear()}年${md}`
+})
+/* 用户自己点过日期（之后刷新出来 7 天还是 0 也不再自动换回最近上新） */
+let picked = false
 
 const fetchPage = (q, page) => getLatestVideos({ ...q, ...page })
-const query = () => ({ date: date.value, region: region.value })
+const query = () => ({ date: date.value === RECENT ? 'recent' : date.value, region: region.value })
 const feed = createHomeFeed(page => fetchPage(query(), page))
 /* 刷新后整体替换列表时加一：网格换 key，新列表淡入 */
 const batch = ref(0)
@@ -53,19 +78,35 @@ async function loadFilters() {
   filtersFailed.value = false
   try {
     filters.value = await getLatestFilters()
-  } catch {
+    filtersErr.value = null
+    autoRecent()
+  } catch (e) {
+    filtersErr.value = e
     filtersFailed.value = true
   }
 }
 
-/** 首次进入和整页重试：筛选项和第一页视频同时请求，哪个失败重取哪个 */
-function load() {
-  if (!filters.value) loadFilters()
-  if (feed.total === null) feed.more()
+/* 7 天都是 0：还停在默认的「今天」时换成看最近上新（第一页是和筛选项同时请求的，这时重新取） */
+function autoRecent() {
+  if (!quiet.value || picked || date.value !== 0) return
+  date.value = RECENT
+  feed.reset()
+  resetScroll()
+  feed.more()
 }
+
+/** 首次进入和整页重试：筛选项和第一页视频同时请求，哪个失败重取哪个（返回的 Promise 两个都完了才结束） */
+function load() {
+  return Promise.all([!filters.value && loadFilters(), feed.total === null && feed.more()])
+}
+/* 整页出错：筛选项或第一页没取到（断网、服务器出错时 LoadState 会自动重试） */
+const pageError = () => (filtersFailed.value ? filtersErr.value || true : feed.total === null ? feed.error || null : null)
+/* 筛选项还没回来、第一页已经空着回来了：先别说「这一天还没有新视频」（可能马上换成最近上新），接着显示骨架 */
+const waiting = () => feed.total === null || (!filters.value && !feed.list.length)
 
 /* 换日期或地区：列表从头开始 */
 function select(d, r) {
+  if (d !== RECENT && d !== date.value) picked = true
   if (d === date.value && r === region.value) return
   date.value = d
   region.value = r
@@ -78,14 +119,20 @@ function select(d, r) {
 async function refresh() {
   if (feed.total === null || filtersFailed.value) return load()
   const q = query()
-  getLatestFilters().then(f => { filters.value = f }, () => { /* 计数刷新失败：保留原来的 */ })
+  const counts = getLatestFilters().then(f => {
+    filters.value = f
+    // 刷新后 7 天还是 0（或者变成了 0）：还在默认的「今天」就换成最近上新
+    autoRecent()
+  }, () => { /* 计数刷新失败：保留原来的 */ })
   try {
-    const stale = () => q.date !== date.value || q.region !== region.value
+    const stale = () => q.date !== query().date || q.region !== region.value
     if (await refreshFeed(feed, page => fetchPage(q, page), stale)) batch.value++
   } catch { /* 刷新失败：保留现在的列表 */ }
+  await counts
 }
 
-defineExpose({ retap: () => toTopOrRefresh(scroller.value, refresh) })
+/* retap：再点一次底部「首页」；refresh：下拉刷新（HomeView 的手势，这时一定在顶上） */
+defineExpose({ retap: () => toTopOrRefresh(scroller.value, refresh), refresh })
 
 load()
 </script>
@@ -118,11 +165,10 @@ load()
     </div>
 
     <div ref="scroller" class="scroll">
-      <div v-if="filtersFailed || (feed.error && feed.total === null)" class="empty">
-        加载失败，请稍后重试
-        <button type="button" class="retry" @click="load()">重试</button>
-      </div>
+      <LoadState v-if="pageError()" :error="pageError()" :retry="load" />
       <template v-else>
+        <!-- 7 天都没有新视频：说明下面的是最近上新的 -->
+        <p v-if="date === RECENT && quiet" class="lt-note" role="status">最近 7 天没有新视频，下面是最近上新的<template v-if="latestDay">（{{ latestDay }}）</template></p>
         <div ref="regionRow" class="pills hs d-wrap">
           <span ref="regionBar" class="m-bar rbar" aria-hidden="true" />
           <template v-if="filters">
@@ -135,7 +181,7 @@ load()
               :aria-pressed="i === region"
               @click="select(date, i)"
             >
-              {{ r.label }}<span class="n">{{ regionCount(r) }}</span>
+              {{ r.label }}<span v-if="regionCount(r) != null" class="n">{{ regionCount(r) }}</span>
             </button>
           </template>
           <template v-else>
@@ -143,12 +189,16 @@ load()
           </template>
         </div>
         <!-- 换日期 / 地区：旧列表留着等新的，快的直接换成新列表（错峰浮现），慢了（250ms）才淡入骨架 -->
-        <ContentSwap :pending="feed.total === null">
-          <SkeletonGrid v-if="feed.total === null" :count="10" gap="g16" fill />
-          <div v-else-if="!feed.list.length" v-rise.self class="empty">这一天还没有新视频</div>
+        <ContentSwap :pending="waiting()">
+          <SkeletonGrid v-if="waiting()" :count="10" gap="g16" fill />
+          <div v-else-if="!feed.list.length" v-rise.self class="empty">
+            {{ date === RECENT ? '还没有视频' : '这一天还没有新视频' }}
+            <button v-if="date !== RECENT && quiet" type="button" class="retry" @click="select(RECENT, region)">看最近上新</button>
+          </div>
           <div v-else :key="batch">
+            <!-- 很长时只渲染视口附近的卡片（WinList） -->
             <div v-rise class="grid g16">
-              <VideoCard v-for="v in feed.list" :key="v.id" :video="v" />
+              <WinList v-slot="{ item: v }" :items="feed.list"><VideoCard :video="v" /></WinList>
             </div>
             <ListFoot :feed="feed" />
           </div>
@@ -183,6 +233,8 @@ load()
   transition: background-color var(--dur-2) var(--ease-in-out);
 }
 .dchip.on { background: var(--accent); box-shadow: none; color: var(--on-accent); font-weight: 600; }
+/* 日期块只有 30px 高：能点的范围上下各撑 7px（44px，还在日期行上下 11 / 12px 的留白里）、左右各 6px（一半间距），外观不变 */
+.dchip::after { content: ''; position: absolute; top: -7px; right: -6px; bottom: -7px; left: -6px; }
 /* 白底交给滑块 */
 [data-slider] > .dchip.on { background: transparent; }
 .dchip .lb { position: relative; z-index: 2; transition: opacity var(--dur-1) var(--ease-out); }
@@ -216,6 +268,7 @@ load()
 /* 选中地区的白框（useSlider 滑动） */
 .rbar { top: 9px; z-index: 1; height: 29px; border: 1.5px solid var(--accent); border-radius: 15px; }
 .rp {
+  position: relative;
   display: flex;
   flex: none;
   align-items: center;
@@ -233,6 +286,11 @@ load()
 .rp:active { color: var(--t3); }
 .rp .n { font-size: 11.5px; font-weight: 400; font-variant-numeric: tabular-nums; opacity: .92; }
 .rp.on { border-color: var(--accent); background: transparent; color: var(--accent); }
+/* 地区胶囊 29px 高：能点的范围上下各撑 8px（45px，上面 9px、下面 21px 的留白里）、左右各 4px（一半间距） */
+.rp::after { content: ''; position: absolute; top: -9.5px; right: -5.5px; bottom: -9.5px; left: -5.5px; }
+
+/* 7 天没有新视频时的说明（列表上面一行小字） */
+.lt-note { padding: 12px 14px 0; color: var(--t2); font-size: 12.5px; line-height: 18px; }
 [data-slider] > .rp.on { border-color: transparent; }
 
 /* ---- 骨架 ---- */
@@ -260,6 +318,9 @@ load()
   .rbar { top: 12px; height: 32px; border-radius: 16px; }
   .rp { height: 32px; padding: 0 16px; border-radius: 16px; font-size: 13px; }
   .rp .n { font-size: 12px; }
+  /* 鼠标不用撑那么大（折行时上下只隔 10px 左右） */
+  .dchip::after, .rp::after { top: -4px; bottom: -4px; }
+  .lt-note { padding: 12px max(var(--desk-pad), calc((100% - var(--desk-max)) / 2 + var(--desk-pad))) 0; font-size: 13px; }
 }
 @media (min-width: 1024px) and (hover: hover) {
   /* 日期字是 difference 混合：灰底变亮时字要换成白色才是跟着变亮（|#ff - #1f| ≈ #e0），照旧用 #a2 反而变暗 */

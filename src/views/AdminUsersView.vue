@@ -3,10 +3,11 @@ import { ref, shallowRef, watch, nextTick, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { listUsers, createUser, resetUserPassword, setUserStatus, setUserRole, deleteUser } from '@/api'
 import { useAuthStore } from '@/stores/auth'
-import { toast } from '@/composables/useToast'
+import { toast, toastError } from '@/composables/useToast'
 import { useBackDismiss } from '@/composables/useBackDismiss'
 import BackHeader from '@/components/BackHeader.vue'
 import Icon from '@/components/Icon.vue'
+import LoadState from '@/components/common/LoadState.vue'
 import { isDesktop } from '@/composables/useDesktop'
 import { trapTab } from '@/components/desk/modal'
 
@@ -22,7 +23,8 @@ const auth = useAuthStore()
 
 const users = shallowRef([])
 const loading = ref(true)
-const failed = ref(false)
+/* 最近一次取账号列表失败的错误（403 直接回「我的」） */
+const error = shallowRef(null)
 
 const createOpen = ref(false)
 useBackDismiss(createOpen) // 返回键只关「新建账号」弹层
@@ -44,12 +46,13 @@ watch(createOpen, isOpen => {
 })
 
 async function load() {
-  loading.value = true
+  // 出错页上重试时不先换成「加载中…」（自动重试不闪），有结果了再换
+  if (!error.value) loading.value = true
   try {
     users.value = await listUsers()
-    failed.value = false
+    error.value = null
   } catch (e) {
-    failed.value = true
+    error.value = e
     if (e.status === 403) {
       toast('需要管理员权限')
       router.replace('/me')
@@ -76,7 +79,7 @@ async function submitCreate() {
     toast('账号已创建')
     await load()
   } catch (e) {
-    toast(e.message || '创建失败')
+    toastError(e, '创建失败，请稍后重试')
   } finally {
     submitting.value = false
   }
@@ -89,7 +92,7 @@ async function toggleStatus(u) {
     u.status = next
     toast(next ? '已启用' : '已停用')
   } catch (e) {
-    toast(e.message || '操作失败')
+    toastError(e)
   }
 }
 
@@ -100,7 +103,7 @@ async function toggleRole(u) {
     u.role = next
     toast(next === 'admin' ? '已设为管理员' : '已取消管理员')
   } catch (e) {
-    toast(e.message || '操作失败')
+    toastError(e)
   }
 }
 
@@ -112,7 +115,7 @@ async function resetPwd(u) {
     await resetUserPassword(u.id, pwd)
     toast('密码已重置，该账号的登录已失效')
   } catch (e) {
-    toast(e.message || '重置失败')
+    toastError(e, '重置失败，请稍后重试')
   }
 }
 
@@ -123,7 +126,7 @@ async function removeUser(u) {
     toast('已删除')
     await load()
   } catch (e) {
-    toast(e.message || '删除失败')
+    toastError(e, '删除失败，请稍后重试')
   }
 }
 
@@ -142,13 +145,11 @@ onMounted(load)
     <BackHeader title="账号管理">
       <!-- 插槽里放了按钮，标题（title）就不显示了；桌面布局的标题行要有页面标题，这里补上 -->
       <span v-if="isDesktop" class="hd-tt">账号管理</span>
-      <button class="add-btn" @click="openCreate">新建账号</button>
+      <button class="add-btn hit-44y" @click="openCreate">新建账号</button>
     </BackHeader>
 
-    <div v-if="failed" class="empty">
-      加载失败
-      <button class="retry" @click="load()">重试</button>
-    </div>
+    <!-- 取不到：统一的说法 +「重试」，联网 / 隔一会儿会自己重试（没有权限的 403 已经回「我的」了） -->
+    <LoadState v-if="error" :error="error" :retry="load" />
 
     <div v-else-if="loading" class="empty">加载中…</div>
 
@@ -212,7 +213,7 @@ onMounted(load)
 
 <style scoped>
 .admin-users { padding-top: var(--safe-t); }
-.add-btn { height: 28px; margin-left: auto; padding: 0 12px; border-radius: 14px; background: var(--accent); color: var(--on-accent); font-size: 13px; font-weight: 600; }
+.add-btn { position: relative; height: 28px; margin-left: auto; padding: 0 12px; border-radius: 14px; background: var(--accent); color: var(--on-accent); font-size: 13px; font-weight: 600; }
 
 .rows { padding: 12px 14px 0; display: flex; flex-direction: column; gap: 10px; }
 .row { padding: 12px 14px; border-radius: 12px; background: var(--panel); }
@@ -225,7 +226,9 @@ onMounted(load)
 .line2 { margin-top: 3px; color: var(--t2); font-size: 12px; line-height: 17px; }
 
 .ops { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
-.op { height: 26px; padding: 0 10px; border-radius: 13px; background: #1e1e1e; color: var(--t3); font-size: 12px; }
+.op { position: relative; height: 26px; padding: 0 10px; border-radius: 13px; background: #1e1e1e; color: var(--t3); font-size: 12px; }
+/* 按钮只有 26px 高：能点的范围往四周各撑 4px（按钮之间 8px 的一半，相邻的不抢） */
+.op::after { content: ''; position: absolute; inset: -4px; }
 .op:disabled { opacity: .35; }
 .op.danger { color: #ff8080; }
 .op:active:not(:disabled) { background: #262626; }
@@ -234,7 +237,7 @@ onMounted(load)
 
 .form { display: flex; flex-direction: column; gap: 10px; }
 .form input { height: 44px; padding: 0 14px; border: 0; border-radius: 10px; background: var(--field); color: var(--t1); font-size: 15px; }
-.form input::placeholder { color: #6e6e6e; }
+.form input::placeholder { color: var(--t-ph); }
 .roles { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .roles button { height: 38px; border-radius: 10px; background: var(--field); color: var(--t2); font-size: 14px; }
 .roles button.on { background: var(--accent); color: var(--on-accent); font-weight: 600; }

@@ -36,13 +36,17 @@ function setRead(id, on) {
 import { ref, shallowRef, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, onBeforeRouteUpdate, RouterLink } from 'vue-router'
 import { getPost, viewPost, toggleFollow } from '@/api'
+import { errorText, MSG } from '@/api/http'
 import { useAuthStore } from '@/stores/auth'
 import { usePostStore } from '@/stores/posts'
 import { useBack } from '@/composables/useBack'
-import { toast } from '@/composables/useToast'
+import { toast, toastError } from '@/composables/useToast'
 import { share } from '@/composables/useShare'
+import { usePageTitle } from '@/composables/usePageTitle'
 import { formatCount } from '@/utils/format'
 import { linkify } from '@/components/community/linkify'
+import { setPostFav, favBusy } from '@/components/community/favQueue'
+import LoadState from '@/components/common/LoadState.vue'
 import Cover from '@/components/Cover.vue'
 import Icon from '@/components/Icon.vue'
 import ImageViewer from '@/components/ImageViewer.vue'
@@ -75,7 +79,12 @@ cameBack()
 
 /** PostDetail（见 src/api/index.js） */
 const post = shallowRef(null)
-/* 加载失败：message 给用户看；retry 只在可能是网络问题时显示（帖子不存在重试也没用） */
+/* 浏览器标题「<帖子标题> - Reel」（分享也用帖子标题） */
+usePageTitle(() => post.value?.title)
+/*
+ * 加载失败：{ error, text, retry }。error 交给 LoadState 说清楚原因（断网 / 超时 / 服务器出错，网络恢复后自动重试）；
+ * 帖子不存在 / 已下架（4xx）重试也没用：retry 为 false，给「返回」
+ */
 const failed = ref(null)
 const following = ref(false)
 const scroller = ref(null)
@@ -197,10 +206,12 @@ async function load(id) {
     post.value = null
     const missing = e?.status >= 400 && e?.status < 500 && e?.status !== 401
     failed.value = missing
-      ? { message: (e.status === 400 && e.message) || '帖子不存在或已下架', retry: false }
-      : { message: e?.message || '加载失败，请检查网络', retry: true }
+      ? { error: e, text: (e.status === 400 && e.message) || '帖子不存在或已下架', retry: false }
+      : { error: e || true, text: '', retry: true }
   }
 }
+/* 出错页的「重试」（LoadState 断网恢复、服务器恢复后也自动调它） */
+const retryLoad = () => load(route.params.id)
 
 /* 按当前账号重新取「是否关注 / 是否收藏」（不记阅读）；同时发起的几次合并成一个请求 */
 let stateReq = null
@@ -212,7 +223,7 @@ function refreshState() {
       .then(d => {
         if (post.value?.id !== p.id) return
         if (!followBusy) following.value = !!d.following
-        if (!postStore.isPending(p.id)) postStore.patch(p.id, { faved: !!d.faved, fav: d.fav ?? 0 })
+        if (!favBusy(p.id)) postStore.patch(p.id, { faved: !!d.faved, fav: d.fav ?? 0 })
       })
       .catch(() => { /* 取不到就保持原样 */ })
       .finally(() => { stateReq = null })
@@ -257,7 +268,8 @@ watch(isDesktop, () => nextTick(edge.refresh))
 
 /* ---------- 关注 / 收藏：乐观更新 → 一次请求（带明确的 on）→ 以返回为准，失败回滚并提示 ---------- */
 
-const failText = e => (e?.code === 'demo' ? e.message : '操作失败，请稍后重试')
+/* 操作失败的提示：统一的说法（api/http.js 的 errorText）；登录过期不提示（登录框已经弹出来了，登录后会自动补做） */
+const failText = e => (!e || e.name === 'AbortError' || e.code === 'unauthorized' ? '' : errorText(e, MSG.action))
 
 let followBusy = false
 /* 从确认面板取消关注：面板收起约 200ms，提示等它让开再出来（按钮照常立刻变） */
@@ -286,7 +298,8 @@ async function setFollow(next) {
     say(on ? '已关注' : '已取消关注')
   } catch (e) {
     if (author.value?.id === a.id) following.value = !next
-    say(failText(e))
+    const t = failText(e)
+    if (t) say(t)
   } finally {
     followBusy = false
   }
@@ -310,20 +323,25 @@ function onFollow() {
   }
 }
 
+/*
+ * 收藏：请求还没回来时再点也算数——界面立刻跟着变，只记下最后想要的状态，回来后和服务端不一致再补发一次
+ * （components/community/favQueue.js）；提示只在这一轮结束时出一次
+ */
 async function setFav(on) {
   const p = post.value
-  if (!p || postStore.isPending(p.id)) return
+  if (!p) return
   try {
-    const active = await postStore.setFav(p, on)
-    toast(active ? '已收藏' : '已取消收藏')
+    const active = await setPostFav(postStore, p, on)
+    if (active !== null) toast(active ? '已收藏' : '已取消收藏')
   } catch (e) {
-    toast(failText(e))
+    toastError(e)
   }
 }
 
 /* 登录后补做收藏：同样先对一下状态 */
 async function favAfterLogin() {
   await refreshState()
+  if (post.value && favBusy(post.value.id)) return
   if (stats.value.faved) toast('已收藏')
   else setFav(true)
 }
@@ -333,7 +351,7 @@ const favIcon = ref(null)
 const favBurst = ref(0)
 function onFav() {
   const p = post.value
-  if (!p || postStore.isPending(p.id)) return
+  if (!p) return
   if (!auth.requireLogin({ then: favAfterLogin })) return
   const next = !stats.value.faved
   pop(favIcon.value?.$el, next)
@@ -423,7 +441,7 @@ onBeforeRouteUpdate(to => {
           v-if="author && author.id != null"
           :key="`f${post.id}`"
           v-rise.self="{ y: 0 }"
-          class="pd-follow"
+          class="pd-follow hit-44y"
           :on="following"
           :aria-label="following ? `已关注 ${author.name}，点按取消关注` : `关注 ${author.name}`"
           @click="onFollow"
@@ -454,10 +472,10 @@ onBeforeRouteUpdate(to => {
       <!-- 骨架原地淡出，正文浮现；「下一篇」时旧的一篇自己淡出后直接撤掉（instant），新的一篇 / 骨架在干净的底上出来 -->
       <div class="m-swap">
         <Transition name="m-skel" :css="!instant">
-          <div v-if="failed" class="empty">
-            {{ failed.message }}
-            <button v-if="failed.retry" type="button" class="retry" @click="load(route.params.id)">重试</button>
-          </div>
+          <!-- 出错：统一的说法；网络问题有「重试」（并且网络恢复后自动重试），帖子不存在只给「返回」 -->
+          <LoadState v-if="failed" :error="failed.error" :text="failed.text" :retry="failed.retry ? retryLoad : null">
+            <button v-if="!failed.retry" type="button" class="retry" @click="back">返回</button>
+          </LoadState>
 
           <div v-else-if="post" ref="article" :key="`post${post.id}`" v-rise.self>
             <article class="pd-body">
@@ -505,9 +523,11 @@ onBeforeRouteUpdate(to => {
                   :aria-label="`查看大图：第 ${i + 1} 张，共 ${post.images.length} 张`"
                   @click="openImage(i)"
                 >
+                  <!-- 桌面三列的小格子用小图（thumb）；一张、两张和手机上的整宽配图用原图 -->
                   <Cover
                     class="pd-img"
                     v-bind="img"
+                    :grid="isDesktop && imgGrid === 'g3'"
                     :style="{ aspectRatio: ratios[i] || '4 / 3', '--ar-pad': padOf(ratios[i]) }"
                     @load="onImage(i, $event)"
                   />
@@ -527,7 +547,7 @@ onBeforeRouteUpdate(to => {
                 <span class="lb">下一篇</span>
                 <span class="tt2">{{ post.next.title }}</span>
               </div>
-              <Cover v-if="post.next.thumb" class="th" v-bind="post.next.thumb" />
+              <Cover v-if="post.next.thumb" class="th" v-bind="post.next.thumb" grid />
             </RouterLink>
             <div v-else class="pd-end">已经是最后一篇了</div>
             <div class="pad-b" />
@@ -576,8 +596,9 @@ onBeforeRouteUpdate(to => {
 .pd-sub .hd { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .pd-sub .tm { flex: none; }
 .pd-sub .hd + .tm::before { content: '·'; padding: 0 4px; }
-/* 关注按钮（FollowBtn）：两种文字叠在一格里，宽度不跳 */
+/* 关注按钮（FollowBtn）：两种文字叠在一格里，宽度不跳；32px 高，hit-44y 把能点的高度撑到 44（外观不变） */
 .pd-follow {
+  position: relative;
   flex: none;
   height: 32px;
   padding: 0 14px;
@@ -588,6 +609,16 @@ onBeforeRouteUpdate(to => {
   font-weight: 700;
 }
 .pd-follow.on { background: var(--chip); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .1); color: var(--t2); }
+
+/*
+ * 很窄的屏幕（320–360 宽）：头像小一号、间距收一点，给「@账号 · 时间」那一行多留十几像素，
+ * 短账号不再被截掉（长账号照样先截账号，时间始终完整）
+ */
+@media (max-width: 360px) {
+  .pd-hd { gap: 8px; padding-right: 12px; }
+  .pd-author { gap: 8px; }
+  .pd-av { width: 40px; height: 40px; }
+}
 
 /* ---------- 正文 ---------- */
 .pd-body { padding: 14px 16px 0; }

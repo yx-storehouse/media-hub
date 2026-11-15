@@ -10,11 +10,13 @@ import SelectInput from '../components/SelectInput.vue'
 import DataTable from '../components/DataTable.vue'
 import APager from '../components/APager.vue'
 import EmptyState from '../components/EmptyState.vue'
+import BatchBar from '../components/BatchBar.vue'
 import { confirmDialog } from '../components/confirm'
 import { toast, toastError } from '../components/toast'
 import { openLayers } from '../components/layers'
 import { useLeaveGuard } from '../composables/useLeaveGuard'
-import { listMedia, deleteMedia } from '../api'
+import { listMedia, deleteMedia, deleteMediaMany, uploadFile, resolveUrl } from '../api'
+import { prepareImage, thumbPathOf } from '../utils/imagePrep'
 import { fmtSize, fmtDate, fmtShortDate, fmtNum } from '../utils/format'
 import { createUploadQueue } from './media/uploadQueue'
 import { copyText, filesFromDrop, baseOf, ACCEPT_ATTR, usedCount, usageText } from './media/files'
@@ -22,6 +24,8 @@ import MediaGrid from './media/MediaGrid.vue'
 import UploadPanel from './media/UploadPanel.vue'
 import MediaPreview from './media/MediaPreview.vue'
 import NewFolderModal from './media/NewFolderModal.vue'
+import RenameModal from './media/RenameModal.vue'
+import MoveModal from './media/MoveModal.vue'
 import ScanImport from './media/ScanImport.vue'
 import AlbumFromFolder from './media/AlbumFromFolder.vue'
 
@@ -29,9 +33,11 @@ defineOptions({ name: 'MediaPage' })
 
 /*
  * 素材文件：浏览服务器的 media/ 目录（当前文件夹在地址栏 ?dir=，可以后退 / 刷新 / 分享）、
- * 上传（多选 / 拖到页面任意位置，含整个文件夹；同时传 3 个）、新建文件夹、预览、复制地址、删除，
+ * 上传（多选 / 拖到页面任意位置，含整个文件夹；同时传 3 个；大图先缩小（长图按短边保 1080）并补一张 .thumb.jpg 小图）、
+ * 新建文件夹、预览、复制地址、重命名、删除，勾选多个后批量「移动到… / 删除」（改名、移动时库里引用它的地址服务端一起改），
  * 以及「扫描导入视频」：把文件夹里的视频文件批量建成视频记录；「建成图集」：把文件夹里的图片建成一个图集。
  * 文件夹里的条目一次全部取回（服务端不分页），这里在前端筛选、排序，并每页最多渲染 100 个。
+ * 图片的小图（<原图文件名>.thumb.jpg）跟着原图走，列表里不单独出现；原图已经不在的小图标成「小图」，可以删掉。
  */
 const route = useRoute()
 const router = useRouter()
@@ -53,6 +59,8 @@ const entries = shallowRef([])
 const loading = ref(false)
 const loaded = ref(false)
 const error = ref('')
+/** 勾选的路径（只在当前文件夹里；换文件夹时清空） */
+const selected = ref([])
 let seq = 0
 
 async function load({ quiet = false } = {}) {
@@ -64,6 +72,9 @@ async function load({ quiet = false } = {}) {
     if (my !== seq) return
     entries.value = res?.entries || []
     loaded.value = true
+    // 勾选里已经不在的（删了、改名了、挪走了）去掉
+    const have = new Set(entries.value.map(e => e.path))
+    if (selected.value.some(p => !have.has(p))) selected.value = selected.value.filter(p => have.has(p))
   } catch (e) {
     if (my !== seq) return
     error.value = e.message || '加载失败'
@@ -87,11 +98,12 @@ const page = ref(1)
 const pageSize = ref(100)
 watch([q, kind, sortModel], () => { page.value = 1 })
 
-/* 换文件夹：清掉筛选，重新加载 */
+/* 换文件夹：清掉筛选和勾选，重新加载 */
 watch(dir, () => {
   q.value = ''
   kind.value = null
   page.value = 1
+  selected.value = []
   load()
 })
 onMounted(load)
@@ -143,7 +155,7 @@ const counts = computed(() => {
   for (const e of entries.value) {
     if (e.type === 'dir') dirs++
     else { files++; bytes += e.size }
-    if (e.type === 'image') images++
+    if (e.type === 'image' && !e.isThumb) images++
   }
   return { dirs, files, bytes, images }
 })
@@ -153,9 +165,9 @@ const subtitle = computed(() => (loaded.value && !error.value ? `${counts.value.
 /* 视频的封面：同一文件夹里同名的图片（a.mp4 ↔ a.jpg） */
 const posters = computed(() => {
   const m = new Map()
-  for (const e of entries.value) if (e.type === 'image') {
+  for (const e of entries.value) if (e.type === 'image' && !e.isThumb) {
     const k = baseOf(e.name).toLowerCase()
-    if (!m.has(k)) m.set(k, e.url)
+    if (!m.has(k)) m.set(k, e.thumb || e.url)
   }
   return m
 })
@@ -184,12 +196,22 @@ const brokenWhat = (videos, albums) => (albums ? (videos ? '这些视频的播�
 async function remove(e) {
   if (deleting.value.has(e.path)) return
   const isDir = e.type === 'dir'
+  // 不是空的文件夹删不掉（列表里已经知道里面有几项）：直接说清楚，给一个「打开文件夹」去清空
+  if (isDir && e.items > 0) {
+    const go = await confirmDialog({
+      title: '文件夹不是空的',
+      message: `文件夹「${e.name}」里面还有 ${fmtNum(e.items)} 项，只能删除空文件夹。\n可以打开它，全选后批量删除，再回来删文件夹。`,
+      confirmText: '打开文件夹'
+    })
+    if (go) goDir(e.path)
+    return
+  }
   // 列表里已经知道被用着：这一次确认就把后果说清楚，确认后直接强制删除（不用先被服务端拒绝一次再问第二遍）
   const used = !isDir && usedCount(e) > 0
   const ok = await confirmDialog({
     title: isDir ? '删除文件夹' : used ? '文件正在使用' : '删除文件',
     message: isDir
-      ? `确定删除文件夹「${e.name}」？\n只能删除空文件夹。`
+      ? `确定删除文件夹「${e.name}」？`
       : used
         ? `确定删除「${e.name}」？\n它正${usageText(e)}，删除后${brokenWhat(e.usedBy, e.usedByAlbums)}会失效（前台显示不出来），需要另外修改。\n删除后不可恢复。`
         : `确定删除「${e.name}」？\n删除后不可恢复。`,
@@ -224,6 +246,141 @@ async function remove(e) {
     s.delete(e.path)
     deleting.value = s
   }
+}
+
+/* ---------------- 多选：批量删除 / 移动，重命名 ---------------- */
+
+const byPath = computed(() => new Map(entries.value.map(e => [e.path, e])))
+const selectedEntries = computed(() => selected.value.map(p => byPath.value.get(p)).filter(Boolean))
+const pageAllSelected = computed(() => pageEntries.value.length > 0 && pageEntries.value.every(e => selected.value.includes(e.path)))
+/* 网格里按住 Shift 点勾选框：从上一次点的那格到这一格，一起勾上 / 去掉 */
+let lastPick = '' // 上一次点的那格（按路径记：换页、换排序后不在本页就不连选）
+function toggleOne(e, ev) {
+  const list = pageEntries.value
+  const i = list.findIndex(x => x.path === e.path)
+  const from = lastPick ? list.findIndex(x => x.path === lastPick) : -1
+  const on = !selected.value.includes(e.path)
+  const span = ev?.shiftKey && from >= 0 && i >= 0
+    ? list.slice(Math.min(from, i), Math.max(from, i) + 1).map(x => x.path)
+    : [e.path]
+  const next = new Set(selected.value)
+  for (const p of span) on ? next.add(p) : next.delete(p)
+  selected.value = [...next]
+  lastPick = e.path
+}
+function selectPage() {
+  const next = new Set(selected.value)
+  for (const e of pageEntries.value) next.add(e.path)
+  selected.value = [...next]
+}
+const clearSelection = () => { selected.value = []; lastPick = '' }
+
+const batchBusy = ref(false)
+/** 失败的几项：一条提示里列出前 5 个和原因 */
+const failText = (head, failed) => `${head}\n` + failed.slice(0, 5).map(f => `${f.path.split('/').pop()}：${f.message}`).join('\n') + (failed.length > 5 ? '\n…' : '')
+
+async function removeSelected() {
+  const list = selectedEntries.value
+  if (!list.length || batchBusy.value) return
+  const files = list.filter(e => e.type !== 'dir')
+  const fullDirs = list.filter(e => e.type === 'dir' && e.items > 0)
+  const used = files.filter(e => usedCount(e) > 0)
+  const names = list.slice(0, 5).map(e => `「${e.name}」`).join('、') + (list.length > 5 ? ` 等 ${fmtNum(list.length)} 项` : '')
+  const lines = [`确定删除 ${names}？`]
+  if (fullDirs.length) lines.push(`其中 ${fullDirs.length} 个文件夹不是空的，会被跳过（只能删除空文件夹）。`)
+  if (used.length) lines.push(`${used.length} 个文件正被视频 / 图集使用，删除后这些视频的播放地址或封面、图集里的图会失效（前台显示不出来），需要另外修改。`)
+  lines.push('删除后不可恢复。')
+  const ok = await confirmDialog({ title: `删除 ${fmtNum(list.length)} 项`, message: lines.join('\n'), confirmText: used.length ? '仍然删除' : '删除', danger: true })
+  if (!ok) return
+  batchBusy.value = true
+  try {
+    let res
+    try {
+      res = await deleteMediaMany(list.map(e => e.path), used.length > 0)
+    } catch (err) {
+      // 列表过时了（刚被视频 / 图集用上）：服务端整批没删，说清楚是哪几个，再确认一次才强制删除
+      if (err?.field !== 'usedBy') throw err
+      const force = await confirmDialog({
+        title: '文件正在使用',
+        message: `${err.message}。\n强制删除后，这些视频的播放地址或封面、图集里的图会失效，需要另外修改。\n仍要删除吗？`,
+        confirmText: '仍然删除',
+        danger: true
+      })
+      if (!force) return
+      res = await deleteMediaMany(list.map(e => e.path), true)
+    }
+    const deleted = res?.deleted || []
+    const failed = res?.failed || []
+    if (deleted.length) toast(`已删除 ${fmtNum(deleted.length)} 项`, { type: 'ok' })
+    if (failed.length) toast(failText(`有 ${fmtNum(failed.length)} 项没有删除：`, failed), { type: 'error', duration: 10000 })
+    if (preview.value.entry && deleted.includes(preview.value.entry.path)) preview.value = { open: false, entry: null }
+    // 没删掉的留着勾选，方便处理完再删
+    selected.value = selected.value.filter(p => !deleted.includes(p))
+    load({ quiet: true })
+  } catch (err) {
+    toastError(err, '删除失败')
+  } finally {
+    batchBusy.value = false
+  }
+}
+
+/*
+ * 给以前传的图片补小图（这个功能之前上传的图没有 .thumb.jpg，App 的网格只能用原图）：
+ * 一张张下载原图、在浏览器里生成小图（规则见 utils/imagePrep.js）传上去。原图不动；长边本来就 ≤ 480 的、GIF / 动图不需要小图
+ */
+const needThumb = computed(() => selectedEntries.value.filter(e => e.type === 'image' && !e.isThumb && !e.thumb && !/\.gif$/i.test(e.name)))
+async function makeThumbs() {
+  const list = needThumb.value
+  if (!list.length || batchBusy.value) return
+  batchBusy.value = true
+  let made = 0
+  let skipped = 0
+  const failed = []
+  try {
+    for (const e of list) {
+      try {
+        const res = await fetch(resolveUrl(e.url), { cache: 'no-store' })
+        if (!res.ok) throw new Error(`读取原图失败（HTTP ${res.status}）`)
+        const prep = await prepareImage(await res.blob(), { path: e.path, maxEdge: Infinity })
+        if (!prep?.thumb) { skipped++; continue }
+        await uploadFile(thumbPathOf(e.path), prep.thumb, { overwrite: true })
+        made++
+      } catch (err) {
+        failed.push({ path: e.path, message: err?.message || '生成失败' })
+      }
+    }
+  } finally {
+    batchBusy.value = false
+  }
+  if (made || skipped) toast(`已生成 ${fmtNum(made)} 张小图` + (skipped ? `；${fmtNum(skipped)} 张不需要（本身够小或是动图）` : ''), { type: made ? 'ok' : 'info' })
+  if (failed.length) toast(failText(`有 ${fmtNum(failed.length)} 张没有生成：`, failed), { type: 'error', duration: 10000 })
+  load({ quiet: true })
+}
+
+const renameOpen = ref(false)
+const renameTarget = ref(null)
+function openRename(e) {
+  renameTarget.value = e
+  renameOpen.value = true
+}
+function onRenamed(res) {
+  if (preview.value.entry?.path === res?.from) preview.value = { open: false, entry: null }
+  selected.value = selected.value.filter(p => p !== res?.from)
+  load({ quiet: true })
+}
+
+const moveOpen = ref(false)
+const moveList = ref([])
+function openMove(list = selectedEntries.value) {
+  if (!list.length) return
+  moveList.value = list
+  moveOpen.value = true
+}
+function onMoved(res) {
+  const gone = new Set((res?.moved || []).map(m => m.from))
+  if (preview.value.entry && gone.has(preview.value.entry.path)) preview.value = { open: false, entry: null }
+  selected.value = selected.value.filter(p => !gone.has(p))
+  load({ quiet: true })
 }
 
 /* ---------------- 上传 ---------------- */
@@ -313,6 +470,7 @@ const columns = [
   { key: 'usedBy', label: '使用情况', width: 140, sortable: true }
 ]
 const TYPE_TEXT = { dir: '文件夹', video: '视频', image: '图片', other: '文件' }
+const typeText = e => (e.isThumb ? '小图' : TYPE_TEXT[e.type])
 const iconOf = e => (e.type === 'dir' ? 'folder' : e.type === 'video' ? 'film' : e.type === 'image' ? 'image' : 'file')
 const onRowClick = row => { if (row.type === 'dir') goDir(row.path) }
 </script>
@@ -388,26 +546,43 @@ const onRowClick = row => { if (row.type === 'dir') goDir(row.path) }
         v-else-if="view === 'grid'"
         :entries="pageEntries"
         :poster-of="posterOf"
+        :selected="selected"
         @open="openEntry"
         @copy="copy"
         @preview="openEntry"
+        @rename="openRename"
         @delete="remove"
+        @toggle="toggleOne"
       />
 
       <div v-else class="list-wrap">
-        <DataTable v-model:sort="sortModel" :columns="columns" :rows="pageEntries" row-key="path" :actions-width="150" :row-class="r => (r.type === 'dir' ? 'is-dir' : '')" @row-click="onRowClick">
+        <DataTable
+          v-model:sort="sortModel"
+          v-model:selected="selected"
+          :columns="columns"
+          :rows="pageEntries"
+          row-key="path"
+          selectable
+          :actions-width="160"
+          :row-class="r => (r.type === 'dir' ? 'is-dir' : '')"
+          @row-click="onRowClick"
+        >
           <template #cell-name="{ row }">
             <span class="nm">
-              <Thumb v-if="row.type === 'image' || posterOf(row)" :src="row.type === 'image' ? row.url : posterOf(row)" :width="44" :ratio="4 / 3" :icon="iconOf(row)" />
+              <Thumb v-if="row.type === 'image' || posterOf(row)" :src="row.type === 'image' ? row.thumb || row.url : posterOf(row)" :width="44" :ratio="4 / 3" :icon="iconOf(row)" />
               <span v-else class="nm-ico" :class="row.type"><AIcon :name="iconOf(row)" :size="18" /></span>
               <button type="button" class="title-link ellipsis" :title="row.name" @click="openEntry(row)">{{ row.name }}</button>
             </span>
           </template>
-          <template #cell-type="{ row }"><span class="muted">{{ TYPE_TEXT[row.type] }}</span></template>
-          <template #cell-size="{ row }"><span class="muted num">{{ row.type === 'dir' ? '—' : fmtSize(row.size) }}</span></template>
+          <template #cell-type="{ row }"><span class="muted">{{ typeText(row) }}</span></template>
+          <template #cell-size="{ row }">
+            <span v-if="row.type === 'dir'" class="muted num">{{ row.items ? `${fmtNum(row.items)} 项` : '空' }}</span>
+            <span v-else class="muted num">{{ fmtSize(row.size) }}</span>
+          </template>
           <template #cell-mtime="{ row }"><span class="muted" :title="fmtDate(row.mtime)">{{ fmtShortDate(row.mtime) }}</span></template>
           <template #cell-usedBy="{ row }">
             <span v-if="row.type === 'dir'" class="dim">—</span>
+            <span v-else-if="row.isThumb" class="dim" title="以 .thumb.jpg 结尾的是图片的小图，原图删掉或挪走后留下的，可以删掉">原图已不在</span>
             <span v-else :class="usedCount(row) ? '' : 'dim'">{{ usageText(row) }}</span>
           </template>
           <template #actions="{ row }">
@@ -415,13 +590,37 @@ const onRowClick = row => { if (row.type === 'dir') goDir(row.path) }
               <ABtn size="sm" variant="ghost" icon="copy" title="复制地址" :aria-label="`复制「${row.name}」的地址`" @click="copy(row)" />
               <ABtn size="sm" variant="ghost" icon="eye" title="预览" :aria-label="`预览「${row.name}」`" @click="openEntry(row)" />
             </template>
-            <ABtn size="sm" variant="ghost" icon="trash" title="删除" :aria-label="`删除「${row.name}」`" :disabled="deleting.has(row.path)" @click="remove(row)" />
+            <ABtn size="sm" variant="ghost" icon="edit" title="重命名" :aria-label="`重命名「${row.name}」`" @click="openRename(row)" />
+            <ABtn
+              size="sm"
+              variant="ghost"
+              icon="trash"
+              :title="row.type === 'dir' && row.items ? `删除（文件夹里还有 ${row.items} 项，要先清空）` : '删除'"
+              :aria-label="`删除「${row.name}」`"
+              :disabled="deleting.has(row.path)"
+              @click="remove(row)"
+            />
           </template>
         </DataTable>
       </div>
 
       <APager v-if="filtered.length > pageSize || page > 1" v-model:page="page" v-model:page-size="pageSize" :total="filtered.length" :page-sizes="[50, 100, 200]" />
     </div>
+
+    <BatchBar :count="selected.length" :busy="batchBusy" @clear="clearSelection">
+      <ABtn v-if="!pageAllSelected" size="sm" icon="check" :disabled="batchBusy" @click="selectPage">全选本页（{{ fmtNum(pageEntries.length) }}）</ABtn>
+      <ABtn size="sm" icon="folder-move" :disabled="batchBusy" @click="openMove()">移动到…</ABtn>
+      <ABtn v-if="selectedEntries.length === 1" size="sm" icon="edit" :disabled="batchBusy" @click="openRename(selectedEntries[0])">重命名</ABtn>
+      <ABtn
+        v-if="needThumb.length"
+        size="sm"
+        icon="image"
+        :disabled="batchBusy"
+        title="以前传的图片没有小图，App 的网格只能用原图；生成后网格用小图，原图不动"
+        @click="makeThumbs"
+      >生成小图（{{ fmtNum(needThumb.length) }}）</ABtn>
+      <ABtn size="sm" variant="danger" icon="trash" :disabled="batchBusy" @click="removeSelected">删除</ABtn>
+    </BatchBar>
 
     <!-- 拖放提示：盖住整个窗口，不挡事件 -->
     <Transition name="fade">
@@ -441,7 +640,9 @@ const onRowClick = row => { if (row.type === 'dir') goDir(row.path) }
       @copy="copy"
       @delete="remove"
     />
-    <NewFolderModal v-model:open="folderOpen" :dir="dir" @created="onFolderCreated" />
+    <NewFolderModal v-model:open="folderOpen" :dir="dir" @created="onFolderCreated" @go="goDir" />
+    <RenameModal v-model:open="renameOpen" :entry="renameTarget" @renamed="onRenamed" />
+    <MoveModal v-model:open="moveOpen" :entries="moveList" :from-dir="dir" @moved="onMoved" />
     <ScanImport v-model:open="scanOpen" :dir="dir" @imported="load({ quiet: true })" />
     <AlbumFromFolder v-model:open="albumOpen" :dir="dir" :entries="entries" @created="load({ quiet: true })" />
   </div>

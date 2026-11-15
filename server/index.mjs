@@ -47,6 +47,7 @@
  *   GET  /api/me/favs                   我的收藏（要登录，?type=video|post|topic&limit=&offset=）→ { total, list }
  *   GET  /api/me/follows                我的关注（要登录，?limit=&offset=）→ { total, list }
  *   GET  /api/health                    健康检查
+ *   GET  /api/art/<hash>.svg            生成的占位图（列表里 Cover.fallback 的 url(…)，一年 immutable 缓存）
  *
  * 鉴权与账号管理：
  *   POST /api/auth/login | logout       登录 / 退出
@@ -76,6 +77,8 @@ import { compressible, pickEncoding, compress, compressStatic, MIN_COMPRESS_BYTE
 import { readToken, resolveSession, purgeExpiredSessions, loginLocked, noteFailedLogin, clearLoginAttempts } from './auth.mjs'
 import { adminRoutes, isRawBodyRoute, afterAdminWrite } from './admin/routes.mjs'
 import { MEDIA_DIR, ensureMediaDir, serveMedia } from './admin/media.mjs'
+import { ART_PREFIX } from './lib/art-store.mjs'
+import { isBusyError, whenWritable, startServing } from './db/index.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const PORT = Number(process.env.PORT || 3000)
@@ -109,16 +112,16 @@ const routes = [
   ['GET', /^\/api\/home\/tabs$/, () => api.getHomeTabs()],
   ['GET', /^\/api\/main\/tabs$/, () => api.getMainTabs()],
   ['GET', /^\/api\/home\/recommend$/, () => api.getRecommendSections()],
-  ['GET', /^\/api\/home\/section\/(\d+)\/videos$/, (m, q, b, c) => api.getVideos(+m[1], +(q.size || 4), +(q.batch || 0), c.userId)],
+  ['GET', /^\/api\/home\/section\/(\d+)\/videos$/, (m, q, b, c) => api.getVideos(+m[1], q.size, q.batch, c.userId)],
   ['GET', /^\/api\/home\/latest\/filters$/, (m, q) => api.getLatestFilters({ date: q.date })],
-  // region：地区下标（0 = 全部）或地区 code，由查询层解析
-  ['GET', /^\/api\/home\/latest\/videos$/, (m, q, b, c) => api.getLatestVideos({ date: +(q.date || 0), region: q.region, limit: +(q.limit || 20), offset: +(q.offset || 0) }, c.userId)],
+  // date：0～6（几天前）或 recent（不限日期的最近上新）；region：地区下标（0 = 全部）或地区 code，由查询层解析
+  ['GET', /^\/api\/home\/latest\/videos$/, (m, q, b, c) => api.getLatestVideos({ date: q.date, region: q.region, limit: q.limit, offset: q.offset }, c.userId)],
   ['GET', /^\/api\/category\/([\w-]+)\/filters$/, m => api.getCategoryFilters(m[1])],
-  ['GET', /^\/api\/category\/([\w-]+)\/videos$/, (m, q, b, c) => api.getCategoryVideos(m[1], { filter: +(q.filter || 0), limit: +(q.limit || 20), offset: +(q.offset || 0) }, c.userId)],
+  ['GET', /^\/api\/category\/([\w-]+)\/videos$/, (m, q, b, c) => api.getCategoryVideos(m[1], { filter: q.filter, limit: q.limit, offset: q.offset }, c.userId)],
 
-  ['GET', /^\/api\/search\/hot$/, (m, q) => api.getHotWords(+(q.page || 0))],
-  ['GET', /^\/api\/search\/creators$/, (m, q) => api.getCreators(+(q.limit || 5))],
-  ['GET', /^\/api\/search\/recent$/, (m, q, b, c) => api.getRecentSearches(c.userId, { limit: +(q.limit || 5), offset: +(q.offset || 0) })],
+  ['GET', /^\/api\/search\/hot$/, (m, q) => api.getHotWords(q.page)],
+  ['GET', /^\/api\/search\/creators$/, (m, q) => api.getCreators(q.limit)],
+  ['GET', /^\/api\/search\/recent$/, (m, q, b, c) => api.getRecentSearches(c.userId, { limit: q.limit ?? 5, offset: q.offset })],
   ['GET', /^\/api\/search$/, (m, q, b, c) => (keywordOf(q) ? api.doSearch(keywordOf(q), { limit: q.limit, offset: q.offset }, c.userId) : fail('缺少 q 参数'))],
   ['GET', /^\/api\/search\/posts$/, (m, q, b, c) => (keywordOf(q) ? api.searchPosts(keywordOf(q), { limit: q.limit, offset: q.offset }, c.userId) : fail('缺少 q 参数'))],
   ['GET', /^\/api\/search\/history$/, (m, q, b, c) => api.getSearchHistory(c.userId, { limit: q.limit }), 'user'],
@@ -126,14 +129,14 @@ const routes = [
   ['DELETE', /^\/api\/search\/history$/, (m, q, b, c) => api.clearSearchHistory(c.userId, q.keyword ?? null), 'user'],
 
   ['GET', /^\/api\/topic\/(\d+)$/, (m, q, b, c) => api.getTopic(+m[1], c.userId)],
-  ['GET', /^\/api\/topic\/(\d+)\/videos$/, (m, q, b, c) => api.getTopicVideos(+m[1], +(q.sort || 0), { limit: +(q.limit || 20), offset: +(q.offset || 0) }, c.userId)],
+  ['GET', /^\/api\/topic\/(\d+)\/videos$/, (m, q, b, c) => api.getTopicVideos(+m[1], q.sort, { limit: q.limit, offset: q.offset }, c.userId)],
   ['GET', /^\/api\/library$/, () => api.getLibrary()],
   ['GET', /^\/api\/videos\/(\d+)$/, (m, q, b, c) => api.getVideo(+m[1], c.userId)],
-  ['GET', /^\/api\/videos\/(\d+)\/related$/, (m, q, b, c) => api.getRelatedVideos(+m[1], { batch: Math.max(0, +(q.batch || 0)), limit: Math.min(Math.max(1, +(q.limit || 6)), 20) }, c.userId)],
+  ['GET', /^\/api\/videos\/(\d+)\/related$/, (m, q, b, c) => api.getRelatedVideos(+m[1], { batch: q.batch, limit: q.limit }, c.userId)],
   ['GET', /^\/api\/shorts$/, (m, q, b, c) => api.getShorts({ seed: q.seed, offset: q.offset, limit: q.limit, exclude: q.exclude }, c.userId)],
 
   ['GET', /^\/api\/community\/tabs$/, () => api.getCommunityTabs()],
-  ['GET', /^\/api\/community\/posts$/, (m, q, b, c) => api.getPosts(+(q.tab || 0), { limit: +(q.limit || 20), offset: +(q.offset || 0) }, c.userId)],
+  ['GET', /^\/api\/community\/posts$/, (m, q, b, c) => api.getPosts(q.tab, { limit: q.limit, offset: q.offset }, c.userId)],
   ['GET', /^\/api\/community\/posts\/(\d+)$/, (m, q, b, c) => api.getPost(+m[1], c.userId)],
   // 阅读数 +1：公开，不需要登录、不需要请求体（详情页每打开一次调一次）
   ['POST', /^\/api\/community\/posts\/(\d+)\/view$/, m => api.viewPost(+m[1])],
@@ -148,9 +151,9 @@ const routes = [
   ['GET', /^\/api\/albums\/([^/]+)$/, (m, q, b, c) => api.getAlbum(m[1], c.userId)],
 
   ['GET', /^\/api\/live\/tabs$/, () => api.getLiveTabs()],
-  ['GET', /^\/api\/live$/, (m, q) => api.getLives({ tab: +(q.tab || 0), limit: +(q.limit || 20), offset: +(q.offset || 0) })],
+  ['GET', /^\/api\/live$/, (m, q) => api.getLives({ tab: q.tab, limit: q.limit, offset: q.offset })],
   ['GET', /^\/api\/nearby\/filters$/, () => api.getNearbyFilters()],
-  ['GET', /^\/api\/nearby$/, (m, q) => api.getNearby({ filter: +(q.filter || 0), city: q.city || null, limit: +(q.limit || 20), offset: +(q.offset || 0) })],
+  ['GET', /^\/api\/nearby$/, (m, q) => api.getNearby({ filter: q.filter, city: q.city, limit: q.limit, offset: q.offset })],
 
   /* ---- 鉴权（公开） ---- */
   ['POST', /^\/api\/auth\/login$/, (m, q, body, c) => {
@@ -162,8 +165,11 @@ const routes = [
       clearLoginAttempts(String(body?.uid || ''))
       return result
     } catch (e) {
+      // 只有账号 / 口令不对这类才算一次失败；数据库忙（503）、服务端出错（500）不算，免得把人锁在外面
+      if (!(e instanceof api.InputError)) throw e
       const mins = noteFailedLogin(String(body?.uid || ''))
-      if (mins) throw new Error(`尝试次数过多，请 ${mins} 分钟后再试`)
+      // 这一次失败正好触发锁定：和上面「已锁定」一样回 400 + 锁定提示（以前抛普通 Error，变成 500「服务器内部错误」）
+      if (mins) return fail(`尝试次数过多，请 ${mins} 分钟后再试`)
       throw e
     }
   }],
@@ -339,6 +345,28 @@ function serveStatic(req, res, pathname) {
   return true
 }
 
+/** 请求带没带请求体（声明了长度，或分块传输） */
+const hasBody = req => Number(req.headers['content-length']) > 0 || !!req.headers['transfer-encoding']
+
+/* 会写库的方法：进处理函数前先等写锁（见 handle） */
+const WRITE_METHODS = new Set(['POST', 'PATCH', 'PUT', 'DELETE'])
+/*
+ * 数据库被别的进程锁住、等满 BUSY_TIMEOUT_MS 还拿不到写锁：回 503「服务器忙，请稍后再试」（App 会重发播放记录 / 进度）。
+ * 日志 10 秒内只记一行（附上这段时间里又回了几次 503），锁得久的时候不刷屏。
+ */
+let busyLog = { at: 0, more: 0 }
+function busy(res, method, pathname) {
+  const t = Date.now()
+  if (t - busyLog.at >= 10_000) {
+    const extra = busyLog.more ? `（之前 10 秒内还有 ${busyLog.more} 次）` : ''
+    console.warn(`[${method} ${pathname}] 数据库正忙（别的进程拿着写锁），回 503${extra}`)
+    busyLog = { at: t, more: 0 }
+  } else busyLog.more++
+  return send(res, 503, fail('服务器忙，请稍后再试'), undefined, { headers: { 'retry-after': '2' } })
+}
+/* 没读请求体就回绝之后，连接空闲这么久就断开（见 handle 里的 refuse） */
+const UNREAD_BODY_IDLE_MS = Math.min(IDLE_TIMEOUT_MS, 5000)
+
 async function handle(req, res) {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`)
   let pathname
@@ -346,6 +374,9 @@ async function handle(req, res) {
   const query = Object.fromEntries(url.searchParams)
 
   if (req.method === 'OPTIONS') return send(res, 204, '')
+
+  // 生成的占位图（列表里 fallback 的 url(/api/art/…)）：公开、内容按哈希寻址，不用解析会话
+  if (pathname.startsWith(ART_PREFIX)) return serveArt(req, res, pathname)
 
   // 静态资源不需要会话和请求体：素材文件、管理后台入口、打包好的前端
   if (!pathname.startsWith('/api/')) {
@@ -383,15 +414,24 @@ async function handle(req, res) {
     m = hit
     break
   }
+  /*
+   * 不读请求体就回绝的（404 / 405 / 401 / 403）：请求体还在路上，回完以后 Node 会把剩下的收下扔掉，
+   * 这段时间连接按保活计时（放宽到了 65 秒）。发一半就停的大请求体不该占着连接那么久：回完以后空闲 5 秒就断开。
+   * 不直接 Connection: close —— 对方还在发数据时关连接会被回 RST，客户端可能连这个 401 都收不到。
+   */
+  const refuse = (status, payload) => {
+    if (hasBody(req)) res.once('finish', () => req.socket?.setTimeout(UNREAD_BODY_IDLE_MS))
+    return send(res, status, payload)
+  }
   if (!route) {
-    if (allowed.size) return send(res, 405, fail(`${pathname} 只支持 ${[...allowed].join(' / ')}`))
-    return send(res, 404, fail('no route: ' + pathname))
+    if (allowed.size) return refuse(405, fail(`${pathname} 只支持 ${[...allowed].join(' / ')}`))
+    return refuse(404, fail('no route: ' + pathname))
   }
   const [, , handler, need] = route
 
   // 统一鉴权
-  if (need && !ctx.userId) return send(res, 401, fail('请先登录'))
-  if (need === 'admin' && ctx.user?.role !== 'admin') return send(res, 403, fail('需要管理员权限'))
+  if (need && !ctx.userId) return refuse(401, fail('请先登录'))
+  if (need === 'admin' && ctx.user?.role !== 'admin') return refuse(403, fail('需要管理员权限'))
 
   // 收集 JSON 请求体（POST / PATCH / PUT）；上传接口的原始字节流留给处理函数
   let body = {}
@@ -407,8 +447,21 @@ async function handle(req, res) {
     if (raw) { try { body = JSON.parse(raw) } catch { return send(res, 400, fail('请求体不是合法 JSON')) } }
   }
 
-  // 后台写操作之后清掉概览统计的短缓存（成功失败都清：失败的请求也可能已经写了一部分，如上传）
+  /*
+   * 写请求先等写锁：别的进程（create-admin.mjs、开着事务的 sqlite3 命令行）拿着写锁时，在这里异步排队
+   * （见 db/index.mjs 的 whenWritable，最多 BUSY_TIMEOUT_MS），等的时候读请求照常处理；等不到回 503，处理函数不执行。
+   * 上传（原始字节流）不在这里等：要先把文件收完，而且它不写库。客户端等不及已经断开的，不再替它写。
+   */
+  const rawBody = isRawBodyRoute(req.method, pathname)
+  if (WRITE_METHODS.has(req.method) && !rawBody) {
+    if (!(await whenWritable())) return busy(res, req.method, pathname)
+    if (finished(res)) return
+  }
+
+  // 后台写操作之后清掉概览统计、热门搜索词、短视频候选池这些短缓存（成功失败都清：失败的请求也可能已经写了一部分，如上传）
   const adminWrite = req.method !== 'GET' && pathname.startsWith('/api/admin/')
+  // 慢请求日志只算处理函数本身（上传要收完整个文件、写请求等写锁的时间都不算）
+  const started = rawBody ? null : performance.now()
   try {
     const data = await handler(m, query, body, ctx)
     if (data && data.code === 1) return send(res, 400, data)
@@ -416,13 +469,67 @@ async function handle(req, res) {
   } catch (e) {
     // 校验类错误（ID 不存在、口令不对、未登录…）返回 400（上传超限等带 status 的按 status），
     // 提示原样给前端，带 field 的同时告诉前端是哪个字段；
+    // 数据库被别的进程锁住（等满 BUSY_TIMEOUT_MS 还拿不到写锁）回 503，前端提示「请稍后再试」；
     // 其余的（SQL 出错、代码 bug）记日志并返回 500，不把内部细节漏出去。
     if (e instanceof api.InputError) return send(res, e.status || 400, fail(e.message, e.field))
+    if (isBusyError(e)) return busy(res, req.method, pathname)
     console.error(`[${req.method} ${pathname}]`, e)
     return send(res, 500, fail('服务器内部错误'))
   } finally {
-    if (adminWrite) afterAdminWrite()
+    if (adminWrite) {
+      afterAdminWrite()
+      api.queries.invalidateCaches()
+    }
+    if (started != null) noteSlow(req.method, pathname, url.search, performance.now() - started)
   }
+}
+
+/*
+ * 慢请求日志：处理超过 SLOW_MS（默认 100 ms，环境变量 SLOW_REQUEST_MS 可改，0 = 不记）就记一行路径和耗时，方便发现回归。
+ * 查询串截到 200 字以内；同一路径 10 秒内只记一次（附上这段时间里又慢了几次），压测时不会刷屏。
+ */
+const SLOW_MS = Number(process.env.SLOW_REQUEST_MS ?? 100)
+const slowSeen = new Map()
+function noteSlow(method, pathname, search, ms) {
+  if (!(SLOW_MS > 0) || ms < SLOW_MS) return
+  const key = method + ' ' + pathname
+  const now = Date.now()
+  const s = slowSeen.get(key)
+  if (s && now - s.at < 10_000) { s.more++; return }
+  if (slowSeen.size > 1000) slowSeen.clear()
+  slowSeen.set(key, { at: now, more: 0 })
+  const extra = s?.more ? `（之前 10 秒内还有 ${s.more} 次）` : ''
+  console.warn(`[慢请求] ${Math.round(ms)} ms ${key}${String(search || '').slice(0, 200)}${extra}`)
+}
+
+/*
+ * 生成的占位图：GET /api/art/<16 位十六进制>.svg（见 lib/art-store.mjs）。
+ * 地址按内容哈希，内容永远不变，所以给一年 immutable 缓存；同源的 SVG 再加 CSP，直接打开也执行不了脚本。
+ */
+const ART_FILE = /^\/api\/art\/([0-9a-f]{16})\.svg$/
+const ART_HEADERS = {
+  'cache-control': IMMUTABLE,
+  'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'",
+  'x-content-type-options': 'nosniff'
+}
+function serveArt(req, res, pathname) {
+  const m = ART_FILE.exec(pathname)
+  if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, fail(`${pathname} 只支持 GET`))
+  const etag = m && `"${m[1]}"`
+  if (m && etagMatches(req.headers['if-none-match'], etag)) {
+    res.writeHead(304, { ...ART_HEADERS, etag, vary: 'accept-encoding' })
+    return res.end()
+  }
+  let svg = null
+  try {
+    svg = m ? api.queries.artSvg(m[1]) : null
+  } catch (e) {
+    if (isBusyError(e)) return busy(res, req.method, pathname)
+    console.error(`[${req.method} ${pathname}]`, e)
+    return send(res, 500, fail('服务器内部错误'))
+  }
+  if (!svg) return send(res, 404, fail('占位图不存在'))
+  send(res, 200, svg, 'image/svg+xml', { headers: { ...ART_HEADERS, etag } })
 }
 
 const server = createServer((req, res) => {
@@ -440,15 +547,28 @@ const server = createServer((req, res) => {
  */
 server.requestTimeout = 0
 server.timeout = IDLE_TIMEOUT_MS
+/*
+ * 保活连接：Node 默认空闲 5 秒就关。某个请求把事件循环卡住超过 5 秒时，这个计时器会在卡顿结束的瞬间触发，
+ * 浏览器 / WebView 正好复用这条连接发出的请求就收到 ECONNRESET。放宽到 65 秒（常见反向代理 60 秒的空闲超时之上）；
+ * headersTimeout 要比它长，免得两个计时器打架。
+ */
+server.keepAliveTimeout = 65_000
+server.headersTimeout = 66_000
 
-/* 每小时清理一次过期会话 */
+/* 每小时清理一次过期会话；数据库正被别的进程锁着就等下一次（定时器里抛出去会让整个进程退出） */
 setInterval(() => {
-  const n = purgeExpiredSessions(api.queries.db)
-  if (n) console.log(`清理过期会话 ${n} 条`)
+  try {
+    const n = purgeExpiredSessions(api.queries.db)
+    if (n) console.log(`清理过期会话 ${n} 条`)
+  } catch (e) {
+    if (!isBusyError(e)) console.error('[清理过期会话]', e)
+  }
 }, 3600_000).unref()
 
 ensureMediaDir()
 
+// 启动迁移都做完了：从这里起拿不到写锁不再同步干等（见 db/index.mjs 的 whenWritable）
+startServing()
 server.listen(PORT, () => {
   console.log(`接口服务已启动  http://localhost:${PORT}/api/health`)
   console.log(`静态目录（可选）  ${PUBLIC_DIR}`)

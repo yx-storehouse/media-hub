@@ -116,7 +116,14 @@ async function call(path, { query, method = 'GET', body, mock, ids = [], persona
 
 /* ---------------- 本地假数据（接口不可用时使用） ---------------- */
 
-const mockApi = () => import('./mock-fallback').then(m => m.default)
+/*
+ * 线上（VITE_API_MODE=http，打包时就定下来的常量）根本不打包演示数据：这里直接换成一个报错的函数，
+ * mock-fallback.js 和 src/mock/ 不会进任何代码块（每个首次访问少下载约 10 KB）。
+ * 只有手动输入 #/video/demo:3 这种演示 id 的地址才会走到它：照常显示「内容不存在」。
+ */
+const mockApi = import.meta.env.VITE_API_MODE === 'http'
+  ? () => Promise.reject(new ApiError('内容不存在或已下架', { status: 404, code: 'not_found' }))
+  : () => import('./mock-fallback').then(m => m.default)
 
 /* ---------------- 首页 ---------------- */
 
@@ -319,7 +326,9 @@ export const getCreatorMedia = (id, opts = {}) =>
  * 图集里的图：接口给 { url, width, height }，这里统一换成和别处一样的 Cover（{ src, fallback }），宽高原样带着
  * （演示数据本来就是 Cover，带着生成的占位图，原样保留）。宽高 0 表示不知道，页面按默认比例摆。
  * 接口不给图集的图生成占位图（fallback 为 null）：按地址垫一张安静的灰色渐变（quietArt），和视频、帖子的图一样，
- * 图还没来、或者来不了（外链在内网打不开）时格子里不是一块死黑。「媒体」墙上图集的那几格也一样换
+ * 图还没来、或者来不了（外链在内网打不开）时格子里不是一块死黑。「媒体」墙上图集的那几格也一样换。
+ * thumb：接口给的小图（<原图文件名>.thumb.jpg，如 a.jpg.thumb.jpg；长边约 480、短边至少 360；没有时为 null）原样带着——「图片」「媒体」的格子用它，
+ * 看大图时垫在原图下面；原图（src）只在全屏看大图时加载
  */
 const albumPic = p => {
   const src = p?.src ?? p?.url ?? null
@@ -327,7 +336,8 @@ const albumPic = p => {
     src,
     fallback: p?.fallback || (src ? quietArt(src) : null),
     width: Math.max(0, Number(p?.width) || 0),
-    height: Math.max(0, Number(p?.height) || 0)
+    height: Math.max(0, Number(p?.height) || 0),
+    thumb: typeof p?.thumb === 'string' && p.thumb ? p.thumb : null
   }
 }
 

@@ -36,7 +36,8 @@ if (!argBase) {
   add('user1', '普通用户', 'user123456', 'user')
   db.close()
 
-  child = spawn(process.execPath, [join(here, 'index.mjs')], { env: { ...process.env, PORT: String(PORT), DB_PATH: TEST_DB, MEDIA_DIR: TEST_MEDIA }, stdio: 'ignore' })
+  // DB_BUSY_TIMEOUT_MS 调短：「数据库被别的进程锁住」的用例不用等满默认的 2 秒
+  child = spawn(process.execPath, [join(here, 'index.mjs')], { env: { ...process.env, PORT: String(PORT), DB_PATH: TEST_DB, MEDIA_DIR: TEST_MEDIA, DB_BUSY_TIMEOUT_MS: '300' }, stdio: 'ignore' })
   await new Promise(r => setTimeout(r, 1400))
 }
 
@@ -133,6 +134,85 @@ await t('登录：缺少参数被拒', async () => {
   const r = await req('POST', '/api/auth/login', { body: { uid: '' } })
   must(r.status === 400, `HTTP ${r.status}`)
   return r.json.message
+})
+
+/* 登录-02：连续输错，第 8 次正好触发锁定，这一次也要回 4xx + 锁定提示（以前是 500「服务器内部错误」） */
+await t('登录：连续 8 次失败触发锁定（不是 500）', async () => {
+  const uid = 'lock-probe'          // 不存在的账号也按登录名计数，不会锁到别的用例要用的账号
+  const codes = []
+  let eighth = null, ninth = null
+  for (let i = 1; i <= 9; i++) {
+    const r = await req('POST', '/api/auth/login', { body: { uid, password: 'wrong-' + i } })
+    codes.push(r.status)
+    if (i === 8) eighth = r
+    if (i === 9) ninth = r
+  }
+  must(codes.every(c => c === 400), '状态码 ' + codes.join(','))
+  must(/尝试次数过多，请 \d+ 分钟后再试/.test(eighth.json?.message), '第 8 次 ' + JSON.stringify(eighth.json))
+  must(/尝试次数过多/.test(ninth.json?.message), '第 9 次 ' + JSON.stringify(ninth.json))
+  return `1-7 次「账号或密码错误」，第 8 次 ${eighth.status}「${eighth.json.message}」`
+})
+
+/*
+ * 服务端-04：别的进程拿着写锁时（容器里跑 create-admin.mjs、开着 sqlite3 命令行）。
+ * 测试服务的 DB_BUSY_TIMEOUT_MS 设成 300：锁 150 ms 内放开 → 写操作等一等照样成功；锁 1 秒 → 503「服务器忙」，不是 500。
+ */
+await t('数据库被别的进程锁住：短锁等待成功、长锁回 503', async () => {
+  if (argBase) return '跳过（--base 模式）'
+  const holdFor = async ms => {
+    const w = new DatabaseSync(TEST_DB)
+    w.exec('BEGIN IMMEDIATE')
+    const released = new Promise(r => setTimeout(() => { w.exec('COMMIT'); w.close(); r() }, ms))
+    return released
+  }
+  const like = on => req('POST', '/api/videos/13/like', { token: adminToken, body: { on } })
+  let rel = holdFor(150)
+  const short = await like(true)
+  await rel
+  must(short.status === 200 && short.json.data.active === true, '短锁 ' + short.status + ' ' + JSON.stringify(short.json))
+  rel = holdFor(1000)
+  const long = await like(false)
+  await rel
+  must(long.status === 503 && /请稍后再试/.test(long.json?.message), '长锁 ' + long.status + ' ' + JSON.stringify(long.json))
+  const after = await like(false)
+  must(after.status === 200 && after.json.data.active === false, '放开后 ' + after.status)
+  return `短锁 200；长锁 ${long.status}「${long.json.message}」；放开后 200`
+})
+
+/*
+ * RP-02：等写锁不卡事件循环。锁住 1 秒（测试服务 DB_BUSY_TIMEOUT_MS = 300）期间同时发 3 个写请求：各自等约 300 ms 后回 503；
+ * 这期间读请求照常秒回（以前 busy_timeout 在事件循环上同步等，3 个写请求就把整个服务卡住约 900 ms，读请求一个都过不去）。
+ * 登录用户搜索时顺带记搜索词：锁着的时候这一次不记，搜索照常返回（不能因为记不了历史就 503）。
+ */
+await t('数据库被别的进程锁住：写请求异步等锁，读请求照常秒回；搜索顺带的写跳过', async () => {
+  if (argBase) return '跳过（--base 模式）'
+  const w = new DatabaseSync(TEST_DB)
+  w.exec('BEGIN IMMEDIATE')
+  const released = new Promise(r => setTimeout(() => { w.exec('COMMIT'); w.close(); r() }, 1000))
+  const t0 = performance.now()
+  const writes = Promise.all([
+    req('POST', '/api/videos/13/like', { token: adminToken, body: { on: true } }),
+    req('POST', '/api/videos/14/fav', { token: adminToken, body: { on: true } }),
+    req('POST', '/api/me/history', { token: adminToken, body: { videoId: 13, progressSec: 3, progressOnly: true } })
+  ]).then(rs => ({ rs, ms: performance.now() - t0 }))
+  const reads = []
+  while (performance.now() - t0 < 700) {
+    const s = performance.now()
+    const r = await req('GET', '/api/home/latest/videos?limit=3')
+    must(r.status === 200, '锁着时读请求 ' + r.status)
+    reads.push(performance.now() - s)
+  }
+  const search = await req('GET', '/api/search?q=' + encodeURIComponent('日落'), { token: adminToken })
+  const { rs, ms } = await writes
+  await released
+  must(rs.every(r => r.status === 503 && /请稍后再试/.test(r.json?.message)), '写请求 ' + rs.map(r => r.status).join(','))
+  must(ms >= 250, `写请求应等满约 300 ms 再回 503，实际 ${Math.round(ms)} ms`)
+  const slowest = Math.max(...reads)
+  must(reads.length >= 10 && slowest < 150, `锁着时读了 ${reads.length} 次，最慢 ${Math.round(slowest)} ms`)
+  must(search.status === 200 && Array.isArray(search.json?.data?.list), '锁着时搜索 ' + search.status + ' ' + JSON.stringify(search.json).slice(0, 80))
+  const after = await req('POST', '/api/videos/13/like', { token: adminToken, body: { on: false } })
+  must(after.status === 200 && after.json.data.active === false, '放开后 ' + after.status)
+  return `锁 1 秒：3 个写请求 ${Math.round(ms)} ms 后回 503；同时读了 ${reads.length} 次，最慢 ${Math.round(slowest)} ms；搜索 200`
 })
 
 await t('令牌：/api/auth/me 返回当前用户', async () => {

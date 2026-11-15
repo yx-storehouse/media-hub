@@ -1,18 +1,33 @@
 <script>
-import { rise, canEnter } from '@/components/home/motion'
+import { rise, canEnter, dur } from '@/components/home/motion'
 
 /*
  * 同一批挂上的卡片（一页数据、换标签、刷新后的新列表）错峰浮现：挂上时先排队，这一轮挂完一起开始。
- * 帖子卡片很高，一屏最多三四张，只动这一批的前 4 张。返回恢复出来的列表、KeepAlive 切回来都不播（见 motion.js 的 cameBack）。
+ * 帖子卡片很高，一屏最多三四张，只动这一批的前 RISE_N 张。返回恢复出来的列表、KeepAlive 切回来都不播（见 motion.js 的 cameBack）。
+ * 社区第一页是分几帧挂上的（每帧一到几张，见 CommunityView）：后面几帧挂上的接着前面的节奏错峰（第 3 张还是排在第 3 个位置，
+ * 已经过了它的时刻就马上开始），一共还是只动前 RISE_N 张，不从头再来——离上一批不到 CHAIN_GAP 毫秒挂上的就算同一批。
  */
+const RISE_N = 4
+const CHAIN_GAP = 200
 const queue = []
+let chain = { at: -Infinity, last: -Infinity, n: 0 }
 function enter(el) {
   if (!el || !canEnter()) return
   if (!queue.length) {
     Promise.resolve().then(() => {
       // 整批换 key（换标签、刷新）时 Vue 从后往前挂新卡片，排队的顺序是倒的：按文档顺序排好，最上面的先浮现
       const batch = queue.splice(0).sort((a, b) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1))
-      rise(batch, { max: 4 })
+      const now = performance.now()
+      if (now - chain.last < CHAIN_GAP) {
+        // 接着上一批：从第 chain.n 个位置往后排
+        const left = RISE_N - chain.n
+        if (left > 0) rise(batch, { max: left, delay: Math.max(0, chain.n * dur('--stagger') - (now - chain.at)) })
+        chain.n += Math.min(batch.length, Math.max(0, left))
+        chain.last = now
+      } else {
+        chain = { at: now, last: now, n: Math.min(batch.length, RISE_N) }
+        rise(batch, { max: RISE_N })
+      }
     })
   }
   queue.push(el)
@@ -20,16 +35,18 @@ function enter(el) {
 </script>
 
 <script setup>
-import { ref, computed, shallowRef, onMounted } from 'vue'
+import { ref, computed, shallowRef, watch, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { getPost } from '@/api'
-import { toast } from '@/composables/useToast'
+import { toast, toastError } from '@/composables/useToast'
 import { share } from '@/composables/useShare'
 import { useAuthStore } from '@/stores/auth'
 import { usePostStore } from '@/stores/posts'
 import { haptic } from '@/utils/motion'
 import { pop } from '@/components/home/motion'
+import { afterPaint } from '@/components/home/list'
 import { isDesktop } from '@/composables/useDesktop'
+import { setPostFav, favBusy } from './favQueue'
 import Cover from '@/components/Cover.vue'
 import Icon from '@/components/Icon.vue'
 import ImageViewer from '@/components/ImageViewer.vue'
@@ -43,7 +60,9 @@ const props = defineProps({
    */
   post: { type: Object, required: true },
   /** 头像 / 名字链到作者主页；创作者主页里的卡片作者就是本人，传 false 关掉 */
-  authorLink: { type: Boolean, default: true }
+  authorLink: { type: Boolean, default: true },
+  /** 挂上时错峰浮现；长列表里往回滚、重新渲染出来的卡片（WinList 的 revived）传 false，不再播一遍 */
+  rise: { type: Boolean, default: true }
 })
 
 const router = useRouter()
@@ -51,7 +70,29 @@ const auth = useAuthStore()
 const postStore = usePostStore()
 
 const root = ref(null)
-onMounted(() => enter(root.value))
+onMounted(() => {
+  if (props.rise) enter(root.value)
+  checkClamp()
+})
+
+/*
+ * 列表里标题最多 5 行（很长的标题不会一张卡片占好几屏），超出的在下面给一个「全文」进详情（详情页照常全部显示）。
+ * 只有字多到可能超过 5 行的才去量（桌面一行四十来个字、手机二十来个字），而且等这一帧画出来再量，不在挂载时逼着排版
+ */
+const CLAMP_MIN = 60
+const txEl = ref(null)
+const clamped = ref(false)
+function checkClamp() {
+  if (String(props.post.text || '').length < CLAMP_MIN) {
+    clamped.value = false
+    return
+  }
+  afterPaint(() => {
+    const el = txEl.value?.$el ?? txEl.value
+    if (el instanceof Element && el.isConnected && el.clientHeight) clamped.value = el.scrollHeight > el.clientHeight + 1
+  })
+}
+watch([() => props.post.text, isDesktop], checkClamp)
 
 /* 卡片上最多放 3 张缩略图，其余的在第 3 张上显示「+N」（N 是真实剩下的张数，详情页里都能看到） */
 const MAX_THUMBS = 3
@@ -129,12 +170,13 @@ const shareUrl = () => new URL(router.resolve(detailTo.value).href, location.hre
 
 /* ---------- 收藏：未登录先登录，登录后自动补做 ---------- */
 
+/* 请求进行中再点也算数：只记下最后想要的状态，回来后不一致再补发（favQueue.js）；提示只在这一轮结束时出一次 */
 async function setFav(on) {
   try {
-    const active = await postStore.setFav(props.post, on)
-    toast(active ? '已收藏' : '已取消收藏')
+    const active = await setPostFav(postStore, props.post, on)
+    if (active !== null) toast(active ? '已收藏' : '已取消收藏')
   } catch (e) {
-    toast(e?.code === 'demo' ? e.message : '操作失败，请稍后重试')
+    toastError(e)
   }
 }
 
@@ -145,7 +187,7 @@ async function favAfterLogin() {
     const d = await getPost(p.id)
     postStore.patch(p.id, { faved: !!d.faved, fav: d.fav ?? 0 })
   } catch { /* 取不到就照常收藏（带明确的 on，重复也不会多算） */ }
-  if (postStore.isPending(p.id)) return
+  if (favBusy(p.id)) return
   if (postStore.stats(p).faved) toast('已收藏')
   else await setFav(true)
 }
@@ -161,7 +203,6 @@ function favFx(on) {
 }
 
 function toggleFav() {
-  if (postStore.isPending(props.post.id)) return
   if (!auth.requireLogin({ then: favAfterLogin })) return // 未登录：弹登录框
   const next = !stats.value.faved
   favFx(next)
@@ -179,20 +220,26 @@ function toggleFav() {
     <RouterLink v-if="authorTo" class="av-l m-hold" :to="authorTo" tabindex="-1" aria-hidden="true"><Cover class="av" v-bind="post.avatar" /></RouterLink>
     <Cover v-else class="av" v-bind="post.avatar" />
     <div class="bd">
+      <!--
+        名字、@账号、发布时间一行放不下时：先截 @账号（至少留「@m…」），再截名字，时间始终完整
+      -->
       <div class="meta">
         <RouterLink v-if="authorTo" class="nm-l m-hold" :to="authorTo" :aria-label="`${post.name} 的主页`">
           <span class="nm">{{ post.name }}</span>
           <Icon v-if="post.verified" name="verified" class="vf" />
         </RouterLink>
-        <template v-else>
+        <span v-else class="nm-l">
           <span class="nm">{{ post.name }}</span>
           <Icon v-if="post.verified" name="verified" class="vf" />
-        </template>
-        <span class="hd2">@{{ post.handle }} · {{ post.time }}</span>
+        </span>
+        <!-- 「·」跟着 @账号走：@账号整个让给名字时，时间前面不会剩一个孤零零的点 -->
+        <span v-if="post.handle" class="hd2 hdl">@{{ post.handle }}{{ post.time ? ' ·' : '' }}</span>
+        <span v-if="post.time" class="hd2 tm">{{ post.time }}</span>
         <Icon name="chevR" class="go" />
       </div>
-      <!-- 键盘 / 读屏用户通过这个链接进详情 -->
-      <RouterLink class="tx" :to="detailTo">{{ post.text }}</RouterLink>
+      <!-- 键盘 / 读屏用户通过这个链接进详情；列表里最多 5 行，超出的有「全文」 -->
+      <RouterLink ref="txEl" class="tx" :to="detailTo">{{ post.text }}</RouterLink>
+      <RouterLink v-if="clamped" class="tx-more" :to="detailTo" tabindex="-1" aria-hidden="true">全文</RouterLink>
       <div class="tg">
         <span v-for="tag in post.tags" :key="tag">#{{ tag }}</span>
       </div>
@@ -222,7 +269,7 @@ function toggleFav() {
           :aria-label="`查看大图：第 ${thumbBase + k + 1} 张，共 ${gallery.length} 张`"
           @click="openViewer(thumbBase + k)"
         >
-          <Cover class="tn" v-bind="thumb">
+          <Cover class="tn" v-bind="thumb" grid>
             <span v-if="k === thumbs.length - 1 && extra > 0" class="more" aria-hidden="true">+{{ extra }}</span>
           </Cover>
         </button>
@@ -246,19 +293,38 @@ function toggleFav() {
 .post.m-pressed { background-color: #121212; transition-duration: var(--dur-1); }
 .av { flex: none; width: 44px; height: 44px; border-radius: 50%; filter: var(--media); }
 .av-l { flex: none; align-self: flex-start; border-radius: 50%; }
-.av-l .av, .nm-l { transition: opacity var(--dur-2) var(--ease-out); }
+.av-l .av, a.nm-l { transition: opacity var(--dur-2) var(--ease-out); }
 .av-l.m-pressed .av, .nm-l.m-pressed { opacity: .7; transition-duration: var(--dur-1); }
-.nm-l { display: flex; flex: none; align-items: center; gap: 5px; min-width: 0; max-width: 62%; }
+/*
+ * 名字、@账号、时间挤在一行：时间不缩（flex: none），@账号先缩（flex-shrink 大得多），缩到三个字宽才轮到名字（最多占 62%）。
+ * 名字和 @账号各自截成省略号
+ */
+.nm-l { display: flex; flex: 0 1 auto; align-items: center; gap: 5px; min-width: 0; max-width: 62%; }
 .nm-l .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.nm-l .vf { flex: none; }
 .bd { flex: 1; min-width: 0; }
 
 .meta { display: flex; align-items: center; gap: 5px; height: 24px; white-space: nowrap; }
 .nm { font-size: 15px; font-weight: 700; }
 .vf { width: 15px; height: 15px; }
-.hd2 { min-width: 0; overflow: hidden; color: var(--t2); font-size: 13px; text-overflow: ellipsis; }
-.go { width: 16px; height: 16px; margin-left: auto; color: var(--t2); }
+.hd2 { color: var(--t2); font-size: 13px; }
+/* @账号最少留 3 个字宽（「@m…」）：名字很长时也看得出这里是账号，不会被挤成半个字 */
+.hdl { flex: 0 1000 auto; min-width: 3em; overflow: hidden; text-overflow: ellipsis; }
+.tm { flex: none; }
+.go { flex: none; width: 16px; height: 16px; margin-left: auto; color: var(--t2); }
 
-.tx { display: block; color: var(--t3); font-size: 15px; line-height: 24px; word-break: break-all; }
+/* 标题最多 5 行（-webkit-line-clamp 老引擎也认）；超出的下面有「全文」 */
+.tx {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--t3);
+  font-size: 15px;
+  line-height: 24px;
+  word-break: break-all;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 5;
+}
+.tx-more { display: inline-block; color: var(--tag); font-size: 15px; font-weight: 500; line-height: 24px; }
 .tg { display: flex; flex-wrap: wrap; gap: 0 9px; margin-top: 4px; color: var(--tag); font-size: 15px; line-height: 24px; }
 
 .md-b { display: block; width: 100%; margin-top: 8px; border-radius: 7px; }
@@ -318,7 +384,8 @@ function toggleFav() {
     background-color: var(--panel);
     box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .06);
   }
-  .post + .post { margin-top: 12px; }
+  /* 卡片之间 12px；长列表里前一张换成了占位（WinList 的 .wl-ph，高度里已经含它自己的间距）也一样 */
+  .post + .post, .wl-ph + .post { margin-top: 12px; }
   .post.m-pressed { background-color: #171717; }
   .meta { gap: 6px; height: 22px; }
   .nm { font-weight: 600; }

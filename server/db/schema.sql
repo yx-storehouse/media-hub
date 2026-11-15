@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS user_follows (
   PRIMARY KEY (user_id, creator_id)
 );
 CREATE INDEX IF NOT EXISTS idx_user_follows_creator ON user_follows(creator_id);
+CREATE INDEX IF NOT EXISTS idx_user_follows_user ON user_follows(user_id, created_at DESC, creator_id DESC);   -- 「我的关注」按时间倒序
 
 -- ---------------------------------------------------------------------------
 -- 分类 / 专题
@@ -132,6 +133,21 @@ CREATE INDEX IF NOT EXISTS idx_videos_play        ON videos(status, play_count D
 CREATE INDEX IF NOT EXISTS idx_videos_hot         ON videos(status, like_count DESC);
 CREATE INDEX IF NOT EXISTS idx_videos_category    ON videos(status, category_key, published_at DESC);
 CREATE INDEX IF NOT EXISTS idx_videos_related     ON videos(status, topic_id, category_key, play_count DESC); -- 播放页相似推荐
+-- 下面这些老库由 db/index.mjs 启动时补建（INDEXES，定义两边一致）
+CREATE INDEX IF NOT EXISTS idx_videos_related_src ON videos(status, topic_id, category_key, play_count DESC, playback_url); -- 相似推荐：有片源的在前（覆盖）
+CREATE INDEX IF NOT EXISTS idx_videos_topic_play  ON videos(status, topic_id, play_count DESC, fav_count);   -- 专题按播放排序 + 播放 / 收藏之和
+CREATE INDEX IF NOT EXISTS idx_videos_topic_fav   ON videos(status, topic_id, fav_count DESC);              -- 专题按收藏排序
+CREATE INDEX IF NOT EXISTS idx_videos_pub_region  ON videos(status, published_at DESC, region);             -- 「最新」7 天 × 地区计数（覆盖）
+CREATE INDEX IF NOT EXISTS idx_videos_search      ON videos(status, published_at DESC, title, tags);        -- 1～2 字搜索、热词「有没有结果」（覆盖）
+CREATE INDEX IF NOT EXISTS idx_videos_creator_pub ON videos(creator_id, status, published_at DESC);         -- 创作者主页计数 / 最新
+CREATE INDEX IF NOT EXISTS idx_videos_creator_play ON videos(creator_id, status, play_count DESC);          -- 创作者主页最热
+CREATE INDEX IF NOT EXISTS idx_videos_cover       ON videos(cover_url);                                    -- 按封面地址找视频（照片墙去重、后台查重）
+CREATE INDEX IF NOT EXISTS idx_videos_topic       ON videos(topic_id);                                     -- 删专题时置空 topic_id
+CREATE INDEX IF NOT EXISTS idx_videos_admin_play  ON videos(play_count DESC, id DESC);                     -- 后台列表排序（同值按 id）
+CREATE INDEX IF NOT EXISTS idx_videos_admin_like  ON videos(like_count DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_videos_admin_fav   ON videos(fav_count DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_videos_admin_title ON videos(title, id);
+CREATE INDEX IF NOT EXISTS idx_videos_admin_dur   ON videos(duration_sec, id);
 
 -- 首页「推荐」分区（分区 → 视频，手工排布，支持换一批）
 CREATE TABLE IF NOT EXISTS home_sections (
@@ -198,6 +214,7 @@ CREATE TABLE IF NOT EXISTS series_episodes (
   UNIQUE (series_id, episode_no)
 );
 CREATE INDEX IF NOT EXISTS idx_episodes_series ON series_episodes(series_id, episode_no);
+CREATE INDEX IF NOT EXISTS idx_episodes_video ON series_episodes(video_id);
 
 -- ---------------------------------------------------------------------------
 -- 社区
@@ -224,6 +241,9 @@ CREATE TABLE IF NOT EXISTS posts (
 CREATE INDEX IF NOT EXISTS idx_posts_pub      ON posts(status, published_at DESC);
 CREATE INDEX IF NOT EXISTS idx_posts_creator  ON posts(creator_id, published_at DESC);
 CREATE INDEX IF NOT EXISTS idx_posts_hot      ON posts(status, is_hot, read_count DESC);
+CREATE INDEX IF NOT EXISTS idx_posts_search   ON posts(status, published_at DESC, text, tags);   -- 1～2 字搜帖子（覆盖）
+CREATE INDEX IF NOT EXISTS idx_posts_creator_pub ON posts(creator_id, status, published_at DESC); -- 创作者主页帖子计数 / 列表
+CREATE INDEX IF NOT EXISTS idx_posts_video    ON posts(video_id);                                -- 删视频时置空 video_id
 
 -- 帖子媒体（视频帖：1 张大图 + 3 张缩略图；图文帖：文档页缩略图）
 CREATE TABLE IF NOT EXISTS post_media (
@@ -245,6 +265,7 @@ CREATE TABLE IF NOT EXISTS post_media_blobs (
   content   TEXT NOT NULL,                      -- 长文正文 / 文档页内容（媒体表只存元信息）
   created_at INTEGER NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_post_media_blobs_post ON post_media_blobs(post_id);
 
 CREATE TABLE IF NOT EXISTS comments (
   id            INTEGER PRIMARY KEY,
@@ -260,6 +281,8 @@ CREATE TABLE IF NOT EXISTS comments (
 );
 CREATE INDEX IF NOT EXISTS idx_comments_post  ON comments(post_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_comments_video ON comments(video_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_comments_user  ON comments(user_id);
+CREATE INDEX IF NOT EXISTS idx_comments_parent ON comments(parent_id);
 
 -- ---------------------------------------------------------------------------
 -- 图集（创作者主页「图片」：后台单独上传的图片，不是帖子里的图）
@@ -412,6 +435,7 @@ CREATE TABLE IF NOT EXISTS search_history (
 );
 CREATE INDEX IF NOT EXISTS idx_search_history_user ON search_history(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_search_history_keyword ON search_history(keyword);
+CREATE INDEX IF NOT EXISTS idx_search_history_video ON search_history(video_id);
 
 -- 用户观看历史
 CREATE TABLE IF NOT EXISTS watch_history (
@@ -424,6 +448,7 @@ CREATE TABLE IF NOT EXISTS watch_history (
   UNIQUE (user_id, video_id)
 );
 CREATE INDEX IF NOT EXISTS idx_watch_history_user ON watch_history(user_id, watched_at DESC);
+CREATE INDEX IF NOT EXISTS idx_watch_history_video ON watch_history(video_id);
 
 -- 「我的」页里没有下级的入口（离线缓存等，目前是占位数字）
 CREATE TABLE IF NOT EXISTS user_stats (
@@ -446,6 +471,7 @@ CREATE TABLE IF NOT EXISTS video_dislikes (
   created_at INTEGER NOT NULL,
   PRIMARY KEY (user_id, video_id)
 );
+CREATE INDEX IF NOT EXISTS idx_video_dislikes_video ON video_dislikes(video_id);
 CREATE TABLE IF NOT EXISTS video_likes (
   user_id    INTEGER NOT NULL REFERENCES users(id)  ON DELETE CASCADE,
   video_id   INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
@@ -461,6 +487,7 @@ CREATE TABLE IF NOT EXISTS video_favs (
   PRIMARY KEY (user_id, video_id)
 );
 CREATE INDEX IF NOT EXISTS idx_video_favs_video ON video_favs(video_id);
+CREATE INDEX IF NOT EXISTS idx_video_favs_user ON video_favs(user_id, created_at DESC, video_id DESC);   -- 「我的收藏」按时间倒序
 
 -- 专题收藏（前端「收藏」按钮 + 「2 收藏」文案）
 CREATE TABLE IF NOT EXISTS topic_favs (
@@ -470,6 +497,7 @@ CREATE TABLE IF NOT EXISTS topic_favs (
   PRIMARY KEY (user_id, topic_id)
 );
 CREATE INDEX IF NOT EXISTS idx_topic_favs_topic ON topic_favs(topic_id);
+CREATE INDEX IF NOT EXISTS idx_topic_favs_user ON topic_favs(user_id, created_at DESC, topic_id DESC);
 
 CREATE TABLE IF NOT EXISTS post_favs (
   user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -478,6 +506,7 @@ CREATE TABLE IF NOT EXISTS post_favs (
   PRIMARY KEY (user_id, post_id)
 );
 CREATE INDEX IF NOT EXISTS idx_post_favs_post ON post_favs(post_id);
+CREATE INDEX IF NOT EXISTS idx_post_favs_user ON post_favs(user_id, created_at DESC, post_id DESC);
 
 CREATE TABLE IF NOT EXISTS comments_likes (
   user_id    INTEGER NOT NULL REFERENCES users(id)    ON DELETE CASCADE,
@@ -485,6 +514,7 @@ CREATE TABLE IF NOT EXISTS comments_likes (
   created_at INTEGER NOT NULL,
   PRIMARY KEY (user_id, comment_id)
 );
+CREATE INDEX IF NOT EXISTS idx_comments_likes_comment ON comments_likes(comment_id);
 
 CREATE TABLE IF NOT EXISTS danmaku (
   id         INTEGER PRIMARY KEY,
@@ -496,6 +526,7 @@ CREATE TABLE IF NOT EXISTS danmaku (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_danmaku_video ON danmaku(video_id, time_sec);
+CREATE INDEX IF NOT EXISTS idx_danmaku_user ON danmaku(user_id);
 
 -- 用户上传（审核通过后写入 videos）
 CREATE TABLE IF NOT EXISTS video_uploads (
@@ -509,6 +540,7 @@ CREATE TABLE IF NOT EXISTS video_uploads (
   created_at   INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_uploads_user ON video_uploads(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_uploads_video ON video_uploads(video_id);
 
 -- 会话与统计
 CREATE TABLE IF NOT EXISTS sessions (
@@ -520,6 +552,15 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON sessions(expires_at);
+
+-- 生成的占位图（风景图 SVG）：行里的 fallback 只存 url(/api/art/<hash>.svg)，原文按内容哈希存这里（见 lib/art-store.mjs，
+-- 老库由 db/index.mjs 启动时补建并把内联在行里的 SVG 挪过来）。GET /api/art/<hash>.svg 读这张表。
+CREATE TABLE IF NOT EXISTS art_blobs (
+  id         INTEGER PRIMARY KEY,
+  hash       TEXT    NOT NULL UNIQUE,
+  svg        TEXT    NOT NULL,
+  created_at INTEGER NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS daily_stats (
   day          TEXT PRIMARY KEY,                -- '2026-10-09'

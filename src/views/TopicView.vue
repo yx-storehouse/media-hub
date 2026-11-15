@@ -17,10 +17,15 @@ import Cover from '@/components/Cover.vue'
 import VideoCard from '@/components/VideoCard.vue'
 import SkeletonGrid from '@/components/home/SkeletonGrid.vue'
 import ListFoot from '@/components/home/ListFoot.vue'
+import WinList from '@/components/home/WinList'
+import LoadState from '@/components/common/LoadState.vue'
 import ContentSwap from '@/components/home/ContentSwap'
 import { createPagedFeed, feedCount, useScrollMore } from '@/components/search/paging'
+import { feedError } from '@/components/home/list'
 import { useBack } from '@/composables/useBack'
-import { toast } from '@/composables/useToast'
+import { toast, toastError } from '@/composables/useToast'
+import { usePageTitle } from '@/composables/usePageTitle'
+import { errorText } from '@/api/http'
 import { getTopic, getTopicVideos, toggleTopicFav } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 import { rememberVideo } from '@/components/video/preview'
@@ -54,11 +59,19 @@ const fmtCount = n => (n >= 10000 ? (n / 10000).toFixed(1).replace(/\.0$/, '') +
 const scrollEl = ref(null)
 const listEl = ref(null)
 const topic = shallowRef(null)
+/* 浏览器标题「<专题名> - Reel」 */
+usePageTitle(() => topic.value?.name)
 const sort = ref(sortOf(route.query.sort))
 /* 每换一次排序 +1：重建网格，新列表淡入 */
 const sortKey = ref(0)
-/** 加载失败：{ message, retry }；专题不存在 / 已下架（4xx）不给重试 */
+/**
+ * 加载失败：{ error, text, retry }。error 交给 LoadState 说清楚原因（网络恢复、服务器恢复后自动重试）；
+ * 专题不存在 / 已下架（4xx）不给重试，给「返回」
+ */
 const failed = ref(null)
+/* 视频网格（WinList）：返回恢复时要存下它渲染着哪一段、每张卡片多高 */
+const listWin = ref(null)
+let restoredWin = null
 
 let currentId = null
 const videos = createPagedFeed(page => getTopicVideos(currentId, sort.value, page))
@@ -108,12 +121,11 @@ async function load(id) {
     if (token !== loadSeq) return
     videos.reset()
     const missing = e?.status >= 400 && e?.status < 500 && e?.status !== 401
-    failed.value = {
-      message: missing ? '专题不存在或已下架' : '加载失败，请检查网络',
-      retry: !missing
-    }
+    failed.value = missing ? { error: e, text: '专题不存在或已下架', retry: false } : { error: e || true, text: '', retry: true }
   }
 }
+/* 出错页的「重试」（LoadState 断网恢复、服务器恢复后也自动调它） */
+const retryLoad = () => load(route.params.id)
 
 /* 专题信息（是否收藏、播放 / 收藏数）在别处可能变了：静默刷新一次，失败就保持原样 */
 async function refreshTopic() {
@@ -185,7 +197,7 @@ function playAll() {
     router.push(videoTo(first, 0))
     return
   }
-  if (videos.error) toast('加载失败，请稍后重试')
+  if (videos.error) toast(errorText(videos.error))
   else if (videos.total === null || videos.loading) toast('视频还在加载，请稍候')
   else toast('专题里还没有视频')
 }
@@ -215,7 +227,7 @@ async function toggleFav() {
     }
     toast(on ? '已加入收藏' : '已取消收藏')
   } catch (e) {
-    toast(e?.code === 'demo' && e.message ? e.message : '操作失败，请稍后重试')
+    toastError(e)
   } finally {
     favBusy = false
   }
@@ -248,6 +260,7 @@ function saveSnapshot() {
     topic: topic.value,
     sort: sort.value,
     videos: videos.snapshot(),
+    win: listWin.value?.snapshot() || null,
     top: lastTop
   })
   while (snapshots.size > SNAPSHOT_MAX) snapshots.delete(snapshots.keys().next().value)
@@ -261,6 +274,7 @@ function restoreSnapshot(id) {
   topic.value = s.topic
   videos.restore(s.videos)
   if (videos.total === null) videos.more()   // 离开时第一页还没回来
+  restoredWin = s.win
   lastTop = s.top
   return true
 }
@@ -309,8 +323,8 @@ onBeforeRouteUpdate(to => {
               <div class="st">{{ stats }}</div>
             </div>
             <div class="btns">
-              <button type="button" class="b-play m-press" @click="playAll"><Icon name="play" />播放全部</button>
-              <button type="button" class="b-fav m-press" :class="{ on: faved }" :aria-pressed="faved" @click="toggleFav">
+              <button type="button" class="b-play hit-44y m-press" @click="playAll"><Icon name="play" />播放全部</button>
+              <button type="button" class="b-fav hit-44y m-press" :class="{ on: faved }" :aria-pressed="faved" @click="toggleFav">
                 <Icon ref="favIcon" name="heart" /><span>{{ faved ? '已收藏' : '收藏' }}</span>
               </button>
             </div>
@@ -318,11 +332,10 @@ onBeforeRouteUpdate(to => {
         </template>
       </div>
 
-      <div v-if="failed" class="empty">
-        {{ failed.message }}
-        <button v-if="failed.retry" type="button" class="retry" @click="load(route.params.id)">重试</button>
-        <button v-else type="button" class="retry" @click="back">返回</button>
-      </div>
+      <!-- 出错：统一的说法；网络问题有「重试」（并且网络恢复后自动重试），专题不存在只给「返回」 -->
+      <LoadState v-if="failed" :error="failed.error" :text="failed.text" :retry="failed.retry ? retryLoad : null">
+        <button v-if="!failed.retry" type="button" class="retry" @click="back">返回</button>
+      </LoadState>
       <SkeletonGrid v-else-if="!topic" class="tp-sk" :count="isDesktop ? 12 : 6" gap="g11" />
       <template v-else>
         <div ref="listEl" class="vtitle">视频 ({{ videoCount }})</div>
@@ -347,15 +360,15 @@ onBeforeRouteUpdate(to => {
           桌面布局一行 4–6 张：36 张（2560 宽也有 6 行）才比一屏高
         -->
         <ContentSwap :pending="videos.total === null && !videos.error">
-          <div v-if="videos.total === null && videos.error" class="empty">
-            加载失败，请检查网络
-            <button type="button" class="retry" @click="videos.more()">重试</button>
-          </div>
+          <LoadState v-if="videos.total === null && videos.error" :error="feedError(videos)" :retry="() => videos.more()" />
           <SkeletonGrid v-else-if="videos.total === null" :count="isDesktop ? 36 : 10" gap="g11" />
           <div v-else-if="!videos.list.length" v-rise.self class="empty">专题里还没有视频</div>
           <div v-else :key="`list${sortKey}`">
+            <!-- 几千条的专题也只渲染视口附近的卡片（WinList）；返回时按离开前的样子摆回去 -->
             <div v-rise class="grid g11">
-              <VideoCard v-for="(v, i) in videos.list" :key="v.id" :video="v" :to="videoTo(v, i)" />
+              <WinList ref="listWin" v-slot="{ item: v, index: i }" :items="videos.list" :restore="restoredWin">
+                <VideoCard :video="v" :to="videoTo(v, i)" />
+              </WinList>
             </div>
             <ListFoot :feed="videos" />
           </div>
@@ -398,9 +411,10 @@ onBeforeRouteUpdate(to => {
 .info h1 { overflow: hidden; font-size: 18px; font-weight: 700; line-height: 26px; text-overflow: ellipsis; white-space: nowrap; text-shadow: 0 1px 8px rgba(0, 0, 0, .5); }
 .info .st { overflow: hidden; color: #e4e4e4; font-size: 13px; line-height: 20px; text-overflow: ellipsis; white-space: nowrap; }
 .btns { display: flex; flex: none; align-items: center; gap: 11px; }
-.b-play { display: flex; align-items: center; justify-content: center; gap: 4px; width: 85px; height: 27px; border-radius: 14px; background: var(--accent); color: var(--on-accent); font-size: 12px; font-weight: 700; }
+.b-play { position: relative; display: flex; align-items: center; justify-content: center; gap: 4px; width: 85px; height: 27px; border-radius: 14px; background: var(--accent); color: var(--on-accent); font-size: 12px; font-weight: 700; }
 .b-play svg { width: 11px; height: 11px; }
 .b-fav {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;

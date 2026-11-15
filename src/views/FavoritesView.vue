@@ -5,7 +5,7 @@ import { getMyFavs, getVideo, getTopic, toggleVideoFav, toggleTopicFav } from '@
 import { useAuthStore } from '@/stores/auth'
 import { useAppStore } from '@/stores/app'
 import { usePostStore } from '@/stores/posts'
-import { toast } from '@/composables/useToast'
+import { toast, toastError } from '@/composables/useToast'
 import { createFeed } from '@/components/creator/feed'
 import { useAutoMore } from '@/components/home/list'
 import { useSnapshot } from '@/components/me/snapshot'
@@ -17,6 +17,7 @@ import PostCard from '@/components/community/PostCard.vue'
 import PostSkeleton from '@/components/community/PostSkeleton.vue'
 import ListFoot from '@/components/home/ListFoot.vue'
 import SkeletonGrid from '@/components/home/SkeletonGrid.vue'
+import LoadState from '@/components/common/LoadState.vue'
 import { haptic } from '@/utils/motion'
 import { cameBack, useSlider, cover, vRise, fadeIn, pop, scrollBehavior } from '@/components/home/motion'
 
@@ -89,7 +90,8 @@ async function toggleFav(type, item, e) {
     toast(active ? '已收藏' : '已取消收藏')
   } catch (e) {
     set(!on)
-    toast(e?.status === 400 && e.message ? e.message : '操作失败，请稍后重试')
+    // 统一的说法；登录过期时不提示（登录框已经弹出来了，重新登录后会自动补做）
+    toastError(e)
   } finally {
     busy.delete(k)
   }
@@ -275,10 +277,8 @@ onBeforeUnmount(() => {
             <!-- 帖子的骨架和社区共用（桌面上同样是一张张圆角卡片，和 PostCard 对得上） -->
             <PostSkeleton v-else-if="session === null || (feeds[t.key].total === null && !feeds[t.key].error)" class="fv-posts" />
 
-            <div v-else-if="feeds[t.key].total === null" class="empty">
-              加载失败，请检查网络
-              <button type="button" class="retry" @click="feeds[t.key].more()">重试</button>
-            </div>
+            <!-- 第一页取不到：统一的说法 +「重试」，联网 / 隔一会儿会自己重试 -->
+            <LoadState v-else-if="feeds[t.key].total === null" :error="feeds[t.key].error" :retry="feeds[t.key].more" />
 
             <div v-else-if="!feeds[t.key].list.length" v-rise.self class="empty">
               <Icon name="heart" class="em-ic" />
@@ -403,7 +403,7 @@ onBeforeUnmount(() => {
 .tp span { position: relative; z-index: 1; flex: none; margin-left: auto; padding-left: 6px; font-size: 11px; opacity: .78; }
 
 .em-ic { width: 34px; height: 34px; margin: 0 auto 12px; color: #4a4a4a; stroke-width: 1.6; }
-.em-sub { margin-top: 6px; padding: 0 30px; color: #6e6e6e; font-size: 12px; line-height: 18px; }
+.em-sub { margin-top: 6px; padding: 0 30px; color: var(--t-sub); font-size: 12px; line-height: 18px; }
 
 /* ---- 骨架 ---- */
 .sk { border-radius: 6px; background: #161616; animation: sk 1.2s ease-in-out infinite; }

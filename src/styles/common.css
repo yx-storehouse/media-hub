@@ -52,6 +52,9 @@
 .btn-soft { display: flex; flex: 1; align-items: center; justify-content: center; gap: 5px; height: 29px; border-radius: 8px; background: #1e1e1e; color: var(--t2); font-size: 13px; }
 .btn-soft svg { width: 14px; height: 14px; }
 .btn-soft:active { background: #262626; }
+/* 只有 29px 高：能点的范围上下各撑 6px（41px），外观不变；上下都有 12px 以上的留白，不会压到别的东西 */
+.btn-soft { position: relative; }
+.btn-soft::after { content: ''; position: absolute; top: -6px; right: 0; bottom: -6px; left: 0; }
 
 /* ---- filter chips row ---- */
 .chips { display: flex; gap: 8.5px; padding: 12px 12px 13px; }
@@ -69,6 +72,13 @@
   font-weight: 500;
 }
 .chip.on { background: var(--accent); box-shadow: none; color: var(--on-accent); font-weight: 600; }
+/*
+ * 胶囊只有 27.5px 高：能点的范围上下各撑 8px（约 44px）、左右各 4px（不超过一半间距，相邻的不重叠），外观不变。
+ * 一排胶囊（.chips）上下有 12px 的留白，撑出来的部分还在这一排里面（横向滚动的行会裁掉超出去的部分）。
+ * position: relative 不带 z-index，不影响各页滑块（.m-bar）和胶囊文字的层叠顺序。
+ */
+.chip { position: relative; }
+.chip::after { content: ''; position: absolute; top: -8px; right: -4px; bottom: -8px; left: -4px; }
 
 /* ---- small rounded pill button (换一批 / 查看全部) ---- */
 .pill { position: relative; display: flex; align-items: center; gap: 2px; height: 20px; padding: 0 9px; border-radius: 10px; background: var(--chip); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .04); color: var(--t2); font-size: 12px; }
@@ -83,6 +93,8 @@
 .ct-tab { position: relative; color: var(--t2); font-size: 16px; font-weight: 500; line-height: 30px; cursor: pointer; }
 .ct-tab.on { color: var(--accent); font-weight: 600; }
 .ct-tab.on::after { content: ''; position: absolute; left: 50%; bottom: -6px; width: 21px; height: 3px; margin-left: -10.5px; border-radius: 2px; background: var(--accent); }
+/* 标签字只有 30px 高：能点的范围上下各撑 7px（44px）、左右各 11px（正好一半间距），::after 是选中的下划线，所以用 ::before */
+.ct-tab::before { content: ''; position: absolute; top: -7px; right: -11px; bottom: -7px; left: -11px; }
 .ct-search {
   display: flex;
   /* 167px wide, but gives way on narrow phones instead of pushing past the screen edge */
@@ -111,11 +123,16 @@
 .sh-back::after { content: ''; position: absolute; inset: -4px -8px -4px -12px; }
 
 /*
- * any small round / icon button: add class "hit-44" to grow its tap area to at least 44x44
- * (centred, the look stays the same). The button must be positioned (relative / absolute / fixed)
- * and must not use ::after for something else.
+ * ---- 点按区域（触屏）----
+ * 规则：手指能点到的范围至少 40px 高（建议 44 × 44），看起来小的按钮 / 链接用透明的伪元素把能点的范围撑大，外观不变。
+ * 撑出去的部分不要压到相邻的可点元素上（最多撑到间距的一半），也不要超出有 overflow: hidden / 横向滚动的容器（会被裁掉）。
+ *   hit-44   小的圆形 / 图标按钮：能点的范围撑到至少 44 × 44（居中）。用 ::after
+ *   hit-44b  同上，用 ::before（::after 已经有别的用处时，比如选中的下划线）
+ *   hit-44y  一行里的文字链接（@名字、#话题、「看完整版」）：只把高度撑到 44，宽度不变（左右挨着的不会互相抢）
+ * 元素本身要是定位的（relative / absolute / fixed；行内元素加 position: relative 也行）。
+ * 公共样式里的胶囊（.chip）、选项（.opt）、换一批（.btn-soft）、重试（.empty .retry）、标签（.ct-tab）、开关（.sw）已经撑好了。
  */
-.hit-44::after {
+.hit-44::after, .hit-44b::before {
   content: '';
   position: absolute;
   top: min(0px, calc(50% - 22px));
@@ -123,11 +140,25 @@
   bottom: min(0px, calc(50% - 22px));
   left: min(0px, calc(50% - 22px));
 }
+.hit-44y::after {
+  content: '';
+  position: absolute;
+  top: min(0px, calc(50% - 22px));
+  right: 0;
+  bottom: min(0px, calc(50% - 22px));
+  left: 0;
+}
 
 /* ---- bottom sheet content (BottomSheet.vue) ---- */
+/*
+ * 弹层里的一组选项（倍速、全部分类）：没选中的是比弹层底色（#151515）亮一档的块（--opt）加一圈很淡的描边，
+ * 一眼看得出是一个个按钮（以前和弹层几乎同色，第二行像散落的字）；选中的是白底黑字。
+ * 36px 高，能点的范围上下左右各撑 4px（44px，不超过一半间距）。
+ */
 .opts { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
-.opt { display: grid; place-items: center; height: 36px; border-radius: 8px; background: var(--chip); color: var(--t2); font-size: 13px; }
-.opt.on { background: var(--accent); color: var(--on-accent); font-weight: 600; }
+.opt { position: relative; display: grid; place-items: center; height: 36px; border-radius: 8px; background: var(--opt); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .06); color: var(--t2); font-size: 13px; }
+.opt::after { content: ''; position: absolute; top: -4px; right: -4px; bottom: -4px; left: -4px; }
+.opt.on { background: var(--accent); box-shadow: none; color: var(--on-accent); font-weight: 600; }
 .row2 { display: flex; align-items: center; justify-content: space-between; height: 46px; border-bottom: 1px solid var(--line); font-size: 14px; }
 .row2:last-child { border: 0; }
 /*
@@ -152,10 +183,17 @@
 .sw.on::after { transform: translate3d(18px, 0, 0); background: var(--on-accent); }
 .sw.m-pressed::after { transform: translate3d(2px, 0, 0) scaleX(1.2); transition-duration: var(--dur-1), var(--dur-2); }
 .sw.on.m-pressed::after { transform: translate3d(16px, 0, 0) scaleX(1.2); }
+/* 开关 24px 高：能点的范围上下各撑 10px（44px）；::after 是圆点，所以用 ::before。整行都能点更好（把 .row2 做成 label / 按钮） */
+.sw::before { content: ''; position: absolute; top: -10px; right: -4px; bottom: -10px; left: -4px; }
 
-/* empty / error state with an optional retry button */
+/*
+ * 空状态 / 出错（components/common/LoadState.vue 用的就是这一套；页面里直接写 .empty 也行）：
+ *   .empty  居中的一行说明，.retry 下面的按钮（30px 高，能点的范围上下各撑 7px 到 44px），.sub 第二行的小字说明
+ */
 .empty { padding: 70px 0; color: var(--t2); font-size: 13px; text-align: center; }
-.empty .retry { display: block; height: 30px; margin: 14px auto 0; padding: 0 18px; border-radius: 15px; background: var(--chip); color: var(--t1); font-size: 13px; }
+.empty .retry { position: relative; display: block; height: 30px; margin: 14px auto 0; padding: 0 18px; border-radius: 15px; background: var(--chip); color: var(--t1); font-size: 13px; }
+.empty .retry::after { content: ''; position: absolute; top: -7px; right: -4px; bottom: -7px; left: -4px; }
+.empty .sub { margin-top: 6px; color: var(--t-sub); font-size: 12px; }
 
 /*
  * ---- 内容页动效（配合 src/components/home/motion.js）----
@@ -252,6 +290,8 @@
    * 它的 top 各页按自己的上边距给。[data-slider] 是滑块第一次放好时加上的（之前滑块不显示），用它把优先级抬过各页 scoped 的手机值。
    */
   .chip { height: 32px; padding: 0 16px; border-radius: 16px; }
+  /* 鼠标不用撑那么大（折行的胶囊上下只隔 10px） */
+  .chip::after { top: -4px; bottom: -4px; }
   .chips[data-slider] > .m-bar { height: 32px; border-radius: 16px; }
 
   /* 空状态 / 加载失败：桌面上留白多一点 */
@@ -269,7 +309,8 @@
   .vc:hover .cv > img { transform: scale(1.03); }
 
   .chip, .pill, .opt, .btn-soft, .empty .retry, .ct-search { transition: background-color var(--dur-2) var(--ease-out), color var(--dur-2) var(--ease-out); }
-  .chip:not(.on):hover, .opt:not(.on):hover { background: #1f1f1f; color: var(--t3); }
+  .chip:not(.on):hover { background: #1f1f1f; color: var(--t3); }
+  .opt:not(.on):hover { background: #2c2c2c; color: var(--t3); }
   .pill:hover, .empty .retry:hover, .ct-search:hover { background: #1f1f1f; color: var(--t3); }
   .btn-soft:hover { background: #262626; color: var(--t3); }
   .ct-tab { transition: color var(--dur-2) var(--ease-out); }

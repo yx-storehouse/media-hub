@@ -26,7 +26,6 @@ import FormField from '../components/FormField.vue'
 import TextInput from '../components/TextInput.vue'
 import TextArea from '../components/TextArea.vue'
 import NumberInput from '../components/NumberInput.vue'
-import SwitchInput from '../components/SwitchInput.vue'
 import UrlListInput from '../components/UrlListInput.vue'
 import TopicHeroPreview from './topics/TopicHeroPreview.vue'
 import { fmtDate, fmtNum, fmtCount } from '../utils/format'
@@ -40,7 +39,8 @@ defineOptions({ name: 'TopicsPage' })
  *   - 删除前用行里的 sectionCount / totalVideos 提醒：引用它的首页分区会被一起删掉，视频变成「无专题」
  *   - 编辑器里的头图预览和前台专题页一样（4 张竖图并排）
  * 前台怎么用专题：专题页（头图 + 视频）对所有已发布专题都有；「片库分类」类型的专题还会出现在前台「片库」里。
- * 首页「推荐」的板块在「首页推荐」页单独设置，这里的「大卡 / 首屏数量」前台目前不读。
+ * 首页「推荐」的板块在「首页推荐」页单独设置。专题的「大卡 / 首屏数量」前台不读，表单和列表里都不再出现
+ * （编辑时不改它们；新建时由服务端填默认值 0 / 4；批量导入导出照旧带着这两列）。
  */
 
 const { topicKindOptions, statusOptions, labelOf, refreshMeta } = useMeta()
@@ -139,10 +139,10 @@ const columns = computed(() => [
 const drawer = ref(null)
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,47}$/
 const editor = useEditor({
-  blank: () => ({ name: '', slug: '', kind: 0, description: '', covers: [], sortOrder: null, isFeatured: false, cardSize: 4, playsCount: 0, status: 1 }),
+  blank: () => ({ name: '', slug: '', kind: 0, description: '', covers: [], sortOrder: null, playsCount: 0, status: 1 }),
   fromRow: r => ({
     name: r.name, slug: r.slug || '', kind: r.kind ?? 0, description: r.description || '', covers: [...(r.covers || [])],
-    sortOrder: r.sortOrder ?? 0, isFeatured: !!r.isFeatured, cardSize: r.cardSize ?? 4, playsCount: r.playsCount ?? 0, status: r.status ?? 1
+    sortOrder: r.sortOrder ?? 0, playsCount: r.playsCount ?? 0, status: r.status ?? 1
   }),
   findRow: id => rows.value.find(r => r.id === id),
   fetchRow: getTopic,
@@ -157,7 +157,6 @@ const editor = useEditor({
     if ([...name].length > 40) return { name: '名称最多 40 个字' }
     if (slug && !SLUG_RE.test(slug)) return { slug: '只能用小写字母、数字和 -，以字母或数字开头，最多 48 位' }
     if (!slug && !editor.isNew) return { slug: '标识不能为空（只有新建时可以留空自动生成）' }
-    if (f.cardSize == null) return { cardSize: '请填写首屏数量（1-20）' }
     if (f.sortOrder == null && !editor.isNew) return { sortOrder: '请填写排序' }
     return null
   },
@@ -293,7 +292,6 @@ const reorderTip = computed(() => (canReorder.value ? '拖动把手或用 ↑ �
           <div class="name">
             <span class="nm">
               <button type="button" class="title-link" @click="editor.openEdit(row)">{{ row.name }}</button>
-              <span v-if="row.isFeatured" class="chip outline" title="大卡（前台目前不使用）">大卡</span>
             </span>
             <span class="dim small mono">{{ row.slug }}</span>
           </div>
@@ -385,12 +383,6 @@ const reorderTip = computed(() => (canReorder.value ? '拖动把手或用 ↑ �
         </FormField>
         <FormField label="播放数" field="playsCount" :error="editor.errors.playsCount" hint="显示在专题页头图上">
           <NumberInput v-model="editor.form.playsCount" :min="0" placeholder="0" />
-        </FormField>
-        <FormField label="首屏数量" field="cardSize" :error="editor.errors.cardSize" hint="前台目前不使用；首页板块一屏几个视频在「首页推荐」里设置">
-          <NumberInput v-model="editor.form.cardSize" :min="1" :max="20" suffix="个" />
-        </FormField>
-        <FormField inline label="大卡" field="isFeatured" :error="editor.errors.isFeatured" hint="前台目前不使用；首页的大卡分区在「首页推荐」里设置">
-          <SwitchInput v-model="editor.form.isFeatured" />
         </FormField>
       </div>
 

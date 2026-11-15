@@ -4,7 +4,9 @@
  *   数据：table = { headers, rows, rowNos }（几万行，放在 shallowRef 里，不做深层响应式）；
  *         raw = 读入的所有非空行（换「表头在第几行」时从它重算 table），见 parse.js
  *   第 2 步：mapping[列下标] = 字段 key（'' = 不导入）+ options
- *   第 3 步：预检 dryRun，每批 5000 行；第 4 步：正式导入，每批 1000 行，批与批之间可以取消、可以继续
+ *   第 3 步：预检 dryRun；第 4 步：正式导入；都是每批 1000 行（预检一批在 5 万视频的库上约占服务端 65 ms，
+ *   不会让同时在用的人卡住；分批和正式导入一致，同一批内的结果也一致），批与批之间可以取消、可以继续
+ *   「更新已有」时，和库里完全一样的行算「无变化」（unchanged），不写库，单独计数
  *
  * 正式导入每批带 importId（这次导入一个）+ chunk（第几批）：响应在路上丢了（断网、超时、代理重置）时，
  * 这一批其实可能已经写入；重试时带同样的 importId / chunk，服务端认出来直接返回上次的结果（replayed），不会重复写。
@@ -18,7 +20,7 @@ import { loadSchema } from '../../composables/useSchema'
 import { typeInfo, isType, exampleMarker } from './types'
 import { mapColumns, loadMapping, saveMapping, loadOptions, saveOptions, buildTable } from './parse'
 
-export const PREVIEW_CHUNK = 5000
+export const PREVIEW_CHUNK = 1000
 export const IMPORT_CHUNK = 1000
 const KEY = Symbol('import-store')
 const DEFAULT_OPTIONS = { onDuplicate: 'skip', defaultStatus: 1, autoCreate: true }
@@ -52,6 +54,8 @@ function newRun() {
     next: 0,
     created: 0,
     updated: 0,
+    /** 「更新已有」时和库里一样的行：不写库 */
+    unchanged: 0,
     skipped: 0,
     failed: 0,
     error: '',
@@ -243,6 +247,7 @@ export function createImportStore(provideFn) {
   function merge(run, res) {
     run.created += res.created || 0
     run.updated += res.updated || 0
+    run.unchanged += res.unchanged || 0
     run.skipped += res.skipped || 0
     run.failed += res.failed || 0
     if (res.replayed) run.replayed++

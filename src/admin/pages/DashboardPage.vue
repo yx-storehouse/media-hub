@@ -49,7 +49,16 @@ const cards = computed(() => {
   const s = stats.value
   if (!s) return []
   return [
-    { key: 'videos', label: '视频', icon: 'video', to: '/videos', value: s.videos?.total, sub: `已发布 ${fmtNum(s.videos?.published)} · 草稿 ${fmtNum(s.videos?.draft)} · 下架 ${fmtNum(s.videos?.offline)}` },
+    {
+      key: 'videos',
+      label: '视频',
+      icon: 'video',
+      to: '/videos',
+      value: s.videos?.total,
+      // 短视频数只是统计，放这里（以前放在「待完善」卡片里，容易被当成要处理的问题）
+      sub: `已发布 ${fmtNum(s.videos?.published)} · 草稿 ${fmtNum(s.videos?.draft)} · 下架 ${fmtNum(s.videos?.offline)}` +
+        (s.videos?.short ? ` · 短视频 ${fmtNum(s.videos.short)}` : '')
+    },
     { key: 'posts', label: '帖子', icon: 'post', to: '/posts', value: s.posts?.total, sub: `已发布 ${fmtNum(s.posts?.published)} · 热门 ${fmtNum(s.posts?.hot)}` },
     {
       key: 'albums',
@@ -148,9 +157,6 @@ const openPost = p => router.push({ path: '/posts', query: { edit: p.id } })
                   </RouterLink>
                 </li>
               </ul>
-              <p v-if="stats?.videos?.short" class="short muted small">
-                另有 <RouterLink class="link" :to="{ path: '/videos', query: { short: '1' } }">{{ fmtNum(stats.videos.short) }} 个短视频</RouterLink>
-              </p>
             </div>
           </section>
 
@@ -260,7 +266,6 @@ a.stat:hover { border-color: var(--line-2); background: #151515; }
 .todo b { min-width: 44px; font-size: 18px; }
 .todo-l { display: block; color: var(--t1); }
 .todo-h { display: block; color: var(--t3); font-size: 12px; }
-.short { margin-top: 12px; }
 
 .quick { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
 .q { display: flex; flex-direction: column; gap: 3px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; color: var(--t2); transition: border-color .12s, background .12s; }

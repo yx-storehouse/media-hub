@@ -3,6 +3,7 @@ import { ref, shallowRef, watch, onMounted, onActivated, onBeforeUnmount } from 
 import { getRecommendSections } from '@/api'
 import RecommendSection from '@/components/home/RecommendSection.vue'
 import SkeletonGrid from '@/components/home/SkeletonGrid.vue'
+import LoadState from '@/components/common/LoadState.vue'
 import { toTopOrRefresh } from '@/components/home/list'
 import { useKeepScroll } from '@/composables/useKeepScroll'
 import { isDesktop } from '@/composables/useDesktop'
@@ -10,6 +11,8 @@ import { isDesktop } from '@/composables/useDesktop'
 /* null = 分区还没回来（先画两组骨架） */
 const sections = shallowRef(null)
 const failed = ref(false)
+/* 取分区失败的错误（出错提示说清楚是断网、超时还是服务器出错；断网 / 服务器恢复后 LoadState 自动重试） */
+const error = shallowRef(null)
 const scroller = ref(null)
 useKeepScroll(scroller)
 const secRefs = ref([])
@@ -18,18 +21,20 @@ async function load() {
   failed.value = false
   try {
     sections.value = await getRecommendSections()
-  } catch {
+    error.value = null
+  } catch (e) {
+    error.value = e
     failed.value = true
   }
 }
 
-/* 已经在顶部时再点一次底部「首页」：每个分区都换一批；分区还没加载出来就重新加载 */
+/* 已经在顶部时再点一次底部「首页」、下拉刷新：每个分区都换一批；分区还没加载出来就重新加载。返回的 Promise 都换完了才结束 */
 function refresh() {
-  if (!sections.value) return failed.value ? load() : undefined
-  secRefs.value.forEach(s => s?.shuffle())
+  if (!sections.value) return failed.value ? load() : Promise.resolve()
+  return Promise.all(secRefs.value.map(s => s?.shuffle()))
 }
 
-defineExpose({ retap: () => toTopOrRefresh(scroller.value, refresh) })
+defineExpose({ retap: () => toTopOrRefresh(scroller.value, refresh), refresh })
 
 /*
  * 桌面布局（≥ 1024px）：网格现在有几列（和 common.css 里桌面 .grid 的 auto-fill 同一个算法：
@@ -84,10 +89,7 @@ load()
       <!-- 骨架原地淡出，分区接着出现（分区自己的卡片到了再浮现） -->
       <div class="m-swap">
         <Transition name="m-skel">
-          <div v-if="failed" class="empty">
-            加载失败，请稍后重试
-            <button type="button" class="retry" @click="load()">重试</button>
-          </div>
+          <LoadState v-if="failed" :error="error || true" :retry="load" />
           <div v-else-if="sections">
             <RecommendSection v-for="s in sections" ref="secRefs" :key="s.id" :section="s" :cols="cols" />
           </div>

@@ -22,13 +22,15 @@
  * 字段错误（本地校验或服务端返回的 field）：显示在 <FormField field="…"> 下，该字段一改动就清掉。
  *   服务端字段名和表单键不一样时用 fieldAlias: { durationSec: 'durationText' } 说明；
  *   既不在表单里、也没写别名的字段，表单任何改动都会清掉它。
- * 校验不通过时所有错误一起显示，只聚焦（并 toast）表单里排在最前面的那一个。
+ * 校验不通过时所有错误一起显示，只聚焦表单里排在最前面的那一个。
+ * 错误已经写在表单项下面（FormField 的 role=alert，读屏也会读）时不再弹提示框（以前提示框会叠在抽屉右下角的控件上，
+ *   改好之后还要停 5 秒）；只有表单里找不到对应项的错误才弹，并且在重新保存、字段改好、关抽屉时收掉。
  * 保存请求进行中：ADrawer 传 :busy="editor.saving" 就关不掉；万一期间换了一条记录（浏览器后退 / 深链），
  *   旧请求的结果只提示 + 刷新列表，不会关掉、也不会改动新打开的那一条。
  */
 import { ref, reactive, computed, watch, nextTick, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { toast, toastError } from '../components/toast'
+import { toast, toastError, dismissToast } from '../components/toast'
 import { useLeaveGuard } from './useLeaveGuard'
 
 const clone = v => JSON.parse(JSON.stringify(v ?? null))
@@ -71,6 +73,15 @@ export function useEditor(opts) {
 
   /* ---------- 字段错误：记下出错时该字段的值，字段一改就清掉这条错误 ---------- */
   let errSnap = {}
+  /* 表单里找不到对应项的字段错误弹的提示框：字段 → toast id */
+  let errToasts = {}
+  function dropErrToasts(keep = []) {
+    for (const f of Object.keys(errToasts)) {
+      if (keep.includes(f)) continue
+      dismissToast(errToasts[f])
+      delete errToasts[f]
+    }
+  }
   const snapOf = field => {
     const k = fieldAlias[field] || field
     const f = form.value
@@ -80,6 +91,7 @@ export function useEditor(opts) {
     errors.value = next
     errSnap = {}
     for (const f of Object.keys(next)) errSnap[f] = snapOf(f)
+    dropErrToasts(Object.keys(next))
   }
   watch(form, () => {
     const cur = errors.value
@@ -90,6 +102,7 @@ export function useEditor(opts) {
     const next = {}
     for (const f of left) next[f] = cur[f]
     errors.value = next
+    dropErrToasts(left)
   }, { deep: true })
 
   function fill(r) {
@@ -163,6 +176,7 @@ export function useEditor(opts) {
   watch(open, v => {
     if (v) return
     session++
+    dropErrToasts()
     if (route.query[param] !== undefined && route.path === path) setParam(null)
   })
 
@@ -183,10 +197,14 @@ export function useEditor(opts) {
     return [...fields].sort((a, b) => pos(a) - pos(b))[0]
   }
 
-  /** 字段错误：显示在对应 FormField 下面；focus=false 时只显示、不抢焦点 */
+  /** 字段错误：显示在对应 FormField 下面；focus=false 时只显示、不抢焦点。表单里没有这一项时弹提示框 */
   function showFieldError(field, message, { focus = true } = {}) {
     setErrors({ ...errors.value, [field]: message })
     if (focus) focusField(field)
+    if (!fieldBox(field)) {
+      if (errToasts[field]) dismissToast(errToasts[field])
+      errToasts[field] = toast(message, { type: 'error' })
+    }
   }
 
   /** 编辑时只发改动过的字段 */
@@ -202,11 +220,10 @@ export function useEditor(opts) {
     if (validate) {
       const bad = validate(form.value)
       if (bad && Object.keys(bad).length) {
-        // 错误一次全部显示；焦点和提示只给表单里最靠前的那个（各自聚焦的话最后一个会抢走焦点）
+        // 错误一次全部显示；焦点只给表单里最靠前的那个（各自聚焦的话最后一个会抢走焦点）
         setErrors({ ...bad })
         const f = firstField(Object.keys(bad))
-        focusField(f)
-        toast(bad[f], { type: 'error' })
+        showFieldError(f, bad[f])
         return
       }
     }
@@ -232,7 +249,8 @@ export function useEditor(opts) {
       await onSaved?.(saved, wasNew)
       return saved
     } catch (e) {
-      if (my === session && e?.field) { showFieldError(e.field, e.message); toast(e.message, { type: 'error' }) }
+      if (my === session && e?.field) showFieldError(e.field, e.message)
+      else if (my === session && e?.name !== 'AbortError') errToasts[''] = toast(e?.message || '保存失败', { type: 'error' }) // 下次保存时收掉
       else toastError(e, '保存失败')
     } finally {
       saving.value = false

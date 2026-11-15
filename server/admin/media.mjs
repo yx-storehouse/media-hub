@@ -3,7 +3,8 @@
  *
  *   - GET/HEAD /media/<path>   公开的静态访问，支持 Range（<video> 拖进度条要用），不需要登录：
  *                              <video>/<img> 带不了 Bearer 令牌，内网可以接受，README 里写明了
- *   - /api/admin/media*        列目录、流式上传、新建文件夹、删除、扫描入库（仅管理员）
+ *   - /api/admin/media*        列目录、流式上传、新建文件夹、删除（单个 / 批量）、改名、移动、扫描入库（仅管理员）
+ *                              改名 / 移动时库里引用这些文件的地址（视频、图集、帖子、专题头图、头像）一起改
  *
  * 只允许视频 / 图片 / 字幕这几类扩展名，外加安卓安装包 .apk（「我的 → 下载安卓 App」用，见 src/utils/shell.js），
  * 上传和访问都卡住，避免有人传个 .html / .js 当网页执行。
@@ -54,6 +55,34 @@ const contentDisposition = name =>
 const hidden = name => name.startsWith('.') || name.toLowerCase().endsWith('.part')
 /** 本服务自己的临时文件：上传中的 <名字>.<8 位随机>.part、覆盖时挪开的 <名字>.<8 位随机>.old.part（自动清理只认这两种） */
 const isOurPart = name => /\.[0-9a-f]{8}(?:\.old)?\.part$/i.test(name)
+
+/*
+ * 图片的小图（缩略图）：后台上传图片时在浏览器里生成，和原图放在同一个文件夹，叫 <原图的完整文件名>.thumb.jpg
+ * （a.jpg → a.jpg.thumb.jpg、a.png → a.png.thumb.jpg；规则和 lib/thumbs.mjs、src/admin/utils/imagePrep.js 的 thumbPathOf 一致，
+ * App 的网格据此用小图）。名字里带着原图的扩展名：同一个文件夹里的 a.jpg 和 a.png 各有各的小图，不会一张显示成另一张。
+ * 素材库里小图跟着原图走：列表里不单独列出（挂在原图的 thumb 上），删除 / 改名 / 移动原图时一起处理；
+ * 原图已经不在的「孤儿」小图照常列出（isThumb: true），可以手动删掉。
+ */
+const THUMB_SUFFIX = '.thumb.jpg'
+const isThumbName = name => name.length > THUMB_SUFFIX.length && name.toLowerCase().endsWith(THUMB_SUFFIX)
+/** 能有小图的原图：图片、本身不是小图 */
+const isThumbable = name => !!IMAGE_TYPES[extOf(name)] && !isThumbName(name)
+const thumbNameOf = name => name + THUMB_SUFFIX
+/**
+ * 一个文件夹里（可见的名字）哪些小图挂在原图上、不单独列出：同一个文件夹里有它的原图（x.jpg.thumb.jpg ↔ x.jpg）
+ * @returns {(name: string) => boolean}
+ */
+function groupedThumbs(names) {
+  const originals = new Set(names.filter(isThumbable))
+  return name => isThumbName(name) && originals.has(name.slice(0, -THUMB_SUFFIX.length))
+}
+/** 文件夹里列表能看到的项数（不含隐藏 / 临时文件和挂在原图上的小图）；读不了返回 0 */
+async function visibleCount(abs) {
+  let names
+  try { names = (await readdir(abs)).filter(n => !hidden(n)) } catch { return 0 }
+  const grouped = groupedThumbs(names)
+  return names.filter(n => !grouped(n)).length
+}
 
 /** 启动时建好 media/ 和常用子目录，并在后台清掉上次中断留下的旧临时文件 */
 export function ensureMediaDir() {
@@ -112,7 +141,8 @@ function cleanRel(input, field, { strict = false, required = false } = {}) {
   if (s.includes('\\')) fail('路径请用 / 分隔', field)
   const segs = s.split('/')
   for (const seg of segs) {
-    if (!seg || seg === '.' || seg === '..') fail('路径不正确', field)
+    if (!seg) fail('路径里不能有空的层级（连续的 //）', field)
+    if (seg === '.' || seg === '..') fail('名称不能是 . 或 ..（不能用它们跳到别的文件夹）', field)
     if (/[\u0000-\u001f\u007f:]/.test(seg)) fail('路径包含非法字符', field)
     if (strict) {
       if (seg.includes('..')) fail('名称不能包含 ..', field)
@@ -308,6 +338,11 @@ export async function serveMedia(req, res, pathname) {
 
 /* ---------------- 列目录 ---------------- */
 
+/**
+ * 列一个文件夹：{ dir, parent, entries }。每项 { name, path, type: 'dir'|'video'|'image'|'other', size, mtime, url, usedBy, usedByAlbums }，
+ * 另外：文件夹带 items（里面能看到的项数，删除前据此提示「里面还有 N 项」）；有小图的图片带 thumb（小图地址，没有为 null）；
+ * 原图已经不在的小图带 isThumb: true。挂在原图上的小图不单独列出。
+ */
 export async function listMedia(q = {}) {
   const rel = cleanRel(q.dir, 'dir')
   const abs = absOf(rel, 'dir')
@@ -318,16 +353,26 @@ export async function listMedia(q = {}) {
     if (e.code === 'ENOENT' || e.code === 'ENOTDIR') fail('文件夹不存在', 'dir')
     throw e
   }
-  const entries = (await Promise.all(dirents.filter(d => !hidden(d.name)).map(async d => {
+  const visible = dirents.filter(d => !hidden(d.name))
+  const names = new Set(visible.map(d => d.name))
+  const grouped = groupedThumbs([...names])
+  const entries = (await Promise.all(visible.filter(d => !grouped(d.name)).map(async d => {
     const p = rel ? `${rel}/${d.name}` : d.name
     let st
     try { st = await stat(join(abs, d.name)) } catch { return null }
     const isDir = st.isDirectory()
     if (!isDir && !st.isFile()) return null
-    return {
+    const e = {
       name: d.name, path: p, type: isDir ? 'dir' : kindOf(d.name), size: isDir ? 0 : st.size,
       mtime: Math.floor(st.mtimeMs / 1000), url: urlOf(p), usedBy: 0, usedByAlbums: 0
     }
+    if (isDir) e.items = await visibleCount(join(abs, d.name))
+    else if (isThumbName(d.name)) e.isThumb = true
+    else if (isThumbable(d.name)) {
+      const t = thumbNameOf(d.name)
+      e.thumb = names.has(t) ? urlOf(rel ? `${rel}/${t}` : t) : null
+    }
+    return e
   }))).filter(Boolean)
 
   const files = entries.filter(e => e.type !== 'dir').map(e => e.path)
@@ -458,11 +503,16 @@ async function moveInto(part, target, overwrite) {
   if (aside) removeLater(aside)
 }
 
-/** PUT /api/admin/media/upload?path=videos/a.mp4&overwrite=0|1 */
+/**
+ * PUT /api/admin/media/upload?path=videos/a.mp4&overwrite=0|1
+ * 小图（<原图文件名>.thumb.jpg，见上面 THUMB_SUFFIX）总是覆盖同名文件：它是原图派生出来的，名字必须和原图对上，
+ * 不能被自动改成 a.jpg.thumb (1).jpg；旧的小图（比如原图被替换过）直接换掉。
+ */
 export async function upload(req, q = {}) {
+  const started = Date.now()
   const rel = cleanRel(q.path, 'path', { strict: true, required: true })
   if (!MIME[extOf(rel)]) fail(`不支持的文件类型「${extOf(rel) || '无扩展名'}」，只能上传视频、图片、字幕或安卓安装包（.apk）`, 'path')
-  const overwrite = q.overwrite === '1' || q.overwrite === 'true'
+  const overwrite = q.overwrite === '1' || q.overwrite === 'true' || isThumbName(basename(rel))
   const declared = Number(req.headers['content-length'])
   if (Number.isFinite(declared) && declared > MAX_UPLOAD_BYTES) throw tooLarge()
 
@@ -493,48 +543,281 @@ export async function upload(req, q = {}) {
     if (['EPERM', 'EBUSY', 'EACCES', 'EISDIR', 'ENOTEMPTY'].includes(e.code)) fail('目标文件正在被使用或是文件夹，换个名字或稍后再试', 'path')
     throw e
   }
+  // 新传（或覆盖）了一张原图：旁边原来就有的同名小图是旧图的（或是以前同名的图留下的），删掉（后台接着会传新的小图）；
+  // 这次上传期间才写好的小图（前端同时传的）不动
+  if (isThumbable(basename(target))) await removeThumbOf(target, { olderThan: started })
   const finalRel = relOf(target)
   return { path: finalRel, url: urlOf(finalRel), size }
 }
 
-/* ---------------- 新建文件夹 / 删除 ---------------- */
+/* ---------------- 新建文件夹 ---------------- */
 
+/**
+ * POST /api/admin/media/folder { path }：新建文件夹（上级不存在时一起建）。
+ * 已经有这个文件夹 / 同名文件时报错：以前已有的文件夹也提示「已创建」，操作员会以为建了一个新的空文件夹。
+ */
 export async function createFolder(body = {}) {
   const rel = cleanRel(body?.path, 'path', { strict: true, required: true })
   const abs = absOf(rel)
   try {
-    await mkdir(abs, { recursive: true })
+    await mkdir(dirname(abs), { recursive: true })
   } catch (e) {
-    if (e.code === 'EEXIST' || e.code === 'ENOTDIR') fail('已有同名文件', 'path')
+    if (e.code === 'EEXIST' || e.code === 'ENOTDIR') fail('上级路径里有同名文件，不能当作文件夹', 'path')
+    throw e
+  }
+  try {
+    await mkdir(abs)
+  } catch (e) {
+    if (e.code === 'EEXIST') {
+      const st = await stat(abs).catch(() => null)
+      fail(st?.isDirectory() ? `文件夹「${rel}」已经存在` : `已有同名文件「${rel}」，换个名字吧`, 'path')
+    }
+    if (e.code === 'ENOTDIR') fail('上级路径里有同名文件，不能当作文件夹', 'path')
     throw e
   }
   return { path: rel, url: urlOf(rel) }
 }
 
-/** DELETE /api/admin/media?path=&force=0|1：删文件或空文件夹；被视频 / 图集引用的文件默认不让删 */
+/* ---------------- 删除（单个 / 批量） ---------------- */
+
+const usageText = (n, m) => [n && `${n} 个视频`, m && `${m} 个图集`].filter(Boolean).join('、')
+const isForce = v => v === true || v === 1 || v === '1' || v === 'true'
+
+/**
+ * 原图删掉 / 换掉之后，它旁边的小图也删掉（小图名字里带着原图的扩展名，只属于这一张原图）。
+ * olderThan（毫秒时间戳）：只删在这之前就有的小图 —— 上传原图时，和它同时传上来的新小图不能误删。
+ */
+async function removeThumbOf(abs, { olderThan = Infinity } = {}) {
+  const thumb = join(dirname(abs), thumbNameOf(basename(abs)))
+  const st = await stat(thumb).catch(() => null)
+  if (!st?.isFile() || st.mtimeMs >= olderThan) return
+  await unlink(thumb).catch(() => {})
+}
+
+/**
+ * 删一个文件或空文件夹（引用检查由调用方做），文件系统的错误换成给人看的提示。删图片时它的小图一起删。
+ * missingOk：文件已经不在了算删掉了（批量删除时，选中的小图可能已经跟着原图删掉了）。
+ */
+async function removeEntry(abs, st, { missingOk = false } = {}) {
+  try {
+    if (st.isDirectory()) return await removeDir(abs)
+    await unlink(abs)
+  } catch (e) {
+    if (e instanceof InputError) throw e
+    if (e.code === 'ENOTEMPTY' || e.code === 'EEXIST') {
+      const n = await visibleCount(abs)
+      fail(n ? `文件夹不为空（里面还有 ${n} 项），请先删除里面的文件` : '文件夹不为空，请先删除里面的文件', 'path')
+    }
+    if (e.code === 'ENOENT') {
+      if (missingOk) return
+      fail('文件不存在', 'path')
+    }
+    if (e.code === 'EBUSY' || e.code === 'EPERM' || e.code === 'EACCES') fail('文件正在被使用，请稍后再试', 'path')
+    throw e
+  }
+  if (isThumbable(basename(abs))) await removeThumbOf(abs)
+}
+
+/** DELETE /api/admin/media?path=&force=0|1：删文件或空文件夹；被视频 / 图集引用的文件默认不让删。删图片时它的小图一起删 */
 export async function deleteMedia(q = {}) {
   const rel = cleanRel(q.path, 'path', { required: true })
   const abs = absOf(rel)
   let st
   try { st = await stat(abs) } catch { fail('文件不存在', 'path') }
-  try {
-    if (st.isDirectory()) {
-      await removeDir(abs)
-    } else {
-      const n = usage([rel]).get(rel) || 0
-      const m = kindOf(rel) === 'image' ? albumUsage([rel]).get(rel) || 0 : 0
-      if ((n > 0 || m > 0) && q.force !== '1' && q.force !== 'true') {
-        fail(`该文件被 ${[n && `${n} 个视频`, m && `${m} 个图集`].filter(Boolean).join('、')}使用`, 'usedBy')
-      }
-      await unlink(abs)
-    }
-  } catch (e) {
-    if (e instanceof InputError) throw e
-    if (e.code === 'ENOTEMPTY' || e.code === 'EEXIST') fail('文件夹不为空，请先删除里面的文件', 'path')
-    if (e.code === 'EBUSY' || e.code === 'EPERM' || e.code === 'EACCES') fail('文件正在被使用，请稍后再试', 'path')
-    throw e
+  if (!st.isDirectory()) {
+    const n = usage([rel]).get(rel) || 0
+    const m = kindOf(rel) === 'image' ? albumUsage([rel]).get(rel) || 0 : 0
+    if ((n > 0 || m > 0) && !isForce(q.force)) fail(`该文件被 ${usageText(n, m)}使用`, 'usedBy')
   }
+  await removeEntry(abs, st)
   return { ok: true }
+}
+
+const MAX_BATCH_PATHS = 1000
+
+/** 批量操作的路径列表：1～1000 个字符串，去重；每个都按「引用已有文件」的规则检查（不能是根目录） */
+function parsePaths(v, field = 'paths') {
+  if (!Array.isArray(v) || !v.length) fail('请先选择文件', field)
+  if (v.length > MAX_BATCH_PATHS) fail(`一次最多操作 ${MAX_BATCH_PATHS} 项`, field)
+  if (!v.every(x => typeof x === 'string')) fail('paths 只能是路径字符串的数组', field)
+  return [...new Set(v.map(x => cleanRel(x, field, { required: true })))]
+}
+
+/**
+ * POST /api/admin/media/delete { paths, force }：批量删文件 / 空文件夹 → { deleted: [path], failed: [{ path, message }] }
+ *   - 没带 force 时先查引用：只要有一个文件正被视频 / 图集使用，整批都不删，返回 400（field: 'usedBy'）并列出是哪几个；
+ *     前端确认之后带 force: true 再发一次（和单个删除一样）
+ *   - 其余逐个删：不存在、文件夹不为空、正被占用的放进 failed（带原因），不影响别的
+ *   - 越深的越先删：连文件夹带里面的文件一起选中时，里面的先删掉，文件夹就删得掉
+ *   - 删图片时它的小图一起删
+ */
+export async function deleteManyMedia(body = {}) {
+  const paths = parsePaths(body?.paths)
+  const force = isForce(body?.force)
+  const items = await Promise.all(paths.map(async rel => {
+    const abs = absOf(rel, 'paths')
+    return { rel, abs, st: await stat(abs).catch(() => null) }
+  }))
+  if (!force) {
+    const files = items.filter(x => x.st && !x.st.isDirectory()).map(x => x.rel)
+    const n = usage(files), m = albumUsage(files.filter(p => kindOf(p) === 'image'))
+    const used = files.filter(p => n.get(p) || m.get(p))
+    if (used.length) {
+      const list = used.slice(0, 5).map(p => `${p.split('/').pop()}（${usageText(n.get(p) || 0, m.get(p) || 0)}）`).join('、')
+      fail(`有 ${used.length} 个文件正被使用：${list}${used.length > 5 ? ' 等' : ''}`, 'usedBy')
+    }
+  }
+  items.sort((a, b) => b.rel.split('/').length - a.rel.split('/').length)
+  const deleted = [], failed = []
+  for (const x of items) {
+    try {
+      if (!x.st) fail('文件不存在', 'path')
+      await removeEntry(x.abs, x.st, { missingOk: true })
+      deleted.push(x.rel)
+    } catch (e) {
+      if (!(e instanceof InputError)) throw e
+      failed.push({ path: x.rel, message: e.message })
+    }
+  }
+  return { deleted, failed }
+}
+
+/* ---------------- 改名 / 移动 ---------------- */
+
+/** 两次 stat 是不是同一个文件（Windows 上只改大小写时，新名字 stat 出来就是它自己） */
+const sameFile = (a, b) => !!a && !!b && a.ino !== 0 && a.ino === b.ino && a.dev === b.dev
+
+/** 各类数据 → 地址被改了的那些条目的 id（集合）；数一数就是 refs。批量移动时几次合在一起数，同一个视频只算一次 */
+const newOwners = () => Object.fromEntries(A.MEDIA_REF_KINDS.map(k => [k, new Set()]))
+const countOwners = owners => Object.fromEntries(Object.entries(owners).map(([k, set]) => [k, set.size]))
+
+/**
+ * 文件 / 文件夹从 fromRel 挪到 toRel 之后，把库里指向旧地址的引用改成新地址（一个事务）。
+ * 编码 / 未编码、带 ?v= 的写法都认（规则同「被 N 个视频使用」，见 lib/urls.mjs）；新地址统一写成逐段编码的站内地址，
+ * 原来带的 ?查询串 / #片段 保留。文件夹按前缀改它下面所有文件的地址。
+ * owners：把改了地址的条目 id 记进去（见 newOwners）。
+ * 查和改在同一个事务里；别的进程拿着写锁时异步等它放开（txWait，不卡别的请求），等不到报「忙」（调用方把文件挪回去）。
+ */
+async function rewriteRefs(fromRel, toRel, isDir, owners) {
+  const fromUrl = urlOf(fromRel) + (isDir ? '/' : '')
+  const fromKey = urlKey(fromUrl)
+  // 文件：恰好是这个地址，或后面跟着 ?v= 之类（[写法, 写法 + '@')）；文件夹：以「写法/」开头（[写法/, 写法0)，'0' 紧跟在 '/' 后面）
+  const ranges = urlSpellings(fromUrl).map(s => [s, isDir ? s.slice(0, -1) + '0' : s + '@'])
+  const touched = await A.txWait(() => {
+    const seen = new Set(), out = []
+    for (const r of A.mediaRefsInRanges(ranges)) {
+      const id = `${r.table}.${r.col}.${r.rid}`
+      if (seen.has(id)) continue
+      seen.add(id)
+      const key = urlKey(r.url)
+      if (isDir ? !key.startsWith(fromKey) : key !== fromKey) continue
+      const cut = r.url.search(/[?#]/)
+      const rel = isDir ? `${toRel}/${key.slice(fromKey.length)}` : toRel
+      A.setMediaRef(r.table, r.col, r.rid, urlOf(rel) + (cut < 0 ? '' : r.url.slice(cut)))
+      out.push(r)
+    }
+    return out
+  })
+  for (const r of touched) owners[r.kind].add(r.owner)
+}
+
+/**
+ * 原图挪走后，小图跟着挪到新位置、改成新名字。
+ * 新位置上已经有的同名小图是以前同名的图留下的（原图已经不在了），留着就会被当成这张图的小图，所以换掉 / 删掉。
+ */
+async function moveThumb(abs, toAbs) {
+  const from = join(dirname(abs), thumbNameOf(basename(abs)))
+  const to = join(dirname(toAbs), thumbNameOf(basename(toAbs)))
+  if (from === to) return
+  if (await exists(from)) await rename(from, to).catch(() => {})
+  else await unlink(to).catch(() => {})
+}
+
+/**
+ * 把 rel（文件或文件夹）挪到 toRel，改名和移动共用。目标已存在就报错（不覆盖）；文件不能换类型（同类之间换扩展名可以，如 .jpeg → .jpg）。
+ * 挪好之后库里的引用一起改（rewriteRefs），改库失败就把文件挪回去；图片的小图跟着走。
+ * 在目标文件夹的锁里做：和同时进行的上传（定名字）不会撞名。
+ * owners：改了地址的条目记在这里（见 newOwners）。
+ * @returns {Promise<{ from: string, to: string, url: string, type: string }>}
+ */
+async function moveEntry(rel, toRel, field, owners) {
+  const abs = absOf(rel, 'path'), toAbs = absOf(toRel, field)
+  const st = await stat(abs).catch(() => null)
+  if (!st) fail(`「${rel}」不存在`, 'path')
+  const isDir = st.isDirectory()
+  if (!isDir && !st.isFile()) fail(`「${rel}」不是普通文件`, 'path')
+  if (isDir && toRel.startsWith(rel + '/')) fail('不能把文件夹移到它自己里面', field)
+  if (!isDir) {
+    const ext = extOf(toRel)
+    if (!MIME[ext]) fail(`不支持的文件类型「${ext || '无扩展名'}」，只能是视频、图片、字幕或安卓安装包（.apk）`, field)
+    if (kindOf(rel) !== kindOf(toRel) || (kindOf(rel) === 'other' && extOf(rel) !== ext)) {
+      fail(`不能改文件类型（原来是 ${extOf(rel) || '无扩展名'}），只能改名字`, field)
+    }
+  }
+  return withDirLock(dirname(toAbs), async () => {
+    const there = await stat(toAbs).catch(() => null)
+    if (there && !sameFile(there, st)) {
+      const where = toRel.split('/').slice(0, -1).join('/') || '根目录'
+      fail(`「${where}」里已经有同名${there.isDirectory() ? '文件夹' : '文件'}「${basename(toAbs)}」`, field)
+    }
+    try {
+      await rename(abs, toAbs)
+    } catch (e) {
+      if (e.code === 'ENOENT') fail(`「${rel}」不存在`, 'path')
+      if (['EPERM', 'EBUSY', 'EACCES'].includes(e.code)) fail(`「${basename(abs)}」正在被使用，请稍后再试`, 'path')
+      throw e
+    }
+    try {
+      await rewriteRefs(rel, toRel, isDir, owners)
+    } catch (e) {
+      await rename(toAbs, abs).catch(() => {})
+      throw e
+    }
+    if (!isDir && isThumbable(basename(abs))) await moveThumb(abs, toAbs)
+    return { from: rel, to: toRel, url: urlOf(toRel), type: isDir ? 'dir' : kindOf(toRel) }
+  })
+}
+
+/**
+ * POST /api/admin/media/rename { path, name }：改名，留在原来的文件夹里 → { from, to, url, type, refs }
+ * name 只是新名字（不能带 /，换文件夹用「移动」），规则和上传的文件名一样；refs = 库里各类数据跟着改了几条地址。
+ */
+export async function renameMedia(body = {}) {
+  const rel = cleanRel(body?.path, 'path', { required: true })
+  const name = cleanRel(body?.name, 'name', { strict: true, required: true })
+  if (name.includes('/')) fail('新名称里不能有 /（要换文件夹请用「移动」）', 'name')
+  if (isThumbName(name) && !isThumbName(basename(rel))) fail(`以「${THUMB_SUFFIX}」结尾的名字留给小图用，换个名字吧`, 'name')
+  const parent = rel.split('/').slice(0, -1).join('/')
+  const toRel = parent ? `${parent}/${name}` : name
+  if (toRel === rel) fail('新名称和原来一样', 'name')
+  const owners = newOwners()
+  const r = await moveEntry(rel, toRel, 'name', owners)
+  return { ...r, refs: countOwners(owners) }
+}
+
+/**
+ * POST /api/admin/media/move { paths, to }：把文件 / 文件夹移到另一个已有的文件夹（to = '' 是根目录），名字不变
+ *   → { moved: [{ from, to, url, type }], failed: [{ path, message }], refs: { videos, albums, posts, … } }
+ * 目标里已有同名的、要移到自己里面的、本来就在目标文件夹里的放进 failed，不影响别的；
+ * 选中的文件夹里的东西如果也选中了，跟着文件夹一起走，不单独再移。
+ */
+export async function moveMedia(body = {}) {
+  const selected = parsePaths(body?.paths)
+  const to = cleanRel(body?.to, 'to')
+  if (!(await stat(absOf(to, 'to')).catch(() => null))?.isDirectory()) fail('目标文件夹不存在', 'to')
+  const paths = selected.filter(p => !selected.some(q => q !== p && p.startsWith(q + '/')))
+  const moved = [], failed = [], owners = newOwners()
+  for (const rel of paths) {
+    const name = rel.split('/').pop()
+    try {
+      if (rel.split('/').slice(0, -1).join('/') === to) fail('已经在这个文件夹里了', 'to')
+      moved.push(await moveEntry(rel, to ? `${to}/${name}` : name, 'to', owners))
+    } catch (e) {
+      if (!(e instanceof InputError)) throw e
+      failed.push({ path: rel, message: e.message })
+    }
+  }
+  return { moved, failed, refs: countOwners(owners) }
 }
 
 /**

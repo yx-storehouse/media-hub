@@ -1,13 +1,13 @@
 /*
- * 轻量占位图：管理后台新建的视频 / 帖子 / 专题用（seed 数据仍用 art.mjs 的风景图，不受影响）。
+ * 轻量占位图：管理后台新建的视频 / 帖子 / 专题用（种子数据的风景图见 art.mjs，库里存的是 art-store.mjs 的短地址）。
  *
- * art.mjs 的风景图每张约 7.5 KB，导入 2 万条视频就多出 ~150 MB，而且一行放不下、要溢出到额外的数据库页，
- * 列表 / 统计扫表时都得顺着溢出页读。这里每张 ≤ 1.5 KB：渐变底色 + 柔光 + 山丘或光斑，
- * 配色由 seed 决定，同一个 seed 永远生成同一张。返回值和 art.mjs 的 fallback 一样是 CSS 的 url('data:…')。
+ * 返回值是 CSS background-image 的值（和 Cover.fallback 同一种东西），纯 CSS 渐变，200～400 字节，没有 SVG：
+ * 列表追加一页时浏览器不用再为每张卡片解析一个 SVG 文档，导入几万条也不会让库变大、行溢出。
+ * 画面和以前的 SVG 版一样（同一个 seed 取同样的随机数，颜色、太阳 / 光斑的位置都不变）：
+ *   黄昏：上暗下亮的天空 + 太阳柔光 + 两道山丘（椭圆）；光斑：对角渐变 + 两团柔和的彩色光。
+ * 配色由 seed 决定，同一个 seed 永远生成同一张。
  */
 import { rng, pick } from './random.mjs'
-
-const svgUrl = svg => "url('data:image/svg+xml;utf8," + encodeURIComponent(svg).replace(/'/g, '%27') + "')"
 
 /** HSL → #rrggbb（比 hsl() 写法短） */
 function hex(h, s, l) {
@@ -25,6 +25,24 @@ function hex(h, s, l) {
 /* 和 art.mjs 一样偏暖、偏灰的色相，再加几种冷色，饱和度压低，看起来像真实照片的色调 */
 const HUES = [8, 18, 26, 34, 42, 336, 348, 354, 205, 190, 215, 235, 265, 160]
 const n1 = x => Math.round(x * 10) / 10
+/** 画布坐标 → 百分比（保留一位小数） */
+const pct = (v, total) => n1(v / total * 100) + '%'
+
+/**
+ * 一道山丘：原来是 M0 y0 Q cx cy W y1 的二次曲线，这里用底边中心在曲线最高点下方的椭圆近似，
+ * 横向半径取能让椭圆在左右两边的高度接近 y0 / y1 的值。
+ */
+function hillLayer(W, H, y0, y1, cx, cy, color, alpha = '') {
+  const px = (2 * cx + W) / 4                // t = 0.5 处的横坐标、纵坐标（曲线大致的顶点）
+  const py = Math.min(y0, y1, (y0 + 2 * cy + y1) / 4)
+  const ry = Math.max(1, H - py)
+  const fit = (dx, y) => {
+    const k = Math.min(0.97, Math.max(0, (H - y) / ry))
+    return dx / Math.sqrt(1 - k * k)
+  }
+  const rx = Math.min(3 * W, Math.max(0.5 * W, (fit(px, y0) + fit(W - px, y1)) / 2))
+  return `radial-gradient(${pct(rx, W)} ${pct(ry, H)} at ${pct(px, W)} 100%,${color}${alpha} 98%,${color}00 100%)`
+}
 
 /**
  * 封面占位图。
@@ -38,35 +56,43 @@ export function liteCover(seed, o = {}) {
   const h1 = pick(r, HUES) + (r() - 0.5) * 16
   const h2 = h1 + 8 + r() * 24
   const h3 = h2 + 6 + r() * 18
-  let defs, body
   if (r() < 0.6) {
-    // 黄昏：上暗下亮的天空 + 太阳柔光 + 两道山丘
+    // 黄昏：上暗下亮的天空 + 太阳柔光 + 两道山丘（随机数的取用顺序和原来的 SVG 版一致）
     const sun = hex(h3 + 10, 90, 86)
     const sx = n1(W * (0.2 + r() * 0.6)), sy = n1(H * (0.42 + r() * 0.16))
-    const hill = (base, amp) => {
+    const sky = [hex(h1, 30 + r() * 15, 14 + r() * 6), hex(h2, 35 + r() * 15, 32 + r() * 8), hex(h3, 50 + r() * 15, 56 + r() * 8)]
+    const hill = (base, amp, color, alpha) => {
       const y0 = n1(H * (base + (r() - 0.5) * amp)), y1 = n1(H * (base + (r() - 0.5) * amp))
-      return `M0 ${y0}Q${n1(W * (0.2 + r() * 0.6))} ${n1(H * (base - amp * (0.4 + r() * 1.2)))} ${W} ${y1}V${H}H0Z`
+      const cx = n1(W * (0.2 + r() * 0.6)), cy = n1(H * (base - amp * (0.4 + r() * 1.2)))
+      return hillLayer(W, H, y0, y1, cx, cy, color, alpha)
     }
-    defs = `<linearGradient id="g" x2="0" y2="1"><stop stop-color="${hex(h1, 30 + r() * 15, 14 + r() * 6)}"/>` +
-      `<stop offset=".6" stop-color="${hex(h2, 35 + r() * 15, 32 + r() * 8)}"/><stop offset="1" stop-color="${hex(h3, 50 + r() * 15, 56 + r() * 8)}"/></linearGradient>` +
-      `<radialGradient id="s"><stop stop-color="${sun}" stop-opacity=".9"/><stop offset=".3" stop-color="${sun}" stop-opacity=".35"/><stop offset="1" stop-color="${sun}" stop-opacity="0"/></radialGradient>`
-    body = `<rect width="${W}" height="${H}" fill="url(#g)"/><circle cx="${sx}" cy="${sy}" r="${n1(Math.min(W, H) * 0.45)}" fill="url(#s)"/>` +
-      `<path d="${hill(0.72, 0.2)}" fill="${hex(h1, 25, 16)}" opacity=".85"/><path d="${hill(0.86, 0.12)}" fill="${hex(h1, 25, 8)}"/>`
-  } else {
-    // 光斑：对角渐变 + 两团柔和的彩色光
-    const blob = (id, h) => `<radialGradient id="${id}"><stop stop-color="${hex(h, 70, 62)}" stop-opacity=".85"/><stop offset="1" stop-color="${hex(h, 70, 62)}" stop-opacity="0"/></radialGradient>`
-    const circle = id => `<circle cx="${n1(r() * W)}" cy="${n1(r() * H)}" r="${n1(Math.max(W, H) * (0.3 + r() * 0.25))}" fill="url(#${id})"/>`
-    defs = `<linearGradient id="g" x2="1" y2="1"><stop stop-color="${hex(h1, 40, 12 + r() * 6)}"/><stop offset="1" stop-color="${hex(h2, 40, 26 + r() * 8)}"/></linearGradient>` +
-      blob('a', h1 + 40) + blob('b', h1 + 150)
-    body = `<rect width="${W}" height="${H}" fill="url(#g)"/>${circle('a')}${circle('b')}`
+    const far = hill(0.72, 0.2, hex(h1, 25, 16), 'd9')
+    const near = hill(0.86, 0.12, hex(h1, 25, 8))
+    const rad = Math.min(W, H) * 0.45
+    const glow = `radial-gradient(${pct(rad, W)} ${pct(rad, H)} at ${pct(sx, W)} ${pct(sy, H)},${sun}e6,${sun}59 30%,${sun}00)`
+    // 写在前面的层盖在上面：近处的山 → 远处的山 → 太阳 → 天空
+    return `${near},${far},${glow},linear-gradient(${sky[0]},${sky[1]} 60%,${sky[2]})`
   }
-  return svgUrl(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid slice"><defs>${defs}</defs>${body}</svg>`)
+  // 光斑：对角渐变 + 两团柔和的彩色光
+  const base = [hex(h1, 40, 12 + r() * 6), hex(h2, 40, 26 + r() * 8)]
+  const blob = h => {
+    const c = hex(h, 70, 62)
+    const x = r() * W, y = r() * H, rad = Math.max(W, H) * (0.3 + r() * 0.25)
+    return `radial-gradient(${pct(rad, W)} ${pct(rad, H)} at ${pct(x, W)} ${pct(y, H)},${c}d9,${c}00)`
+  }
+  const a = blob(h1 + 40)
+  const b = blob(h1 + 150)
+  return `${b},${a},linear-gradient(to bottom right,${base[0]},${base[1]})`
 }
 
-/** 文档帖的缩略图：白纸 + 几行字（所有行合成一条 path） */
+/** 文档帖的缩略图：白纸 + 一行行字（灰色横线），页边留白 */
 export function liteDoc(seed) {
   const r = rng(seed)
-  let d = ''
-  for (let i = 0; i < 18; i++) d += `M8 ${n1(14 + i * 5.2)}h${Math.round(i % 6 === 5 ? 30 + r() * 15 : 60 + r() * 30)}v1.6H8z`
-  return svgUrl(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 118" preserveAspectRatio="xMidYMid slice"><rect width="100" height="118" fill="#fff"/><path d="${d}" fill="#444" opacity=".7"/></svg>`)
+  // 每行宽度随种子略有不同：取平均宽度定右边距（和原来一样，每 6 行有一行短的）
+  let total = 0
+  for (let i = 0; i < 18; i++) total += i % 6 === 5 ? 30 + r() * 15 : 60 + r() * 30
+  const right = Math.round(8 + total / 18)
+  return 'linear-gradient(#fff 11.8%,#fff0 11.8% 89%,#fff 89%),' +
+    `linear-gradient(90deg,#fff 8%,#fff0 8% ${right}%,#fff ${right}%),` +
+    'repeating-linear-gradient(#fff 0 3.1%,#7c7c7c 3.1% 4.4%)'
 }

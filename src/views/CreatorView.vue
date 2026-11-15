@@ -16,6 +16,11 @@ import { getCreator, getCreatorVideos, getCreatorAlbums, getCreatorPosts, getCre
 import { useAuthStore } from '@/stores/auth'
 import { useBack } from '@/composables/useBack'
 import { toast } from '@/composables/useToast'
+import { usePageTitle } from '@/composables/usePageTitle'
+import { errorText, MSG } from '@/api/http'
+import LoadState from '@/components/common/LoadState.vue'
+import ListFoot from '@/components/home/ListFoot.vue'
+import WinList, { POST_WIN } from '@/components/home/WinList'
 import Icon from '@/components/Icon.vue'
 import VideoCard from '@/components/VideoCard.vue'
 import ImageViewer from '@/components/ImageViewer.vue'
@@ -27,6 +32,7 @@ import AlbumGrid from '@/components/creator/AlbumGrid.vue'
 import UnfollowSheet from '@/components/creator/UnfollowSheet.vue'
 import ContentSwap from '@/components/home/ContentSwap'
 import { createFeed, PAGE } from '@/components/creator/feed'
+import { feedError } from '@/components/home/list'
 import { haptic } from '@/utils/motion'
 import { cameBack, useSlider, cover, vRise, fadeIn, scrollBehavior } from '@/components/home/motion'
 import { isDesktop } from '@/composables/useDesktop'
@@ -42,6 +48,9 @@ import { isDesktop } from '@/composables/useDesktop'
  * 桌面布局（≥ 1024px）：没有压在头图上的顶栏（返回键在 CreatorHeader 的横幅里），标签栏直接吸在页面顶上；
  * 视频是公共的自动列数网格，帖子是靠左对齐的一栏（和标签同一条左边线），图片和媒体是更密的照片墙（AlbumGrid 竖格、MediaGrid 方格，同一个规格）。
  * 只在加载失败时显示顶栏（给个返回键）。
+ *
+ * 视频、帖子很多时只渲染视口附近的卡片（WinList），返回时按离开前的样子摆回去；加载失败用统一的说法（LoadState），
+ * 断网、服务器恢复后自动重试。
  */
 defineOptions({ name: 'CreatorView' })
 
@@ -65,8 +74,16 @@ cameBack()
 const scroller = ref(null)
 const header = ref(null)
 const creator = shallowRef(null)
-/* 加载失败：message 给用户看；retry 只在可能是网络问题时显示（创作者不存在重试也没用） */
+/* 浏览器标题「<创作者名字> - Reel」 */
+usePageTitle(() => creator.value?.name)
+/*
+ * 加载失败：{ error, text, retry }。error 交给 LoadState 说清楚原因（网络恢复、服务器恢复后自动重试）；
+ * 创作者不存在（4xx）重试也没用：retry 为 false，给「返回」
+ */
 const failed = ref(null)
+/* 视频、帖子列表（WinList）：返回恢复时存下它们渲染着哪一段、每张卡片多高 */
+const wins = {}
+let restoredWin = null
 const following = ref(false)
 const followers = ref(0)
 const tab = ref('videos')
@@ -151,10 +168,12 @@ async function load(id, qTab) {
     for (const f of Object.values(feeds)) f.reset()
     const missing = e?.status >= 400 && e?.status < 500 && e?.status !== 401
     failed.value = missing
-      ? { message: (e.status === 400 && e.message) || '创作者不存在', retry: false }
-      : { message: e?.message || '加载失败，请检查网络', retry: true }
+      ? { error: e, text: (e.status === 400 && e.message) || '创作者不存在', retry: false }
+      : { error: e || true, text: '', retry: true }
   }
 }
+/* 出错页的「重试」（LoadState 断网恢复、服务器恢复后也自动调它） */
+const retryLoad = () => load(route.params.id, route.query.tab)
 
 function applyHeader(c) {
   creator.value = c
@@ -423,7 +442,7 @@ function showAlbum(id, images, index, origin, caption) {
   }).catch(e => {
     // 400 = 服务器说这个图集没有了（不是网络问题）：记下来，查看器关掉时从页面上撤掉
     const gone = e?.status === 400
-    const msg = gone && e.message ? e.message : '图集加载失败，请检查网络'
+    const msg = gone && e.message ? e.message : errorText(e)
     if (gone) goneAlbums.set(String(id), msg)
     const v = viewer.value
     if (token !== albumSeq || v?.albumId !== id) return
@@ -492,7 +511,8 @@ async function setFollow(next) {
       following.value = before.following
       followers.value = before.followers
     }
-    say((e?.status === 400 || e?.code === 'demo') && e.message ? e.message : '操作失败，请稍后重试')
+    // 统一的说法；登录过期不提示（登录框已经弹出来了，登录后会自动补做）
+    if (e?.name !== 'AbortError' && e?.code !== 'unauthorized') say(errorText(e, MSG.action))
   } finally {
     followBusy = false
   }
@@ -539,7 +559,8 @@ function saveSnapshot() {
     videos: videos.snapshot(),
     albums: albums.snapshot(),
     posts: posts.snapshot(),
-    media: media.snapshot()
+    media: media.snapshot(),
+    win: { videos: wins.videos?.snapshot() || null, posts: wins.posts?.snapshot() || null }
   })
   while (snapshots.size > SNAPSHOT_MAX) snapshots.delete(snapshots.keys().next().value)
 }
@@ -558,6 +579,7 @@ function restoreSnapshot(id) {
   albums.restore(s.albums)
   posts.restore(s.posts)
   media.restore(s.media)
+  restoredWin = s.win || null
   Object.assign(savedTop, s.savedTop)
   lastTop = s.top
   return true
@@ -601,11 +623,10 @@ onBeforeRouteUpdate(to => {
       @touchend.passive="onSwipeEnd"
       @touchcancel.passive="onSwipeCancel"
     >
-      <div v-if="failed" class="empty cr-fail">
-        {{ failed.message }}
-        <button v-if="failed.retry" type="button" class="retry" @click="load(route.params.id, route.query.tab)">重试</button>
-        <button v-else type="button" class="retry" @click="back">返回</button>
-      </div>
+      <!-- 出错：统一的说法；网络问题有「重试」（并且网络恢复后自动重试），创作者不存在只给「返回」 -->
+      <LoadState v-if="failed" class="cr-fail" :error="failed.error" :text="failed.text" :retry="failed.retry ? retryLoad : null">
+        <button v-if="!failed.retry" type="button" class="retry" @click="back">返回</button>
+      </LoadState>
 
       <template v-else>
         <CreatorHeader ref="header" :creator="creator" :following="following" :followers="followers" :calm="restored" @follow="onFollow" />
@@ -653,29 +674,28 @@ onBeforeRouteUpdate(to => {
               <span class="lb">{{ s }}</span>
             </button>
           </div>
-          <!-- 桌面布局：主页还在加载时给排序胶囊那一行也占好位置（两颗胶囊骨架，就是字透明的 .chip，尺寸跟着公共的胶囊走），数据回来时网格不往下跳 -->
-          <div v-else-if="!creator && isDesktop" class="chips cr-sk-chips" aria-hidden="true">
+          <!--
+            主页还在加载时给排序胶囊那一行也占好位置（两颗胶囊骨架，就是字透明的 .chip，尺寸跟着公共的胶囊走），
+            数据回来时网格不往下跳（手机、桌面一样）
+          -->
+          <div v-else-if="!creator" class="chips cr-sk-chips" aria-hidden="true">
             <span v-for="s in SORTS" :key="s" class="chip sk">{{ s }}</span>
           </div>
           <!-- 骨架原地淡出，新列表错峰浮现；换排序时旧列表留着等新的，快的直接换成新列表，慢了（250ms）才淡入骨架 -->
           <ContentSwap :pending="videos.total === null && !videos.error" :hold="!!creator">
-            <div v-if="videos.total === null && !videos.error" class="grid g11 cr-sk" :class="{ pt: !creator, 'cr-late': late.videos }" aria-hidden="true">
+            <div v-if="videos.total === null && !videos.error" class="grid g11 cr-sk" :class="{ 'cr-late': late.videos }" aria-hidden="true">
               <div v-for="i in (isDesktop ? 12 : 6)" :key="i" class="vc"><div class="cv sk" /><div class="sk sk-tt" /></div>
             </div>
-            <div v-else-if="videos.total === null" class="empty">
-              加载失败，请检查网络
-              <button type="button" class="retry" @click="videos.more()">重试</button>
-            </div>
+            <LoadState v-else-if="videos.total === null" :error="feedError(videos)" :retry="() => videos.more()" />
             <div v-else-if="!videos.list.length" v-rise.self class="empty">还没有发布视频</div>
             <div v-else :key="`list${sortKey}`">
+              <!-- 很多时只渲染视口附近的卡片（WinList） -->
               <div v-rise class="grid g11">
-                <VideoCard v-for="v in videos.list" :key="v.id" :video="v" :by="false" />
+                <WinList :ref="el => { wins.videos = el }" v-slot="{ item: v }" :items="videos.list" :restore="restoredWin?.videos">
+                  <VideoCard :video="v" :by="false" />
+                </WinList>
               </div>
-              <div class="cr-foot">
-                <span v-if="videos.loading">加载中…</span>
-                <button v-else-if="videos.error" type="button" class="cr-more" @click="videos.more()">加载失败，点击重试</button>
-                <span v-else-if="videos.done">没有更多了</span>
-              </div>
+              <ListFoot :feed="videos" />
             </div>
           </ContentSwap>
         </section>
@@ -693,19 +713,12 @@ onBeforeRouteUpdate(to => {
             <div v-if="albums.total === null && !albums.error" class="cr-ag-sk" :class="{ 'cr-late': late.images }" aria-hidden="true">
               <div v-for="i in 12" :key="i" class="sk" />
             </div>
-            <div v-else-if="albums.total === null" class="empty">
-              加载失败，请检查网络
-              <button type="button" class="retry" @click="albums.more()">重试</button>
-            </div>
+            <LoadState v-else-if="albums.total === null" :error="feedError(albums)" :retry="() => albums.more()" />
             <div v-else-if="!albums.list.length" v-rise.self class="empty">还没有图片</div>
             <div v-else>
               <!-- 和「媒体」的照片墙一样一格一格浮现（只缩放、不上下错位：格子之间只有 2px） -->
               <AlbumGrid ref="albumGrid" v-rise="{ y: 0, scale: .94, max: 12 }" :items="albums.list" @open="openAlbum" />
-              <div class="cr-foot">
-                <span v-if="albums.loading">加载中…</span>
-                <button v-else-if="albums.error" type="button" class="cr-more" @click="albums.more()">加载失败，点击重试</button>
-                <span v-else-if="albums.done">没有更多了</span>
-              </div>
+              <ListFoot :feed="albums" />
             </div>
           </ContentSwap>
         </section>
@@ -721,19 +734,14 @@ onBeforeRouteUpdate(to => {
         >
           <ContentSwap :pending="posts.total === null && !posts.error" :hold="!!creator">
             <PostSkeleton v-if="posts.total === null && !posts.error" class="cr-posts" :class="{ 'cr-late': late.posts }" :count="2" />
-            <div v-else-if="posts.total === null" class="empty">
-              加载失败，请检查网络
-              <button type="button" class="retry" @click="posts.more()">重试</button>
-            </div>
+            <LoadState v-else-if="posts.total === null" :error="feedError(posts)" :retry="() => posts.more()" />
             <div v-else-if="!posts.list.length" v-rise.self class="empty">还没有发布帖子</div>
-            <!-- cr-posts：桌面布局里帖子是一栏（最宽 --desk-col），左边和标签、网格对齐；手机上没有样式 -->
+            <!-- cr-posts：桌面布局里帖子是一栏（最宽 --desk-col），左边和标签、网格对齐；手机上没有样式。很多时只渲染视口附近的（WinList） -->
             <div v-else class="cr-posts">
-              <PostCard v-for="p in posts.list" :key="p.id" :post="p" :author-link="false" />
-              <div class="cr-foot">
-                <span v-if="posts.loading">加载中…</span>
-                <button v-else-if="posts.error" type="button" class="cr-more" @click="posts.more()">加载失败，点击重试</button>
-                <span v-else-if="posts.done">没有更多了</span>
-              </div>
+              <WinList :ref="el => { wins.posts = el }" v-slot="{ item: p, revived }" :min="POST_WIN" :items="posts.list" :restore="restoredWin?.posts">
+                <PostCard :post="p" :author-link="false" :rise="!revived" />
+              </WinList>
+              <ListFoot :feed="posts" />
             </div>
           </ContentSwap>
         </section>
@@ -751,19 +759,12 @@ onBeforeRouteUpdate(to => {
             <div v-if="media.total === null && !media.error" class="cr-mg-sk" :class="{ 'cr-late': late.media }" aria-hidden="true">
               <div v-for="i in 12" :key="i" class="sk" />
             </div>
-            <div v-else-if="media.total === null" class="empty">
-              加载失败，请检查网络
-              <button type="button" class="retry" @click="media.more()">重试</button>
-            </div>
+            <LoadState v-else-if="media.total === null" :error="feedError(media)" :retry="() => media.more()" />
             <div v-else-if="!media.list.length" v-rise.self class="empty">还没有发布图片</div>
             <div v-else>
               <!-- 照片墙一格一格浮现（只缩放、不上下错位：格子之间只有 2px，错位会叠到下一行上） -->
               <MediaGrid ref="mediaGrid" v-rise="{ y: 0, scale: .94, max: 12 }" :items="media.list" @open="openImage" />
-              <div class="cr-foot">
-                <span v-if="media.loading">加载中…</span>
-                <button v-else-if="media.error" type="button" class="cr-more" @click="media.more()">加载失败，点击重试</button>
-                <span v-else-if="media.done">没有更多了</span>
-              </div>
+              <ListFoot :feed="media" />
             </div>
           </ContentSwap>
         </section>
@@ -857,8 +858,6 @@ onBeforeRouteUpdate(to => {
 .cr-pane { min-height: calc(100% - 94px); }
 .cr-pane > .m-swap:first-child .grid { padding-top: 14px; }
 
-.cr-foot { display: grid; place-items: center; height: 52px; color: var(--t2); font-size: 13px; }
-.cr-more { height: 32px; padding: 0 14px; color: var(--t1); font-size: 13px; }
 
 /* ---- 图片 / 媒体：照片墙左右贴边（不留页边距），和标签栏之间留 2px 缝；图片是 3:4 竖格，媒体是方格 ---- */
 .cr-images, .cr-media { padding-top: 2px; }
@@ -867,7 +866,8 @@ onBeforeRouteUpdate(to => {
 .cr-mg-sk > .sk { padding-top: 100%; border-radius: 0; }
 
 /* ---- 骨架 ---- */
-.cr-sk.pt { padding-top: 14px; }
+/* 排序胶囊的骨架：字透明的真胶囊，宽高和「最新 / 最热」一样，这一行和真的排序行一样高；不接手指（没有按压 / 悬停变色） */
+.cr-sk-chips > .chip { border-radius: 999px; box-shadow: none; color: transparent; pointer-events: none; }
 .sk { border-radius: 6px; background: #161616; animation: sk 1.2s ease-in-out infinite; }
 .cv.sk { border-radius: 8px; }
 .sk-tt { width: 70%; height: 12px; margin-top: 8px; }
@@ -930,12 +930,8 @@ onBeforeRouteUpdate(to => {
   /* 排序胶囊：和网格同宽、左边对齐；白底滑块的 top 跟着上边距走 */
   .cr-pane .chips { max-width: var(--desk-max); margin: 0 auto; padding: 20px var(--desk-pad) 20px; gap: 10px; }
   .cr-sort-bar { top: 20px; }
-  /* 胶囊骨架：字透明的真胶囊，宽高和「最新 / 最热」一样，这一行和真的排序行一样高；不接鼠标（没有悬停变色） */
-  .cr-sk-chips > .chip { border-radius: 999px; box-shadow: none; color: transparent; pointer-events: none; }
   .cr-pane { min-height: calc(100% - 48px); }
   .cr-pane > .m-swap:first-child .grid { padding-top: 24px; }
-  /* 首次加载的网格骨架上面已经有胶囊骨架那一行（同真的排序行），不再空 24px */
-  .cr-sk.pt { padding-top: 0; }
   /* 骨架卡片的标题条：占的高度和真卡片的两行标题 + 信息行一样（10 + 40 + 22px） */
   .sk-tt { height: 14px; margin: 13px 0 45px; }
   /* 帖子一栏（最宽 --desk-col，卡片样式在 PostCard 里）：和上面的标签、头像同一条左边线（整页都是靠左排的，居中的一栏在这里反而对不齐） */
@@ -956,13 +952,9 @@ onBeforeRouteUpdate(to => {
   }
   .cr-ag-sk > .sk, .cr-mg-sk > .sk { border-radius: 8px; }
 
-  .cr-foot { height: 72px; font-size: 14px; }
-  .cr-more { font-size: 14px; }
 }
 @media (min-width: 1024px) and (hover: hover) {
   .cr-tab:not(.on):hover { color: var(--t3); }
-  .cr-more { border-radius: 16px; transition: background-color var(--dur-2) var(--ease-out); }
-  .cr-more:hover { background: var(--chip); }
   .cr-failed .cr-back { transition: background-color var(--dur-2) var(--ease-out); }
   .cr-failed .cr-back:hover { background: var(--chip); }
 }

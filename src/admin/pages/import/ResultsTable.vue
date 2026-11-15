@@ -30,16 +30,19 @@ watch(filter, () => { page.value = 1 })
 watch(() => props.run, () => { page.value = 1; filter.value = 'all' })
 
 const counts = computed(() => ({
-  all: props.run.created + props.run.updated + props.run.skipped + props.run.failed,
+  all: props.run.created + props.run.updated + (props.run.unchanged || 0) + props.run.skipped + props.run.failed,
   created: props.run.created,
   updated: props.run.updated,
+  unchanged: props.run.unchanged || 0,
   skipped: props.run.skipped,
   error: props.run.failed
 }))
+/* 「无变化」只在选了「更新已有」或确实有这类行时出现（和 SummaryTiles 一致） */
 const tabs = computed(() => [
   { key: 'all', label: '全部' },
   { key: 'created', label: props.dry ? '新增' : '已新增' },
   { key: 'updated', label: props.dry ? '更新' : '已更新' },
+  ...(counts.value.unchanged || store.state.options.onDuplicate === 'update' ? [{ key: 'unchanged', label: '无变化' }] : []),
   { key: 'skipped', label: '跳过' },
   { key: 'error', label: '错误' }
 ])
@@ -110,7 +113,7 @@ const showId = r => r.id && !(props.dry && r.status === 'created')
         <template #cell-message="{ row }">
           <span class="msg" :class="{ 'danger-text': row.status === 'error' }">
             <span v-if="row.col" class="chip outline col">{{ row.col }}</span>
-            {{ row.message || (row.status === 'created' ? (dry ? '将新增' : '已新增') : row.status === 'updated' ? (dry ? '将更新' : '已更新') : '—') }}
+            {{ row.message || (row.status === 'created' ? (dry ? '将新增' : '已新增') : row.status === 'updated' ? (dry ? '将更新' : '已更新') : row.status === 'unchanged' ? '没有变化' : '—') }}
           </span>
         </template>
         <template #cell-id="{ row }">

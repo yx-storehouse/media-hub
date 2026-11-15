@@ -65,7 +65,13 @@ import RollNum from '@/components/video/RollNum.vue'
  *   duration 文件的真实时长（读到有限值才报）
  *   state    原生播放 / 暂停（播完、被浏览器拦下自动播放时，父组件据此更新按钮）
  *   ended    播完（循环播放时 <video loop> 自己从头来，不会触发）
- *   failed   文件打不开：父组件把这条退回封面预览
+ *   failed   文件打不开（父组件记下失败次数 fails，过一会儿让它重试；连着失败两次才退回只看封面）
+ *   recovered  失败过的文件重新加载出来了（父组件把失败次数清零）
+ *   ahead    屏幕上这一条前面缓冲了一点（1）/ 缓冲够了（2）：父组件这时才让下一条（1）、前后两条（2）整段预载（warm），
+ *            冷启动时不和它抢带宽；播着播着快接不上了（0）：父组件先停掉预载，把带宽让给它
+ *   retry    点了「视频暂时无法播放 · 点击重试」
+ * 文件打不开（fails > 0）：显示「视频暂时无法播放 · 点击重试」（片源还在，不说成「暂无视频源」）；attempt 每重试一次 +1，
+ * <video> 按它重新建一个、重新加载。连着失败两次（fails ≥ 2）退回只看封面，和没有片源的一样。
  * clip.src 为空时如实显示：清晰的封面 +「暂无视频源 · 看详情」，父组件只用一个很短的计时让自动连播往下走。
  *
  * 桌面布局（≥ 1024px，参照抖音网页版的推荐流）：这一条是铺满页面的一个大画框（圆角，尺寸由 ShortView 的 --sv-* 给），
@@ -95,8 +101,13 @@ const props = defineProps({
   current: Boolean,
   /** load the background photo immediately (clips on or next to the screen) */
   eager: Boolean,
-  /** 在当前这条附近：真实视频提前加载，离得远的不加载 */
+  /** 在当前这条附近：真实视频提前加载（屏幕上这条马上整段；前后两条等 warm 以后整段），离得远的不加载 */
   near: Boolean,
+  /** 屏幕上那一条已经开播、缓冲够了：前后两条可以整段预载了 */
+  warm: Boolean,
+  /** 视频文件连着打不开了几次（0 = 正常；≥ 2 退回只看封面）；attempt：第几次重试（<video> 按它重新建） */
+  fails: { type: Number, default: 0 },
+  attempt: { type: Number, default: 0 },
   /** 是否已关注作者：true / false；null = 还不知道（登录后正在取），这时不显示「+」 */
   following: { type: Boolean, default: null },
   /** 桌面控制栏用：短视频页正在全屏、浏览器能不能全屏 / 小窗（父组件判断） */
@@ -104,7 +115,7 @@ const props = defineProps({
   canFs: Boolean,
   canPip: Boolean
 })
-const emit = defineEmits(['toggle', 'dbllike', 'seek', 'boost', 'unmute', 'settings', 'like', 'dislike', 'fav', 'follow', 'time', 'duration', 'state', 'ended', 'failed', 'fullscreen', 'pip', 'mute'])
+const emit = defineEmits(['toggle', 'dbllike', 'seek', 'boost', 'unmute', 'settings', 'like', 'dislike', 'fav', 'follow', 'time', 'duration', 'state', 'ended', 'failed', 'recovered', 'ahead', 'retry', 'fullscreen', 'pip', 'mute'])
 
 const store = useAppStore()
 const router = useRouter()
@@ -126,7 +137,16 @@ const FULL_MIN = 60
 /* ---------- 真实视频 ---------- */
 
 const videoEl = useTemplateRef('video')
-const hasVideo = computed(() => !!props.clip.src)
+/** 打不开的次数到这么多就退回只看封面（和 ShortView 的 MAX_FAILS 一样） */
+const MAX_FAILS = 2
+const hasVideo = computed(() => !!props.clip.src && props.fails < MAX_FAILS)
+/** 视频文件打不开（还没恢复）：显示「视频暂时无法播放 · 点击重试」 */
+const broken = computed(() => !!props.clip.src && props.fails > 0)
+/*
+ * 预载：屏幕上这条整段（auto）；前后两条先不下载（有封面图垫着），屏幕上这条开播、缓冲够了（warm）再整段——
+ * 冷启动时两条同时下载会抢带宽，首帧晚、开播后还会卡（只取元数据也一样：Chrome 为了元数据也会先下好几百 KB）。离得远的不加载
+ */
+const preload = computed(() => (props.near && (props.current || props.warm) ? 'auto' : 'none'))
 const length = computed(() => props.len || props.clip.len || 0)
 /** 按住边缘时临时 2 倍速，不改播放设置里的倍速 */
 const boosting = ref(false)
@@ -171,6 +191,8 @@ watch(() => props.playing, on => {
   sync()
 })
 watch(hasVideo, on => { if (on) sync() }, { flush: 'post' })
+/* 重试：<video> 按 attempt 重新建了一个，新的这个照父组件的 playing 来 */
+watch(() => props.attempt, () => sync(), { flush: 'post' })
 watch(rate, r => { if (videoEl.value) videoEl.value.playbackRate = r })
 onMounted(sync)
 
@@ -305,6 +327,7 @@ onBeforeUnmount(() => {
   clearTimeout(hideTimer)
   closeSpeed()
   cancelAnimationFrame(quietRaf)
+  cancelAnimationFrame(measureRaf)
   ro?.disconnect()
   const v = videoEl.value
   if (!v) return
@@ -326,6 +349,7 @@ function onTime(e) {
   // 卡住以后又往前播了：缓冲好了
   if (stallAt >= 0 && !v.paused && v.currentTime > stallAt + 0.05 && v.readyState >= HAVE_FUTURE_DATA) onReady()
   emit('time', v.currentTime)
+  checkAhead(e)
 }
 /*
  * 原生播放 / 暂停报给父组件。元素被移出文档时（文件打不开退回封面、页面被 KeepAlive 收起、卸载）
@@ -339,10 +363,57 @@ function onEnded() {
   onBuffered()
   emit('ended')
 }
-function onError() {
+function onError(e) {
+  // 重试时换下来的旧元素晚到的错误：不算
+  if (e.target !== videoEl.value) return
   onBuffered()
   emit('state', false)
   emit('failed')
+}
+/* 读到第一帧了：失败过的就是恢复了 */
+function onLoaded(e) {
+  if (props.fails && e.target === videoEl.value) emit('recovered')
+  checkAhead(e)
+}
+
+/*
+ * 屏幕上这一条从播放位置往前缓冲了多少，分级报 ahead（换到这一条时重新算）：
+ *   1  缓冲了 NEXT_SEC 秒：父组件让下一条整段预载——上滑最常见，慢网下刚看几秒就划走时下一条也已经下了一截、马上能播；
+ *   2  缓冲够了（AHEAD_SEC 秒，或者浏览器说够一直播到底 / 已经整段下完）：前后两条都预载。
+ *   0  已经播了一会儿、还没下完，前面却只剩不到 LOW_SEC 秒（网速只比码率快一点点，预载在和它抢带宽）：
+ *      父组件先停掉预载（preload 改回 none，浏览器就不再往下读），等它缓冲回 NEXT_SEC 秒再报 1。
+ * 都等这一条自己先缓冲出一截再开始，冷启动时不和它抢带宽（首帧不晚），正在看的这条也不会因为预载卡住
+ */
+const NEXT_SEC = 1.5
+const AHEAD_SEC = 3
+const LOW_SEC = 0.5
+let aheadSent = 0
+let lowSent = false
+watch(() => props.current, on => {
+  if (!on) return
+  aheadSent = 0
+  lowSent = false
+})
+function checkAhead(e) {
+  const v = e.target
+  if (!props.current || v !== videoEl.value) return
+  const t = v.currentTime
+  let end = 0
+  for (let i = 0; i < v.buffered.length; i++) {
+    if (v.buffered.start(i) <= t + 0.5 && v.buffered.end(i) > end) end = v.buffered.end(i)
+  }
+  const d = v.duration
+  const ahead = end - t
+  const done = Number.isFinite(d) && d > 0 && end >= d - 0.5
+  const lvl = v.readyState >= 4 || ahead >= AHEAD_SEC || done ? 2 : ahead >= NEXT_SEC ? 1 : 0
+  if (lvl > aheadSent || (lowSent && lvl >= 1)) {
+    aheadSent = lvl
+    lowSent = false
+    emit('ahead', lvl)
+  } else if (!lowSent && !done && v.readyState < 4 && !v.paused && t > 1 && ahead < LOW_SEC) {
+    lowSent = true
+    emit('ahead', 0)
+  }
 }
 
 /** 跳到第 t 秒：真实视频直接设 currentTime，父组件同步记下进度 */
@@ -589,7 +660,11 @@ function openDetail() {
 }
 const showFull = computed(() => hasVideo.value && length.value >= FULL_MIN)
 
-/* 标题超过两行才可以点开看全文（再点收起）；没被截断时点标题和点画面一样 */
+/*
+ * 标题超过两行才可以点开看全文（再点收起）；没被截断时点标题和点画面一样。
+ * 量高度不在挂载时同步做（第一次打开短视频页时前后五条一起挂上，同步量会逼浏览器当场排版，卡一下）：
+ * ResizeObserver 第一次回调（排版之后、画出来之前）就是量的时候，以后尺寸变了也会再量；不支持它的老浏览器下一帧量
+ */
 const titleEl = useTemplateRef('titleEl')
 const titleOpen = ref(false)
 const titleClamped = ref(false)
@@ -599,12 +674,12 @@ function measureTitle() {
   titleClamped.value = el.scrollHeight > el.clientHeight + 1
 }
 let ro = null
+let measureRaf = 0
 onMounted(() => {
-  measureTitle()
   if ('ResizeObserver' in window && titleEl.value) {
     ro = new ResizeObserver(() => measureTitle())
     ro.observe(titleEl.value)
-  }
+  } else measureRaf = requestAnimationFrame(measureTitle)
 })
 watch(() => props.clip.title, () => nextTick(measureTitle))
 function toggleTitle() {
@@ -880,13 +955,15 @@ defineExpose({ userToggle, seekBy })
   >
     <Cover class="sv-bg" v-bind="clip.cover" :eager="eager" />
     <!-- 有素材文件：真实播放（横屏视频上下留边，露出底下模糊的封面） -->
+    <!-- 重试时按 attempt 重新建一个（干净地重新加载） -->
     <video
       v-if="hasVideo"
+      :key="attempt"
       ref="video"
       class="sv-video"
       :src="clip.src"
       :poster="clip.cover?.src || undefined"
-      :preload="near ? 'auto' : 'none'"
+      :preload="preload"
       :muted="store.muted"
       :loop="store.playback.loop"
       playsinline
@@ -902,6 +979,9 @@ defineExpose({ userToggle, seekBy })
       @stalled="onStalled"
       @playing="onReady"
       @canplay="onCanPlay"
+      @loadeddata="onLoaded"
+      @progress="checkAhead"
+      @canplaythrough="checkAhead"
       @emptied="onBuffered"
     />
     <!-- 没有素材文件：完整、清晰地显示封面（不再假装在播放） -->
@@ -955,7 +1035,8 @@ defineExpose({ userToggle, seekBy })
     <div v-if="isDesktop && $slots.top" class="sv-dtop"><slot name="top" /></div>
 
     <div class="sv-ctl" :class="ctlFx && `fx-${ctlFx}`">
-      <button v-if="hasVideo" class="sk back" :class="{ spin: seekFx?.dir < 0 }" type="button" aria-label="后退10秒" @click="seekBy(-10)">
+      <!-- ±10 秒：文件打不开（等着重试）时没有意义，不显示 -->
+      <button v-if="hasVideo && !broken" class="sk back" :class="{ spin: seekFx?.dir < 0 }" type="button" aria-label="后退10秒" @click="seekBy(-10)">
         <Icon :key="seekFx?.dir < 0 ? seekFx.key : 0" name="replay" />
       </button>
       <!-- 桌面：控制栏上有同一个播放 / 暂停键，正中这个不进 Tab 顺序（鼠标照样能点） -->
@@ -963,20 +1044,25 @@ defineExpose({ userToggle, seekBy })
         class="pb"
         type="button"
         :tabindex="isDesktop ? -1 : undefined"
-        :aria-label="playing ? '暂停' : '播放'"
+        :aria-label="broken && hasVideo ? '重新加载' : playing ? '暂停' : '播放'"
         @click="userToggle"
         @animationend.self="ctlFx = ''"
       >
-        <Icon name="play" />
+        <!-- 视频文件打不开：中间是「重新加载」（点了就重试） -->
+        <Icon :name="broken && hasVideo ? 'refresh' : 'play'" :class="{ retry: broken && hasVideo }" />
       </button>
-      <button v-if="hasVideo" class="sk fwd" :class="{ spin: seekFx?.dir > 0 }" type="button" aria-label="前进10秒" @click="seekBy(10)">
+      <button v-if="hasVideo && !broken" class="sk fwd" :class="{ spin: seekFx?.dir > 0 }" type="button" aria-label="前进10秒" @click="seekBy(10)">
         <Icon :key="seekFx?.dir > 0 ? seekFx.key : 0" name="forward" />
       </button>
     </div>
 
     <!-- 左下角一列：恢复声音 / 暂无视频源、作者、话题、标题、看完整版（按内容高度往上排） -->
     <div class="sv-meta">
-      <template v-if="hasVideo">
+      <!-- 视频文件暂时打不开（片源还在）：点了重试；和播放页的「视频暂时无法播放，点击重试」一个说法 -->
+      <button v-if="broken" class="sv-chip sv-nosrc sv-retry" type="button" @click="emit('retry')">
+        <Icon name="refresh" />视频暂时无法播放 · 点击重试
+      </button>
+      <template v-else-if="hasVideo">
         <button v-show="store.muted" class="sv-unmute" type="button" @click="emit('unmute')">
           <Icon name="mute" />点击恢复声音
         </button>
@@ -1421,6 +1507,7 @@ defineExpose({ userToggle, seekBy })
   pointer-events: auto;
 }
 .sv-ctl .pb svg { width: 25px; height: 25px; margin-left: 3px; color: #fff; }
+.sv-ctl .pb svg.retry { margin-left: 0; stroke-width: 2.4; }
 .sv-ctl .sk {
   width: 28px;
   height: 28px;
@@ -1465,8 +1552,15 @@ defineExpose({ userToggle, seekBy })
  */
 .sv:not(.cur) .sv-meta { opacity: 0; transform: translateY(var(--rise)); transition: opacity var(--dur-2) var(--ease-in), transform var(--dur-2) var(--ease-in); }
 .sv.cur .sv-meta { transition: opacity var(--dur-3) var(--ease-out), transform var(--dur-3) var(--ease-out); }
+/*
+ * 左下角这一列（手机）能点的范围：小胶囊用 ::after 上下撑到 44px，@名字、#话题用内边距把自己撑到 40px
+ * （名字的 overflow: hidden 会裁掉伪元素，话题那一行也是），内边距多出来的高度再用负外边距收回去——
+ * 每一行的位置、行距和原来一模一样，只是能点的范围上下叠在一起：叠住的地方归下面那一个（DOM 里靠后的先接到点按）。
+ * 桌面（鼠标）和手机横屏不撑。
+ */
 .sv-unmute,
 .sv-chip {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1483,13 +1577,25 @@ defineExpose({ userToggle, seekBy })
   pointer-events: auto;
 }
 .sv-unmute svg { width: 14px; height: 14px; }
+.sv-unmute::after,
+.sv-chip::after { content: ''; position: absolute; left: 0; right: 0; top: -7px; bottom: -7px; }
+/* 「看完整版」：上面和标题之间 10px、下面离进度条 8px，各撑一半多一点（进度条在上层，重叠的那一点归它） */
+.sv-full::after { top: -6px; bottom: -6px; }
 .sv-chip { gap: 2px; padding-right: 8px; }
 .sv-chip svg { width: 14px; height: 14px; stroke-width: 2.4; opacity: .8; }
+/* 「视频暂时无法播放 · 点击重试」：图标在前 */
+.sv-chip.sv-retry { gap: 6px; padding-right: 13px; }
 .sv-full { height: 28px; margin: 10px 0 0; background: rgba(255, 255, 255, .16); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); }
 .sv-name {
+  position: relative;
   display: block;
   max-width: 100%;
-  margin-bottom: 6px;
+  /*
+   * 上下的内边距就是撑出来的点按范围（40px）；外边距收回：上面 -12px，下面 -1px（7px 内边距 - 1px = 原来和下一行的 6px 间距），
+   * 字和下一行的位置都不变
+   */
+  padding: 12px 0 7px;
+  margin: -12px 0 -1px;
   overflow: hidden;
   color: #fff;
   font-size: 15px;
@@ -1501,15 +1607,24 @@ defineExpose({ userToggle, seekBy })
   text-shadow: 0 1px 6px rgba(0, 0, 0, .4);
   pointer-events: auto;
 }
+/*
+ * 这一行 overflow: hidden（一行放不下就截掉）：上下各留 7px 内边距，话题按钮撑出去的范围在裁切范围里；
+ * 外边距把这 7px 收回来（原来是上 -4px、下 2px），按钮画在原来的位置。
+ * 上下相邻的外边距会合并（都是负的取更负的那个，一正一负相加）：跟在胶囊后面 14 - 11 = 3，
+ * 跟在名字后面合并成 -12（名字下面 7px 内边距 - 12 = 原来名字和话题之间的 6 - 4 = 2px）
+ */
 .sv-tags {
   display: flex;
   gap: 3px;
-  margin: -4px 0 2px -6px;
+  margin: -11px 0 -5px -6px;
+  padding: 7px 0;
   overflow: hidden;
   white-space: nowrap;
 }
-/* 话题字小，按钮上下左右多留一点可点区域 */
+.sv-name + .sv-tags { margin-top: -12px; }
+/* 话题字小，按钮上下左右多留一点可点区域（自己 26px，再上下各撑 7px 到 40px） */
 .sv-tags button {
+  position: relative;
   flex: none;
   padding: 4px 6px;
   color: rgba(255, 255, 255, .72);
@@ -1518,15 +1633,22 @@ defineExpose({ userToggle, seekBy })
   text-shadow: 0 1px 4px rgba(0, 0, 0, .4);
   pointer-events: auto;
 }
+.sv-tags button::after { content: ''; position: absolute; left: -1px; right: -1px; top: -7px; bottom: -7px; }
 .sv-title {
   display: -webkit-box;
   overflow: hidden;
   font-size: 14px;
   font-weight: 500;
   line-height: 19.6px;
+  /* 没有空格的长串（网址、长英文）照样折行，不在右边被切掉（和 common.css 的 .tt 一样） */
+  overflow-wrap: anywhere;
   text-shadow: 0 1px 6px rgba(0, 0, 0, .4);
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
+}
+/* Safari 15.4 以前不认 overflow-wrap: anywhere：word-break: break-word 效果一样 */
+@supports not (overflow-wrap: anywhere) {
+  .sv-title { word-break: break-word; }
 }
 .sv-title.more { cursor: pointer; pointer-events: auto; }
 .sv-title:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
@@ -1701,7 +1823,12 @@ defineExpose({ userToggle, seekBy })
   .sv-unmute,
   .sv-chip { height: 28px; margin-bottom: 8px; }
   .sv-full { margin-top: 6px; }
-  .sv-name { margin-bottom: 2px; font-size: 14px; }
+  .sv-name { margin: 0 0 2px; padding: 0; font-size: 14px; }
+  .sv-tags,
+  .sv-name + .sv-tags { margin: -4px 0 2px -6px; padding: 0; }
+  .sv-unmute::after,
+  .sv-chip::after,
+  .sv-tags button::after { display: none; }
   .sv-title { -webkit-line-clamp: 1; }
   .sv.title-open .sv-title { max-height: 30vh; }
   .sv-prog { bottom: 6px; }
@@ -1791,7 +1918,11 @@ defineExpose({ userToggle, seekBy })
   .sv-nosrc { order: 0; margin-bottom: 14px; }
   .sv-unmute svg { width: 15px; height: 15px; }
   .sv-who { order: 1; display: flex; align-items: baseline; gap: 8px; max-width: 100%; margin-bottom: 6px; }
-  .sv-name { flex: 0 1 auto; min-width: 0; margin: 0; font-size: 18px; line-height: 25px; }
+  .sv-name { flex: 0 1 auto; min-width: 0; margin: 0; padding: 0; font-size: 18px; line-height: 25px; }
+  /* 鼠标用不着撑大的点按范围 */
+  .sv-unmute::after,
+  .sv-chip::after,
+  .sv-tags button::after { display: none; }
   .sv-ago { flex: none; color: rgba(255, 255, 255, .72); font-size: 13px; line-height: 18px; white-space: nowrap; text-shadow: 0 1px 4px rgba(0, 0, 0, .4); }
   .sv-title { order: 2; max-width: 100%; font-size: 15px; line-height: 22px; }
   /*

@@ -1,6 +1,5 @@
 import { defineStore } from 'pinia'
 import { reactive, watch } from 'vue'
-import { togglePostFav } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 
 /**
@@ -11,12 +10,12 @@ import { useAuthStore } from '@/stores/auth'
  *   - 详情页拿到接口数据时写进来（接口为准），收藏、阅读后再更新；
  *   - 社区列表重新加载时，把加载开始前写入的值清掉（列表里已经是接口的最新数据）；
  *   - 换了账号（登录、退出）时全部清掉：收藏状态是上一个人的，不能留给下一个人看。
+ * 收藏 / 取消收藏的请求只走 components/community/favQueue.js 的 setPostFav（连点不丢、最后想要的状态为准），
+ * 它用这里的 stats / patch 读写状态；这里不再另有一份发请求的代码。
  */
 export const usePostStore = defineStore('posts', () => {
   /** id -> { faved?, fav?, read?, at } */
   const patches = reactive({})
-  /* 正在请求中的收藏：同一条帖子一次只发一个请求 */
-  const pending = new Set()
 
   /** 帖子当前应显示的值：本地记过的优先，否则用帖子对象自带的 */
   function stats(post) {
@@ -44,30 +43,5 @@ export const usePostStore = defineStore('posts', () => {
     if (before !== null) prune(Infinity)
   }, { flush: 'sync' })
 
-  const isPending = id => pending.has(String(id))
-
-  /**
-   * 收藏 / 取消收藏：乐观更新 → 一次请求（带明确的 on）→ 以返回的 active 为准；失败回滚并把错误抛给调用方提示。
-   * 返回最终的收藏状态。
-   */
-  async function setFav(post, on) {
-    const id = post.id
-    const before = stats(post)
-    const count = active => (active === before.faved ? before.fav : Math.max(0, before.fav + (active ? 1 : -1)))
-    patch(id, { faved: on, fav: count(on) })
-    pending.add(String(id))
-    try {
-      const res = await togglePostFav(id, { on })
-      const active = typeof res?.active === 'boolean' ? res.active : on
-      patch(id, { faved: active, fav: count(active) })
-      return active
-    } catch (e) {
-      patch(id, { faved: before.faved, fav: before.fav })
-      throw e
-    } finally {
-      pending.delete(String(id))
-    }
-  }
-
-  return { patches, stats, patch, prune, isPending, setFav }
+  return { patches, stats, patch, prune }
 })
