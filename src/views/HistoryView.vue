@@ -5,17 +5,20 @@ import { getHistory, removeHistory, clearHistory, getVideo } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 import { useAppStore } from '@/stores/app'
 import { toast, toastError } from '@/composables/useToast'
-import { formatClock, formatCount } from '@/utils/format'
 import { createFeed } from '@/components/creator/feed'
 import { useAutoMore } from '@/components/home/list'
 import { pickResume, setResume } from '@/components/video/resume'
 import { rememberVideo } from '@/components/video/preview'
 import { useSnapshot } from '@/components/me/snapshot'
+import { vGutter } from '@/components/me/gutter'
+import { progress, when, DAY_GROUPS, dayOf, stamp } from '@/components/me/history'
 import BackHeader from '@/components/BackHeader.vue'
 import Cover from '@/components/Cover.vue'
 import Icon from '@/components/Icon.vue'
 import ListFoot from '@/components/home/ListFoot.vue'
+import SkeletonGrid from '@/components/home/SkeletonGrid.vue'
 import ConfirmSheet from '@/components/me/ConfirmSheet.vue'
+import HistoryCard from '@/components/me/HistoryCard.vue'
 import LoadState from '@/components/common/LoadState.vue'
 import { cameBack, vRise, leave } from '@/components/home/motion'
 import { isDesktop } from '@/composables/useDesktop'
@@ -27,6 +30,8 @@ defineOptions({ name: 'HistoryView' })
  * 每条显示看到哪了（封面底部的进度条 +「看到 12:34 / 已看完」），点进去从上次的位置接着播。
  * 右边的 × 删一条（几秒内可以撤销），右上角「清空」先确认再清。
  * 在本页登录 / 退出后自动重新加载；刷新时等登录状态校验完再取，不会白屏。
+ * 桌面布局（≥ 1024px）是铺满内容区的视频网格，按「今天 / 昨天 / 更早」分组（卡片是 components/me/HistoryCard.vue）；
+ * 手机上是原来的列表。删一条、撤销、清空、返回恢复两边是同一套。
  */
 const router = useRouter()
 const auth = useAuthStore()
@@ -34,8 +39,6 @@ const app = useAppStore()
 /* 按返回回到这一页：恢复出来的列表不播入场 */
 cameBack()
 
-/* 剩不到 5 秒算看完（和 components/video/resume.js 一致） */
-const DONE_LEFT = 5
 /* 删一条后能撤销的时间 */
 const UNDO_MS = 4000
 
@@ -54,37 +57,32 @@ function reload() {
   if (session.value) feed.more()
 }
 
-/* ---------- 进度 ---------- */
+/* ---------- 桌面网格：按天分组 ---------- */
 
-function progress(v) {
-  const len = Number(v.len) || 0
-  const sec = Number(v.progressSec) || 0
-  if (len && sec >= len - DONE_LEFT) return { pct: 100, text: '已看完' }
-  if (sec < 3) return { pct: 0, text: '刚开始看' }
-  return { pct: len ? Math.min(100, (sec / len) * 100) : 0, text: `看到 ${formatClock(sec)}` }
-}
-
-/* 桌面布局多一行：作者 · 播放数（宽屏上标题右边空着，像视频网站的观看记录那样补上出处） */
-function byline(v) {
-  const parts = []
-  if (v.creator?.name) parts.push(v.creator.name)
-  if (Number(v.playCount) > 0) parts.push(`${formatCount(v.playCount)}次播放`)
-  return parts.join(' · ')
-}
-
-const pad = n => String(n).padStart(2, '0')
-/* 观看时间：今天 / 昨天带时分，更早的只写日期 */
-function when(ts) {
-  if (!ts) return ''
-  const d = new Date(ts * 1000)
+/*
+ * 「今天 / 昨天 / 更早」三组，组里照列表的顺序（最近看的在前）。按进来时的观看时间分（groupAt，见 recheck）：
+ * 点进去看了再返回，这条的时间变成刚才，但卡片留在原来的位置，不会在眼前跳到「今天」的最前面
+ */
+const groups = computed(() => {
   const now = new Date()
-  const day = x => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime()
-  const diff = Math.round((day(now) - day(d)) / 86400000)
-  const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`
-  if (diff <= 0) return `今天 ${hm}`
-  if (diff === 1) return `昨天 ${hm}`
-  if (d.getFullYear() === now.getFullYear()) return `${d.getMonth() + 1}月${d.getDate()}日`
-  return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`
+  const by = { today: [], yesterday: [], older: [] }
+  for (const v of feed.list) by[dayOf(v.groupAt ?? v.watchedAt, now)].push(v)
+  return DAY_GROUPS.filter(g => by[g.key].length).map(g => ({ ...g, list: by[g.key] }))
+})
+
+/*
+ * 网格里离开的卡片（删掉、整组没了的组标题）：绝对定位叠在原处淡出，后面的平滑补位（TransitionGroup 的 move）。
+ * 离开前把位置、大小钉在行内样式上（网格里绝对定位的元素会跑到左上角）；同一拍里离开好几个时，位置都按
+ * 第一个离开之前的排版量（前一个变成绝对定位后，后面的会先往前挪一下，再量就不对了）
+ */
+let placed = null
+function pin(el) {
+  if (!placed) {
+    placed = new Map([...el.parentNode.children].map(c => [c, { x: c.offsetLeft, y: c.offsetTop, w: c.offsetWidth, h: c.offsetHeight }]))
+    queueMicrotask(() => { placed = null })
+  }
+  const r = placed.get(el) || { x: el.offsetLeft, y: el.offsetTop, w: el.offsetWidth, h: el.offsetHeight }
+  Object.assign(el.style, { left: `${r.x}px`, top: `${r.y}px`, width: `${r.w}px`, height: `${r.h}px` })
 }
 
 let opened = null
@@ -103,25 +101,31 @@ const committing = reactive(new Set())
 const isRemoved = id => removing.has(id) || committing.has(id)
 const shownTotal = computed(() => Math.max(0, (feed.total ?? 0) - removing.size - committing.size))
 
+/*
+ * 桌面上用键盘（回车 / 空格，读屏的「点按」也一样）按的按钮：click 的 detail 是 0。
+ * 用鼠标点的不算：Chrome 里点了的按钮也有焦点，按焦点判断会把焦点放到新按钮上，× 就一直挂着（见 HistoryCard）
+ */
+const byKeys = e => isDesktop.value && e?.detail === 0 && e.currentTarget === document.activeElement
+
 function remove(v, e) {
   if (removing.has(v.id)) return
   removing.set(v.id, setTimeout(() => commit(v.id), UNDO_MS))
-  // 桌面上用键盘删的：× 按钮随这一行换成撤销条消失了，焦点交给「撤销」，接着按回车就能撤销
-  if (isDesktop.value && e?.currentTarget === document.activeElement) refocus(v.id, '.undo')
+  // 桌面上用键盘删的：× 按钮随这张卡片换成撤销条消失了，焦点交给「撤销」，接着按回车就能撤销
+  if (byKeys(e)) refocus(v.id, '.undo')
 }
 
 function undo(v, e) {
   if (committing.has(v.id)) return
   clearTimeout(removing.get(v.id))
   removing.delete(v.id)
-  if (isDesktop.value && e?.currentTarget === document.activeElement) refocus(v.id, '.hi-del')
+  if (byKeys(e)) refocus(v.id, '.hc-del')
 }
 
-/* 等这一行换好（撤销条 ⇄ 记录）再把焦点放到新出现的按钮上 */
+/* 等这一张卡片换好（撤销条 ⇄ 记录）再把焦点放到新出现的按钮上（只有桌面上用键盘删 / 撤销时） */
 function refocus(id, sel) {
   nextTick(() => {
-    const row = [...(listEl.value?.$el?.children || [])].find(el => el.dataset.hid === String(id))
-    row?.querySelector(sel)?.focus({ preventScroll: true })
+    const card = [...(gridEl.value?.$el?.children || [])].find(el => el.dataset.hid === String(id))
+    card?.querySelector(sel)?.focus({ preventScroll: true })
   })
 }
 
@@ -167,11 +171,12 @@ const clearing = ref(false)
  * 失败了记录原样放回来。
  */
 const listEl = ref(null)
+const gridEl = ref(null)
 async function clearAll() {
   if (clearing.value) return
   clearing.value = true
   cancelRemovals()
-  const out = leave(listEl.value?.$el?.children, { y: -6, scale: 0.96 })
+  const out = leave((isDesktop.value ? gridEl : listEl).value?.$el?.children, { y: -6, scale: 0.96 })
   try {
     await Promise.all([clearHistory(), ...out.map(a => a.finished.catch(() => {}))])
     feed.restore({ list: [], total: 0, done: true })
@@ -205,7 +210,8 @@ function recheck(id) {
     try {
       const d = await getVideo(id)
       if (typeof d?.progressSec !== 'number') return
-      feed.list = feed.list.map(v => (v.id === id ? { ...v, progressSec: d.progressSec, watchedAt: d.watchedAt ?? v.watchedAt } : v))
+      // groupAt：桌面网格按进来时的时间分组，这条留在原来的组里（见 groups）
+      feed.list = feed.list.map(v => (v.id === id ? { ...v, progressSec: d.progressSec, watchedAt: d.watchedAt ?? v.watchedAt, groupAt: v.groupAt ?? v.watchedAt } : v))
     } catch { /* 保持原样 */ }
   }, 400)
 }
@@ -248,11 +254,18 @@ onBeforeUnmount(() => {
     </BackHeader>
 
     <!-- 还在校验登录状态 / 第一页还没回来：骨架 -->
-    <div v-if="session === null || (session && feed.total === null && !feed.error)" class="scroll hi-sk" aria-busy="true">
-      <div v-for="i in 6" :key="i" class="hi sk-row" aria-hidden="true">
-        <div class="hi-cv sk" />
-        <div class="hi-bd"><div class="sk l1" /><div class="sk l2" /><div class="sk l3" /></div>
-      </div>
+    <div v-if="session === null || (session && feed.total === null && !feed.error)" v-gutter class="scroll hi-sk" aria-busy="true">
+      <!-- 桌面：一条分组标题 + 画满一屏的视频网格骨架，和数据回来后的网格对齐 -->
+      <template v-if="isDesktop">
+        <div class="hg-sk-hd" aria-hidden="true"><span class="sk" /></div>
+        <SkeletonGrid fill class="hg-sk" />
+      </template>
+      <template v-else>
+        <div v-for="i in 6" :key="i" class="hi sk-row" aria-hidden="true">
+          <div class="hi-cv sk" />
+          <div class="hi-bd"><div class="sk l1" /><div class="sk l2" /><div class="sk l3" /></div>
+        </div>
+      </template>
     </div>
 
     <div v-else-if="!session" v-rise.self class="empty">
@@ -271,12 +284,32 @@ onBeforeUnmount(() => {
       <button type="button" class="retry" @click="goHome">去首页看看</button>
     </div>
 
-    <div v-else ref="scroller" class="scroll" @scroll.passive="onScroll">
+    <div v-else ref="scroller" v-gutter class="scroll" @scroll.passive="onScroll">
+      <!--
+        桌面：铺满内容区的视频网格（和别的视频网格同一个列数规则），「今天 / 昨天 / 更早」的组标题各占一整行。
+        点 × 后卡片原地换成「已删除 · 撤销」；几秒后真正删掉时这张卡片淡出、后面的平滑补位，整组删空了组标题也跟着淡出
+      -->
+      <TransitionGroup v-if="isDesktop" ref="gridEl" v-rise tag="div" name="hg" class="grid hg" @before-leave="pin">
+        <template v-for="(g, gi) in groups" :key="g.key">
+          <h2 class="hg-hd" :class="{ first: !gi }">{{ g.label }}</h2>
+          <HistoryCard
+            v-for="v in g.list"
+            :key="v.id"
+            :video="v"
+            :at="stamp(v.watchedAt, g.key)"
+            :removed="isRemoved(v.id)"
+            :locked="committing.has(v.id)"
+            @open="open(v)"
+            @remove="remove(v, $event)"
+            @undo="undo(v, $event)"
+          />
+        </template>
+      </TransitionGroup>
       <!--
         一条记录：点 × 后原地换成「已删除 · 撤销」（交叉淡入淡出，下面的记录平滑补位）；
         几秒后真正删掉时这一条淡出、下面的往上补
       -->
-      <TransitionGroup ref="listEl" v-rise tag="div" name="hi" class="hi-list">
+      <TransitionGroup v-else ref="listEl" v-rise tag="div" name="hi" class="hi-list">
         <!-- class 里读一下删除状态：换成撤销条时列表也跟着重新排一次位置，下面的记录才会平滑补位 -->
         <div v-for="v in feed.list" :key="v.id" class="hi" :class="{ removed: isRemoved(v.id) }" :data-hid="v.id">
           <Transition name="hi-swap">
@@ -292,12 +325,11 @@ onBeforeUnmount(() => {
                 </Cover>
                 <div class="hi-bd">
                   <div class="hi-tt">{{ v.title }}</div>
-                  <div v-if="isDesktop && byline(v)" class="hi-by">{{ byline(v) }}</div>
                   <div class="hi-pg" :class="{ done: progress(v).pct === 100 }">{{ progress(v).text }}</div>
                   <div class="hi-at">{{ when(v.watchedAt) }}</div>
                 </div>
               </RouterLink>
-              <button type="button" class="hi-del m-hold" :aria-label="`删除观看记录：${v.title}`" :title="isDesktop ? '删除这条记录' : undefined" @click="remove(v, $event)"><Icon name="close" /></button>
+              <button type="button" class="hi-del m-hold" :aria-label="`删除观看记录：${v.title}`" @click="remove(v, $event)"><Icon name="close" /></button>
             </div>
           </Transition>
         </div>
@@ -402,64 +434,51 @@ onBeforeUnmount(() => {
 
 /*
  * ---- 桌面布局（≥ 1024px）----
- * 居中的一列（内容最宽 --desk-col，和「我的」「我的关注」同一栏，侧边栏里一组页面挨个点过去标题不左右跳；标题行和它对齐）：
- * 大封面（240px 宽）+ 标题 + 看到哪 + 什么时候看的，像视频网站的观看记录。
- * 用列表不用网格：每条都有进度文字和观看时间要读，删掉后原地换成「已删除 · 撤销」，列表里补位最自然。
- * 鼠标移到一行上：整行浅底、封面放大一点、标题变亮，右上角出现 ×（键盘 Tab 到这一行时也出现）；没有鼠标的设备 × 一直显示。
- * 整行的浅底往两边各多出 12px，封面和标题行的返回键对齐在内容边上。
+ * 铺满内容区的视频网格：公共的 .grid（最宽 --desk-max、两边 --desk-pad、按 --desk-card 自动排列数），和「我的收藏」、首页的网格
+ * 同一个宽度、同样的列；标题行（BackHeader 默认和 .desk-wrap 的内容对齐）、组标题、卡片的左边缘对齐。卡片见 components/me/HistoryCard.vue。
+ * 组标题（今天 / 昨天 / 更早）是网格里占满一整行的一项（16px / 600，和首页分区标题一样大）：离下面的卡片 16px，离上一组的卡片 52px
+ * （负的下外边距吃掉一部分行距）。
  */
 @media (min-width: 1024px) {
-  .history { --hi-w: var(--desk-col); --desk-hd-w: var(--hi-w); }
-  /* 左右各留出滚动条的位置：Windows 的常驻滚动条不会让居中的列表和标题行错开（同社区、帖子详情） */
-  .scroll { scrollbar-gutter: stable both-edges; }
+  /*
+   * 标题行和网格对齐：网格在滚动区里，Windows 的常驻滚动条占掉右边一截。components/me/gutter.js 量出它的宽度（--sbw），
+   * 标题行右边多让出这么宽（「清空」的右边缘和网格的右边缘对齐），网格到最宽、居中时也扣掉它再居中（和网格同一条中线）。
+   * 和 BackHeader 默认的左右内边距是同一个算法，只是多扣了滚动条；没有滚动条时 --sbw 是 0，和默认一样
+   */
+  .history :deep(.sub-hd) {
+    --hd-side: max(var(--desk-pad), calc((100% - var(--sbw, 0px) - var(--desk-max)) / 2 + var(--desk-pad)));
+    padding: 0 calc(var(--hd-side) + var(--sbw, 0px)) 0 var(--hd-side);
+  }
   .hd-n { font-size: 14px; }
   .hd-act { height: 36px; padding: 0 16px; border-radius: 18px; background: var(--chip); color: var(--t3); font-size: 14px; }
   .hd-act::after { inset: -4px; }
 
-  .hi-list, .sk-row { width: 100%; max-width: calc(var(--hi-w) + 2 * var(--desk-pad)); margin: 0 auto; }
-  .hi-list { padding: 4px var(--desk-pad) 8px; }
-  .hi-link { gap: 16px; margin: 0 -12px; padding: 10px 12px; border-radius: 12px; }
-  .hi-cv { width: 240px; border-radius: 10px; }
-  .hi-cv .dur { right: 8px; bottom: 9px; height: 20px; padding: 0 7px; font-size: 12px; line-height: 20px; }
-  .hi-track { height: 4px; }
-  .hi-bd { padding: 2px 48px 0 0; }
-  .hi-tt { font-size: 16px; line-height: 24px; }
-  .hi-by { margin-top: 6px; overflow: hidden; color: var(--t2); font-size: 13px; line-height: 20px; text-overflow: ellipsis; white-space: nowrap; }
-  .hi-pg { margin-top: 2px; font-size: 13px; line-height: 20px; }
-  .hi-at { margin-top: 2px; font-size: 13px; line-height: 20px; }
-  .hi-del { top: 10px; right: 0; bottom: auto; width: 40px; height: 40px; border-radius: 50%; color: var(--t2); }
-  .hi-del svg { width: 18px; height: 18px; }
-
-  .hi-undo { height: 64px; margin: 8px 0; padding: 0 8px 0 20px; border-radius: 12px; font-size: 14px; }
-  .undo { height: 40px; padding: 0 16px; border-radius: 20px; }
+  .hg { position: relative; padding-top: 4px; }
+  .hg-hd { grid-column: 1 / -1; margin: 24px 0 -12px; color: var(--t1); font-size: 16px; font-weight: 600; line-height: 24px; }
+  .hg-hd.first { margin-top: 0; }
+  /* 删掉的卡片、删空了的组标题：钉在原处（pin）淡出、缩一点；后面的补位只动 transform */
+  .hg-move { transition: transform var(--dur-3) var(--ease-out); }
+  .hg-leave-active { position: absolute; pointer-events: none; transition: opacity var(--dur-2) var(--ease-out), transform var(--dur-2) var(--ease-out); }
+  .hg-leave-to { opacity: 0; transform: scale(.96); }
+  /*
+   * 离开的组标题：pin 量的是外边距以内的位置、相对网格的内边距边；绝对定位时外边距要清掉（不然往下多挪 24px），
+   * 也不能再占「整行」（绝对定位的元素占着网格线时，定位的参照变成那一格，会往右多挪一个 --desk-pad）。
+   * 标题和整行一样宽、字在最左边：按左边缩，字原地淡出（按中心缩会往右滑 20 多 px）
+   */
+  .hg-hd.hg-leave-active { grid-column: auto; margin: 0; transform-origin: 0 50%; }
 
   .em-ic { width: 40px; height: 40px; margin-bottom: 16px; }
   .em-sub { margin-top: 8px; font-size: 13px; }
 
-  .sk-row { gap: 16px; padding: 10px var(--desk-pad); }
-  /* 整块骨架往下 4px，对上列表的上内边距（滚动区的第一个子元素是顶边细线的哨兵，:first-child 选不到第一行） */
-  .hi-sk { padding-top: 4px; }
-  .sk-row .l1 { height: 16px; margin-top: 6px; }
-  .sk-row .l2 { width: 30%; height: 13px; margin-top: 18px; }
-  .sk-row .l3 { width: 22%; height: 13px; margin-top: 10px; margin-bottom: 0; }
-  .hi-cv.sk { border-radius: 10px; }
+  /* 骨架：一条组标题（和 .hg-hd 一样高、在同一个位置）+ 视频网格的骨架（第一行卡片的上沿和真网格对齐，数据回来时不跳） */
+  .hg-sk-hd { max-width: var(--desk-max); margin: 0 auto; padding: 4px var(--desk-pad) 0; }
+  .hg-sk-hd .sk { display: block; width: 40px; height: 16px; margin: 4px 0; }
+  .hg-sk { padding-top: 16px; }
+  /* 卡片有信息行时标题不固定占两行（VideoCard 的 .has-meta），骨架跟着：一行标题 + 信息行，和大多数卡片一样高 */
+  .hg-sk :deep(.tt) { min-height: 0; }
 }
 @media (min-width: 1024px) and (hover: hover) {
   .hd-act { transition: background-color var(--dur-2) var(--ease-out), opacity var(--dur-1) var(--ease-out); }
   .hd-act:not(:disabled):hover { background: #1f1f1f; }
-  .hi-link { transition: background-color var(--dur-2) var(--ease-out); }
-  .hi-row:hover .hi-link { background: #121212; }
-  .hi-tt { transition: color var(--dur-2) var(--ease-out); }
-  .hi-row:hover .hi-tt { color: var(--t1); }
-  /* 封面在自己的圆角里放大一点（和视频卡片一样，只放大照片） */
-  .hi-cv > :deep(img) { transition: opacity var(--dur-3) var(--ease-out), filter var(--dur-3) var(--ease-out), transform var(--dur-4) var(--ease-out); }
-  .hi-cv > :deep(img.now) { transition: transform var(--dur-4) var(--ease-out); }
-  .hi-row:hover .hi-cv > :deep(img) { transform: scale(1.03); }
-  /* × 平时藏着，移到这一行上（或键盘聚焦到这一行里）才出现 */
-  .hi-del { opacity: 0; transition: opacity var(--dur-2) var(--ease-out), color var(--dur-1) var(--ease-out), background-color var(--dur-2) var(--ease-out); }
-  .hi-row:hover .hi-del, .hi-row:focus-within .hi-del { opacity: 1; }
-  .hi-del:hover { background: #1f1f1f; color: var(--t1); }
-  .undo { transition: background-color var(--dur-2) var(--ease-out), opacity var(--dur-1) var(--ease-out); }
-  .undo:not(:disabled):hover { background: #1f1f1f; }
 }
 </style>
